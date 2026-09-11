@@ -1,0 +1,94 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  backend:
+    name: Backend tests
+    runs-on: ubuntu-latest
+
+    # A real Postgres, not SQLite. Guardrail 1 depends on SELECT ... FOR UPDATE,
+    # which SQLite does not implement — CI on SQLite would go green while the
+    # double-award race stayed open in production.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: linx
+          POSTGRES_PASSWORD: linx
+          POSTGRES_DB: linx_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      TEST_DATABASE_URL: postgresql+psycopg://linx:linx@localhost:5432/linx_test
+      SECRET_KEY: ci-only-secret-key
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+
+      - name: Install dependencies
+        working-directory: backend
+        run: pip install -r requirements-dev.txt
+
+      - name: Run tests
+        working-directory: backend
+        run: pytest -q
+
+      - name: Check for schema drift between the models and the migrations
+        working-directory: backend
+        env:
+          DATABASE_URL: postgresql+psycopg://linx:linx@localhost:5432/linx_test
+        run: |
+          alembic upgrade head
+          alembic check
+
+      - name: Check for a second Alembic head
+        working-directory: backend
+        env:
+          DATABASE_URL: postgresql+psycopg://linx:linx@localhost:5432/linx_test
+        run: |
+          heads=$(alembic heads | grep -c '(head)')
+          if [ "$heads" -ne 1 ]; then
+            echo "Expected exactly one Alembic head, found $heads:"
+            alembic heads
+            exit 1
+          fi
+
+  frontend:
+    name: Frontend build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Lint
+        working-directory: frontend
+        run: npm run lint
+
+      - name: Build
+        working-directory: frontend
+        run: npm run build

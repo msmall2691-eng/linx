@@ -1,0 +1,277 @@
+# linx — engineering guide
+
+A two-sided marketplace connecting short-term-rental (STR) property owners with
+independent cleaners for turnover cleanings. One category, one region at launch,
+a standing bid-and-award relationship rather than one-off lead sales.
+
+**This repository is fully standalone.** It does not import from, read from, or
+assume the existence of any other project. If another codebase is visible in
+your environment, ignore it entirely — nothing here may depend on it. That
+isolation is what makes the liability separation real, not just the branding.
+
+---
+
+## The three guardrails
+
+These are not style preferences. Each one exists because the failure it prevents
+is silent, expensive, and discovered in production. Read them before writing
+feature code, and re-read #3 before deleting anything.
+
+### Guardrail 1 — Concurrency on any action that awards work
+
+Any action that awards work to exactly one party must hold a database row lock
+across the whole check-then-write, not just the write.
+
+When an owner accepts a bid:
+
+1. Open a transaction.
+2. Take `SELECT ... FOR UPDATE` on the `Turnover` row **before checking anything
+   about it**. In SQLAlchemy 2.0: `session.execute(select(Turnover).where(Turnover.id == turnover_id).with_for_update())`.
+3. Inside that lock, verify the turnover is not already awarded. If it is,
+   reject the accept.
+4. If it is not, create the `Award` row and mark the `Turnover` awarded.
+5. Commit — all of it in the same transaction.
+
+Because the row is locked for the entire check-then-write, two near-simultaneous
+accepts on two different bids for the same turnover cannot both succeed. The
+second one to acquire the lock sees the turnover already awarded and is
+rejected. Checking first and locking later is the bug: both requests read
+"not awarded" before either writes.
+
+If any step must commit partway through (for example, to trigger a side effect
+before finalizing), **re-read the row fresh under the lock afterward**. Never
+trust an in-memory copy across a commit boundary — it is stale by definition.
+
+There is a test for this: two simultaneous accepts on different bids for the
+same turnover, asserting exactly one wins. It must keep passing.
+
+### Guardrail 2 — Idempotency on any Stripe call that could be retried
+
+Every Stripe call that could plausibly be retried — charging a `PaymentIntent`,
+creating a `Transfer`, issuing a refund — must:
+
+1. **Pass an `idempotency_key` derived from a stable identifier already in the
+   database** — the `Award` id or `Turnover` id, plus a constant naming the
+   operation (e.g. `f"charge:award:{award.id}"`). **Never a freshly generated
+   value.** A genuine retry has to produce the *same* key to be recognized as a
+   retry rather than a new charge. A `uuid4()` per attempt defeats the entire
+   mechanism and bills the customer twice.
+
+2. **Write the attempted state to the row before making the network call** —
+   e.g. set `payment_attempted_at` and commit, *then* call Stripe. If the
+   process crashes mid-call, that row is left visibly flagged for manual review
+   instead of looking untouched. An unknown outcome must never be assumed
+   successful or assumed failed.
+
+Related money rules, for when payments land (phase 6):
+
+- Use a **Stripe Connect destination charge**, not two independent transactions.
+  One `PaymentIntent` with `transfer_data` pointing at the cleaner's connected
+  account and `application_fee_amount` as the platform cut. Stripe settles the
+  split atomically. Never build "collect from owner" and "pay cleaner" as two
+  separate ledger entries reconciled later — the gap between them is exactly
+  where double-payments and silent drift live.
+- Use **Express** connected accounts, not Custom. Express puts identity
+  verification and 1099 reporting on Stripe. Custom puts them on us.
+- **Refunds get their own deliberately designed path**, written and tested
+  before launch. Refunding a destination charge must decide what happens to the
+  `application_fee_amount` and to already-transferred cleaner funds; it is not a
+  simple reversal.
+- All money is stored as **integer cents**. No floats, anywhere, ever.
+
+### Guardrail 3 — Before removing a step from any existing flow, find out what depends on it
+
+This is a process rule, not a code pattern. It matters as much as the other two.
+
+If a change deletes or bypasses something — an approval step, a notification, a
+status transition, a permission check, a validation — **search the codebase
+first for what else assumes that step happens**, and note what you found in the
+change description (commit message or PR body).
+
+Concretely, before the change ships:
+
+- Grep for the function, field, status value, or event name being removed.
+- Check for code that reads the state the removed step used to write.
+- Check for tests that assert the step happened.
+- Write down, in the PR, what depends on it and why removing it is still safe.
+
+The failure this prevents is silent: something downstream kept working by
+accident until it didn't, and nothing failed loudly at the moment of the change.
+
+---
+
+## Stack
+
+| Layer | Choice |
+|---|---|
+| Backend | FastAPI, SQLAlchemy 2.0 (typed `Mapped[]` style), Alembic |
+| Database | PostgreSQL (production **and** tests — see below) |
+| Frontend | React 18, Vite, Tailwind CSS |
+| Auth | JWT, role-gated (owner / cleaner / admin) |
+| Deploy | Single container; the backend serves the built frontend. Railway, its own project, its own Postgres. |
+
+**Tests run against real Postgres, not SQLite.** Guardrail 1 depends on
+`SELECT ... FOR UPDATE`, which SQLite does not implement — a test suite on
+SQLite would pass while the production race condition stayed wide open. See
+`backend/tests/conftest.py`.
+
+---
+
+## Domain model
+
+This is a two-sided marketplace, not multi-tenant SaaS. Everyone shares one
+marketplace; the boundary that matters is **role** (owner / cleaner / admin),
+not tenant. There is deliberately no `org_id`-style scoping.
+
+| Table | Purpose |
+|---|---|
+| `users` | One table for all three roles, role-gated |
+| `cleaner_profiles` | Bio, service-area lat/lng + radius, vetting statuses, `can_take_jobs` |
+| `properties` | Belongs to an owner |
+| `turnovers` | A cleaning job: checkout/checkin times, status, `urgency` |
+| `bids` | A cleaner names a price on a turnover |
+| `awards` | One row per turnover, set once — guardrail 1 governs this |
+| `documents` | Cleaner vetting uploads (id / insurance / reference), admin-reviewed |
+| `reviews` | Mutual, delayed reveal |
+| `payments_in` | Collects from the owner |
+| `payouts` | Pays the cleaner |
+
+Two fields carry more weight than they look like they do:
+
+- **`cleaner_profiles.can_take_jobs`** is a single honest boolean, computed from
+  the vetting statuses, and checked in **exactly one place**
+  (`CleanerProfile.compute_can_take_jobs`). A bidding gate and a display badge
+  that can disagree with each other is a real trap — one says "verified" while
+  the other silently blocks bids, and nobody can tell which is lying. Never
+  re-derive this rule inline anywhere else.
+
+- **`turnovers.urgency`** is derived from how close checkout is to the next
+  checkin (or to now, for a standing vacancy). The closer, the more urgent. This
+  ladder is the product's core pricing and priority signal — it is not
+  decoration.
+
+---
+
+## Trust & safety rules that constrain the code
+
+- **ID verification is manual at launch.** A human reviews an uploaded photo ID
+  and one reference before a cleaner can bid. Do not automate this away at MVP.
+  It is the safety valve between "hands off" and "anyone can walk into a
+  stranger's house."
+- **A real background check, not just an ID photo.** A photo ID confirms
+  identity, not history. `background_check_status` gates bidding.
+- **Insurance / COI is a flag, not a gate, at v1.** Requiring it up front while
+  supply is scarce kills the launch. Show it prominently as missing instead.
+- **Reviews are mutual and delayed.** Neither side's review is visible until
+  both are submitted or a timeout passes. Show-immediately systems create an
+  incentive to leave a pre-emptive bad review to suppress the other side's.
+- **Disputes go to a human inbox, not a bot, at v1.**
+- **No-show / cancellation policy is defined before launch.** A late
+  cancellation flags the turnover urgent, re-opens it to the bench, and alerts
+  the owner and admin immediately — never silently.
+
+## Notification events — named now, built in phase 5
+
+Missing and duplicated notifications cost more than missing features. The list
+is fixed before the feature is built:
+
+- New turnover posted within a cleaner's service radius
+- Bid received (owner)
+- Bid accepted (cleaner) / bid declined (cleaner)
+- Turnover reminder, day-of, both sides
+- Cleaner cancels close to checkout → urgent re-post + alert to owner and admin
+- Turnover unclaimed past a defined cutoff → alert to owner and admin
+- Payment receipt (owner) / payout notice (cleaner)
+- Review received (both directions, once visible)
+
+---
+
+## Explicitly out of scope for v1
+
+Do not build toward these:
+
+- Non-STR recurring residential cleaning
+- Automated dispute resolution
+- Rating-weighted search ranking
+- Multi-region logic — one region is hardcoded
+- Native mobile apps — responsive web only
+- In-app messaging — email/SMS notifications are enough at this size
+
+---
+
+## Phased build plan
+
+Each phase is reviewed before the next begins. Do not get ahead of the current
+phase.
+
+| Phase | Scope | Status |
+|---|---|---|
+| 1 | Scaffolding, JWT role auth, full schema migration | **done** |
+| 2 | Owner side: properties & turnovers, with `urgency` | not started |
+| 3 | Cleaner side: profile, vetting docs, background check, admin review queue, bidding | not started |
+| 4 | Award + guardrail-1 concurrency + no-show / cancellation path | not started |
+| 5 | Notifications (the event list above) | not started |
+| 6 | Stripe Connect, test mode end to end, refunds, reconciliation | not started |
+| 7 | Mutual delayed-reveal reviews | not started |
+| 8 | Admin console — vetting queue, dispute inbox, unclaimed alerts, ledger | not started |
+| 9 | Pilot launch checklist — new Connect platform account under the new entity | not started |
+
+**Phase 1 built the schema for every table, with no business logic.** Tables for
+later phases exist and are empty on purpose. The shape is settled now; the
+behavior arrives in its own phase.
+
+## Stripe
+
+All Stripe work happens in **test mode** until the go-live gate. Test mode is
+fully sandboxed — no EIN, no SSN, no real money. The line that must not be
+crossed: **do not run real pilot transactions in live mode under a personal SSN
+or an existing company's EIN.** That would route money legally through an
+individual rather than the new entity, undoing the separation this project
+exists for. Going live means opening a **new, separate Connect platform account
+under the new entity** — not migrating an existing one.
+
+---
+
+## Carry-over test list
+
+Written down from day one, built with their phases:
+
+- Double-award concurrency test (guardrail 1) — two simultaneous accepts, exactly one wins
+- No-show / late-cancellation re-post — turnover reopens urgent, owner and admin both alerted
+- Stripe idempotency — replay the same charge attempt, assert no duplicate
+- Collected-vs-paid-out reconciliation — collected always equals payout + platform fee, no drift
+- Refund path — fee and transfer both resolve, nothing left stranded
+- Mutual review reveal — a one-sided review never shows before the other side submits or the timeout passes
+- A real click-through of bid → award → payment, not just "the button renders"
+
+---
+
+## Working in this repo
+
+```bash
+# backend
+cd backend
+python -m venv .venv && . .venv/bin/activate
+pip install -r requirements-dev.txt
+alembic upgrade head
+uvicorn app.main:app --reload      # http://localhost:8000
+
+# tests (needs Postgres — see backend/tests/conftest.py)
+pytest
+
+# frontend
+cd frontend
+npm install
+npm run dev                        # http://localhost:5173, proxies /api to :8000
+```
+
+Conventions:
+
+- Money is integer cents. Never a float.
+- Timestamps are timezone-aware UTC (`TIMESTAMP WITH TIME ZONE`).
+- Enums live in `app/models/enums.py` as Python `str, Enum` and as native
+  Postgres enum types. Adding a value means a migration.
+- Every schema change gets an Alembic migration. Never edit a migration that has
+  already run anywhere but your own machine.
+- One Alembic head. Two heads only fail at deploy time, which is the worst place
+  to find out.
