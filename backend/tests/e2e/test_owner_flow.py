@@ -7,6 +7,7 @@ would actually see after the click.
 
 from __future__ import annotations
 
+import re
 import uuid
 
 import pytest
@@ -25,6 +26,15 @@ PASSWORD = "correct-horse-battery"
 # which made it a race rather than an honest failure.
 STATUS_BADGE = "status-badge"
 URGENCY_BADGE = "urgency-badge"
+
+# Wait for the *detail* route, matched by its id segment.
+#
+# A glob like "**/turnovers/**" also matches "/turnovers/new" — the page being
+# submitted — so the wait returns instantly and the next `goto` can abort the
+# create request that is still in flight. The row is never written, and the test
+# fails somewhere further along with no sign of why.
+PROPERTY_DETAIL = re.compile(r"/properties/[0-9a-fA-F-]{36}$")
+TURNOVER_DETAIL = re.compile(r"/turnovers/[0-9a-fA-F-]{36}$")
 
 
 def _signup_owner(page, base_url: str) -> str:
@@ -49,7 +59,13 @@ def _add_property(page, base_url: str, nickname: str = "Seaside Cottage") -> Non
     page.fill("#bathrooms", "1.5")
     page.fill("#access_notes", "Lockbox on the rail, code 4417.")
     page.click("button[type=submit]")
-    page.wait_for_url("**/properties/**")
+
+    # Wait on the thing that can only be true once the row exists: the detail
+    # route, and the detail page rendered from it. A helper that returns before
+    # its own work has landed poisons every step after it, somewhere far from
+    # the cause.
+    page.wait_for_url(PROPERTY_DETAIL)
+    expect(page.get_by_role("heading", name=nickname)).to_be_visible()
 
 
 def test_a_new_owner_can_go_from_signup_to_a_posted_turnover(page, live_server) -> None:
@@ -79,7 +95,7 @@ def test_a_new_owner_can_go_from_signup_to_a_posted_turnover(page, live_server) 
     expect(page.get_by_text("5 hours between guests")).to_be_visible()
 
     page.click("button[type=submit]")
-    page.wait_for_url("**/turnovers/**")
+    page.wait_for_url(TURNOVER_DETAIL)
 
     expect(page.get_by_text("Same-day turnaround")).to_be_visible()
     expect(page.get_by_test_id(URGENCY_BADGE)).to_have_text("Same day")
@@ -104,7 +120,7 @@ def test_a_draft_is_not_posted_until_the_owner_posts_it(page, live_server) -> No
     page.fill("#checkout_at", "2026-11-20T10:00")
     page.get_by_label("Post it to cleaners now").uncheck()
     page.click("button[type=submit]")
-    page.wait_for_url("**/turnovers/**")
+    page.wait_for_url(TURNOVER_DETAIL)
 
     expect(page.get_by_test_id(STATUS_BADGE)).to_have_text("Draft")
     expect(page.get_by_text("Nobody can see this draft yet.")).to_be_visible()
@@ -127,7 +143,7 @@ def test_cancelling_leaves_the_page_readable(page, live_server) -> None:
     page.goto(f"{live_server}/turnovers/new")
     page.fill("#checkout_at", "2026-12-02T10:00")
     page.click("button[type=submit]")
-    page.wait_for_url("**/turnovers/**")
+    page.wait_for_url(TURNOVER_DETAIL)
 
     page.get_by_role("button", name="Cancel this turnover").click()
     page.fill("#reason", "Guest extended their stay.")
@@ -156,11 +172,11 @@ def test_archiving_is_refused_while_a_turnover_is_still_scheduled(
     page.goto(f"{live_server}/turnovers/new")
     page.fill("#checkout_at", "2026-12-15T10:00")
     page.click("button[type=submit]")
-    page.wait_for_url("**/turnovers/**")
+    page.wait_for_url(TURNOVER_DETAIL)
 
     page.goto(f"{live_server}/properties")
     page.get_by_text("Seaside Cottage").click()
-    page.wait_for_url("**/properties/**")
+    page.wait_for_url(PROPERTY_DETAIL)
 
     # The browser logs the deliberate 409 as a console error.
     page.expected_errors.append("409 (Conflict)")

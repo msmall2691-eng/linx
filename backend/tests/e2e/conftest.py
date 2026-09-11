@@ -133,9 +133,29 @@ def page(browser, live_server):
     A blank screen after a successful request produces no server-side signal at
     all. The only place it shows up is the browser console, so anything logged
     there is treated as a failure unless the test says otherwise.
+
+    Set `LINX_E2E_SLOW_API_MS` to delay writes by that many milliseconds. A CI
+    runner is slower than a laptop, and that gap is where these tests have gone
+    wrong before — a step moving on before the request it depended on had
+    landed. It is the first thing to reach for when the suite is green locally
+    and red in CI.
     """
     context = browser.new_context(viewport={"width": 1100, "height": 900})
     page = context.new_page()
+
+    slow_api_ms = int(os.environ.get("LINX_E2E_SLOW_API_MS", "0"))
+    if slow_api_ms:
+
+        def _delay_api(route):
+            # Only writes. Delaying reads as well would slow the follow-up GET
+            # by the same amount and preserve the ordering, which hides exactly
+            # the race this is meant to expose: a create still in flight when
+            # the next page asks whether it exists.
+            if route.request.method in ("POST", "PATCH", "PUT", "DELETE"):
+                time.sleep(slow_api_ms / 1000)
+            route.continue_()
+
+        page.route("**/api/**", _delay_api)
 
     page.errors = []
     page.on("pageerror", lambda e: page.errors.append(f"pageerror: {e}"))
