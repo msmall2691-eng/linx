@@ -1,11 +1,10 @@
 import { useState } from 'react'
-import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom'
+import { Link, Navigate, useLocation } from 'react-router-dom'
 
 import { useAuth } from '../lib/auth.jsx'
 
 export default function Login() {
   const { user, login } = useAuth()
-  const navigate = useNavigate()
   const location = useLocation()
 
   const [email, setEmail] = useState('')
@@ -13,7 +12,20 @@ export default function Login() {
   const [error, setError] = useState(null)
   const [submitting, setSubmitting] = useState(false)
 
-  if (user) return <Navigate to="/dashboard" replace />
+  // Where a successful login lands, decided once.
+  //
+  // The route guard sends you here with the page you were heading for in
+  // router state, so that is the destination; the dashboard is the fallback
+  // for someone who came to the login page on purpose.
+  //
+  // This redirect is the only thing that navigates. Pairing it with an
+  // imperative navigate() in the submit handler put two authors on one
+  // decision and made the outcome a race — one that react-router 6 and 7
+  // happened to resolve differently, so "log in, land back where you were
+  // heading" silently became "always land on the dashboard".
+  const destination = location.state?.from ?? '/dashboard'
+
+  if (user) return <Navigate to={destination} replace />
 
   async function handleSubmit(event) {
     event.preventDefault()
@@ -21,10 +33,10 @@ export default function Login() {
     setSubmitting(true)
     try {
       await login(email, password)
-      navigate(location.state?.from ?? '/dashboard', { replace: true })
+      // No navigate() here: setting the user re-renders, and the redirect
+      // above takes it from there.
     } catch (err) {
       setError(err.message)
-    } finally {
       setSubmitting(false)
     }
   }

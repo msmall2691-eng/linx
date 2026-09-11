@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Link, Navigate, useNavigate, useSearchParams } from 'react-router-dom'
+import { Link, Navigate, useSearchParams } from 'react-router-dom'
 
 import { useAuth } from '../lib/auth.jsx'
 
@@ -14,7 +14,6 @@ const ROLES = [
 
 export default function Signup() {
   const { user, signup } = useAuth()
-  const navigate = useNavigate()
   const [searchParams] = useSearchParams()
 
   const roleFromUrl = searchParams.get('role')
@@ -46,10 +45,9 @@ export default function Signup() {
         password: form.password,
         role: form.role,
       })
-      navigate('/dashboard', { replace: true })
+      // As in Login: the redirect above owns where a new account lands.
     } catch (err) {
       setError(err.message)
-    } finally {
       setSubmitting(false)
     }
   }
