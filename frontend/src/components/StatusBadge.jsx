@@ -19,6 +19,7 @@ const LABELS = {
 export default function StatusBadge({ status, className = '' }) {
   return (
     <span
+      data-testid="status-badge"
       className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${
         STYLES[status] ?? STYLES.draft
       } ${className}`}

@@ -18,6 +18,14 @@ pytestmark = pytest.mark.e2e
 
 PASSWORD = "correct-horse-battery"
 
+# Badge state is asserted through `data-testid`, never through free text.
+# Playwright matches text by substring and case-insensitively, so
+# `get_by_text("Draft")` also matches the sentence "Nobody can see this draft
+# yet." — a strict-mode violation that only shows up once both have rendered,
+# which made it a race rather than an honest failure.
+STATUS_BADGE = "status-badge"
+URGENCY_BADGE = "urgency-badge"
+
 
 def _signup_owner(page, base_url: str) -> str:
     email = f"owner-{uuid.uuid4().hex[:10]}@example.com"
@@ -67,14 +75,15 @@ def test_a_new_owner_can_go_from_signup_to_a_posted_turnover(page, live_server) 
 
     # The ladder is visible while the owner can still change the times, which is
     # the only moment the information is worth anything.
-    expect(page.get_by_text("Same day")).to_be_visible()
+    expect(page.get_by_test_id(URGENCY_BADGE)).to_have_text("Same day")
     expect(page.get_by_text("5 hours between guests")).to_be_visible()
 
     page.click("button[type=submit]")
     page.wait_for_url("**/turnovers/**")
 
     expect(page.get_by_text("Same-day turnaround")).to_be_visible()
-    expect(page.get_by_text("Taking bids")).to_be_visible()
+    expect(page.get_by_test_id(URGENCY_BADGE)).to_have_text("Same day")
+    expect(page.get_by_test_id(STATUS_BADGE)).to_have_text("Taking bids")
     expect(page.get_by_text("$145")).to_be_visible()
     expect(page.get_by_text("Guests had a dog.")).to_be_visible()
 
@@ -84,7 +93,7 @@ def test_a_new_owner_can_go_from_signup_to_a_posted_turnover(page, live_server) 
 
     page.goto(f"{live_server}/turnovers")
     expect(page.get_by_text("Seaside Cottage")).to_be_visible()
-    expect(page.get_by_text("Same day")).to_be_visible()
+    expect(page.get_by_test_id(URGENCY_BADGE)).to_have_text("Same day")
 
 
 def test_a_draft_is_not_posted_until_the_owner_posts_it(page, live_server) -> None:
@@ -97,11 +106,12 @@ def test_a_draft_is_not_posted_until_the_owner_posts_it(page, live_server) -> No
     page.click("button[type=submit]")
     page.wait_for_url("**/turnovers/**")
 
-    expect(page.get_by_text("Draft")).to_be_visible()
+    expect(page.get_by_test_id(STATUS_BADGE)).to_have_text("Draft")
     expect(page.get_by_text("Nobody can see this draft yet.")).to_be_visible()
 
     page.get_by_role("button", name="Post it to cleaners").click()
-    expect(page.get_by_text("Taking bids")).to_be_visible()
+    expect(page.get_by_test_id(STATUS_BADGE)).to_have_text("Taking bids")
+    expect(page.get_by_text("Nobody can see this draft yet.")).to_have_count(0)
 
 
 def test_cancelling_leaves_the_page_readable(page, live_server) -> None:
@@ -125,11 +135,11 @@ def test_cancelling_leaves_the_page_readable(page, live_server) -> None:
 
     # The page still renders, and it says what happened.
     expect(page.get_by_role("heading", name="Seaside Cottage")).to_be_visible()
-    expect(page.get_by_text("Cancelled").first).to_be_visible()
+    expect(page.get_by_test_id(STATUS_BADGE)).to_have_text("Cancelled")
     expect(page.get_by_text("Guest extended their stay.")).to_be_visible()
 
     # An urgency badge on a dead job is an alarm about nothing.
-    expect(page.get_by_text("Same day")).to_have_count(0)
+    expect(page.get_by_test_id(URGENCY_BADGE)).to_have_count(0)
 
 
 def test_archiving_is_refused_while_a_turnover_is_still_scheduled(

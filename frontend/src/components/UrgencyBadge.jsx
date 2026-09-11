@@ -19,6 +19,7 @@ const LABELS = {
 export default function UrgencyBadge({ urgency, className = '' }) {
   return (
     <span
+      data-testid="urgency-badge"
       className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-semibold ${
         STYLES[urgency] ?? STYLES.standard
       } ${className}`}
