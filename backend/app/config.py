@@ -35,6 +35,10 @@ class Settings(BaseSettings):
 
     # Single region at launch — no multi-region logic anywhere (see CLAUDE.md).
     region_name: str = "Greater Portland, ME"
+    #: IANA timezone for that region. "Same day" and every date a person reads
+    #: are answered in local time; a 4pm checkout and a 10pm checkin are one day
+    #: in Portland and two in UTC.
+    region_timezone: str = "America/New_York"
 
     # Comma-separated list, or "*" in development.
     cors_origins: str = "http://localhost:5173"

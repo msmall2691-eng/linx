@@ -115,6 +115,21 @@ accident until it didn't, and nothing failed loudly at the moment of the change.
 SQLite would pass while the production race condition stayed wide open. See
 `backend/tests/conftest.py`.
 
+**There are browser tests, and they earn their keep.** `backend/tests/e2e/`
+drives the real app in a real browser. They exist because one class of bug is
+invisible to endpoint tests: an action that returns 200 while the screen it
+belongs to goes blank. Exactly that shipped in the first pass at phase 2 — the
+cancel endpoint answered with a smaller shape than the GET, the frontend
+replaced its state with it, and the next render read a field off `undefined`.
+Green suite, clean server log, dead page. They are opt-in locally (`LINX_E2E=1`,
+a frontend build, playwright) and run as their own CI job.
+
+**One shape per resource.** Every endpoint returning a single turnover returns
+`TurnoverDetailOut`; only the list returns the lighter `TurnoverOut`. A detail
+screen replaces its state with whatever an action answers, so an action that
+returns less than the GET silently drops a field and blanks the page. Any new
+resource with a detail screen follows the same rule.
+
 ---
 
 ## Domain model
@@ -149,6 +164,29 @@ Two fields carry more weight than they look like they do:
   checkin (or to now, for a standing vacancy). The closer, the more urgent. This
   ladder is the product's core pricing and priority signal — it is not
   decoration.
+
+  `app/services/urgency.py` is the only place that decides, and
+  `app/services/turnovers.py` owns the only writes to the column. Two separate
+  measures, because a turnover means different things depending on whether the
+  next guest is booked: with a checkin, the window between the two *is* the job;
+  without one, the signal is how soon checkout itself arrives. The rungs:
+
+  | Rung | Condition |
+  |---|---|
+  | `same_day` | checkin lands on the same **region-local** calendar day as checkout |
+  | `urgent` | window (or lead time) under 24h — including a checkout already past |
+  | `soon` | under 72h |
+  | `standard` | anything else |
+
+  "Same day" is answered in `REGION_TIMEZONE`, never UTC: a 4pm checkout and a
+  10pm checkin are one day in Portland and two in UTC. The API refuses naive
+  timestamps rather than guessing, and the frontend converts a `datetime-local`
+  input through the region's zone — an owner who lives in California must not
+  post a Portland checkout three hours off.
+
+  The "nobody has claimed this and checkout is tomorrow" alarm is deliberately
+  **not** urgency. That is an operational alert with its own cutoff and its own
+  recipients, and it belongs to the unclaimed-turnover path in phase 4.
 
 ---
 
@@ -207,7 +245,7 @@ phase.
 | Phase | Scope | Status |
 |---|---|---|
 | 1 | Scaffolding, JWT role auth, full schema migration | **done** |
-| 2 | Owner side: properties & turnovers, with `urgency` | not started |
+| 2 | Owner side: properties & turnovers, with `urgency` | **done** |
 | 3 | Cleaner side: profile, vetting docs, background check, admin review queue, bidding | not started |
 | 4 | Award + guardrail-1 concurrency + no-show / cancellation path | not started |
 | 5 | Notifications (the event list above) | not started |
@@ -268,6 +306,11 @@ npm run dev                        # http://localhost:5173, proxies /api to :800
 Conventions:
 
 - Money is integer cents. Never a float.
+- Derived fields (`can_take_jobs`, `urgency`) have exactly one author. Never
+  re-derive one inline; call the function that owns it.
+- Owner-scoped rows are fetched by id **and** owner in one query, never fetched
+  then checked. Something that belongs to someone else answers 404, not 403 — a
+  403 confirms the id exists.
 - Timestamps are timezone-aware UTC (`TIMESTAMP WITH TIME ZONE`).
 - Enums live in `app/models/enums.py` as Python `str, Enum` and as native
   Postgres enum types. Adding a value means a migration.
