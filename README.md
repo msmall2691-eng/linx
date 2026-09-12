@@ -12,7 +12,7 @@ reference to any other codebase.
 
 ---
 
-## Status: phase 2 — the owner's side
+## Status: phase 3 — the cleaner's side
 
 What works today:
 
@@ -24,12 +24,20 @@ What works today:
   next checkin, keep it as a draft or put it on the bench, reschedule it, cancel
   it. The **urgency ladder** is derived server-side from how close checkout is
   to the next checkin, in region-local time.
+- **Cleaner profiles** — service area as a point and a radius, vetting document
+  uploads (ID / insurance / reference), and a background-check step.
+- **An admin vetting queue** — a human reviews a photo ID and a reference and
+  records the background-check result. Nothing here can override the bidding
+  gate: `can_take_jobs` is computed by Postgres from the two statuses.
+- **The bench board and bidding** — open turnovers inside a cleaner's radius,
+  most urgent first, with the street address and access notes withheld until a
+  job is awarded. A cleared cleaner names a price.
 - The full v1 database schema — all ten tables — created by one Alembic
   migration. Tables belonging to later phases exist and are empty on purpose.
 - A single-container deploy: the backend serves the built frontend.
-- 122 tests against real PostgreSQL, plus 4 browser click-throughs.
+- 209 tests against real PostgreSQL, plus 5 browser click-throughs.
 
-Bidding, awarding, payments, notifications, and reviews are **not** built yet.
+Awarding, payments, notifications, and reviews are **not** built yet.
 Each is its own phase, reviewed before the next begins — see the phase table in
 [`CLAUDE.md`](CLAUDE.md).
 
@@ -151,6 +159,12 @@ One Railway service, one Postgres, nothing shared with any other project.
    | `CORS_ORIGINS` | your deployed origin |
    | `REGION_NAME` | the pilot region |
    | `REGION_TIMEZONE` | its IANA zone, e.g. `America/New_York` |
+   | `DOCUMENT_STORAGE_DIR` | a path on a **mounted volume** — see below |
+
+   **Vetting documents need a Railway volume.** Mount one and point
+   `DOCUMENT_STORAGE_DIR` at it. Without a volume the container filesystem is
+   replaced on every deploy and uploaded IDs disappear while their database rows
+   survive, so the admin queue ends up pointing at files that are gone.
 
    Startup refuses to run with the development `SECRET_KEY` when
    `ENVIRONMENT=production`.
@@ -183,6 +197,10 @@ backend/
     schemas/           Pydantic request/response shapes
     services/urgency.py  the one place that decides the urgency ladder
     services/turnovers.py  the only writes to the derived columns
+    services/vetting.py  the one place that says why a cleaner can or cannot bid
+    services/geo.py      service-radius distance, in Python and in SQL
+    services/storage.py  vetting documents, never on a public path
+    services/background_check.py  Checkr, or manual when no key is set
   alembic/versions/    migrations — one head, always
   tests/               pytest suite, real Postgres
   tests/e2e/           browser click-throughs, opt-in

@@ -1,0 +1,294 @@
+"""The bench board: open turnovers near a cleaner, and bidding on them.
+
+Two rules govern this router.
+
+**The bidding gate is `can_take_jobs`, read in one place.** Every route that
+lets a cleaner act on a job goes through `_require_cleared_profile`, which asks
+`app.services.vetting` — the same function that produces the badge the cleaner
+sees on their own profile. There is no second copy of the rule, so the gate and
+the badge cannot disagree.
+
+**The board shows less than the owner's view.** Responses use the `board`
+schemas, which withhold the street address and the access notes. A cleaner who
+has merely bid has not been hired and has no business holding the gate code.
+"""
+
+from __future__ import annotations
+
+import uuid
+from datetime import datetime, timezone
+
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import Float, cast, select
+from sqlalchemy.orm import Session, selectinload
+
+from app.api.deps import require_role
+from app.db import get_db
+from app.models.bid import Bid
+from app.models.cleaner_profile import CleanerProfile
+from app.models.enums import BidStatus, TurnoverStatus, UserRole
+from app.models.property import Property
+from app.models.turnover import Turnover
+from app.models.user import User
+from app.schemas.board import BidCreate, BoardBidOut, BoardPropertyOut, BoardTurnoverOut
+from app.services import vetting
+from app.services.geo import distance_miles_sql, haversine_miles
+from app.services.turnovers import refresh_urgency
+
+router = APIRouter(prefix="/board", tags=["board"])
+
+#: Urgency, most urgent first. Postgres orders a native enum by its declared
+#: order, which runs least-urgent first, so the board asks for it descending.
+URGENCY_DESC = Turnover.urgency.desc()
+
+
+def _require_profile(db: Session, user: User) -> CleanerProfile:
+    profile = db.execute(
+        select(CleanerProfile).where(CleanerProfile.user_id == user.id)
+    ).scalar_one_or_none()
+    if profile is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Set up your cleaner profile first.",
+        )
+    return profile
+
+
+def _require_cleared_profile(db: Session, user: User) -> CleanerProfile:
+    """The bidding gate. One gate, one reason, one source of truth."""
+    profile = _require_profile(db, user)
+    state = vetting.evaluate(profile)
+    if not state.can_take_jobs:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=state.summary)
+    return profile
+
+
+def _serialize(
+    turnover: Turnover, distance: float, own_bid: Bid | None
+) -> BoardTurnoverOut:
+    return BoardTurnoverOut(
+        id=turnover.id,
+        checkout_at=turnover.checkout_at,
+        checkin_at=turnover.checkin_at,
+        is_same_day=turnover.is_same_day,
+        status=turnover.status,
+        urgency=turnover.urgency,
+        owner_budget_cents=turnover.owner_budget_cents,
+        notes=turnover.notes,
+        created_at=turnover.created_at,
+        property=BoardPropertyOut.model_validate(turnover.property),
+        distance_miles=round(distance, 1),
+        my_bid=BoardBidOut.model_validate(own_bid) if own_bid else None,
+    )
+
+
+@router.get("", response_model=list[BoardTurnoverOut])
+def list_open_turnovers(
+    include_past: bool = Query(
+        default=False, description="Include turnovers whose checkout has already passed."
+    ),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+    user: User = Depends(require_role(UserRole.CLEANER)),
+) -> list[BoardTurnoverOut]:
+    """Open turnovers inside the cleaner's service radius.
+
+    Readable by any cleaner with a service area, cleared or not — seeing the
+    work is how someone decides whether finishing vetting is worth it. Bidding
+    is what requires clearance.
+    """
+    profile = _require_profile(db, user)
+    if profile.service_lat is None or profile.service_lng is None:
+        # No point in a radius query without a centre. An empty board with a
+        # warning on the profile beats an arbitrary default location.
+        return []
+
+    distance = distance_miles_sql(
+        profile.service_lat, profile.service_lng, Property.lat, Property.lng
+    )
+
+    stmt = (
+        select(Turnover, distance.label("distance_miles"))
+        .join(Property, Turnover.property_id == Property.id)
+        .options(selectinload(Turnover.property))
+        .where(
+            Turnover.status == TurnoverStatus.OPEN,
+            Property.is_active.is_(True),
+            # A property with no coordinates cannot be placed in a radius.
+            Property.lat.is_not(None),
+            Property.lng.is_not(None),
+            distance <= cast(profile.service_radius_miles, Float),
+        )
+    )
+    if not include_past:
+        stmt = stmt.where(Turnover.checkout_at >= datetime.now(timezone.utc))
+
+    # Most urgent first, then soonest — the order a cleaner filling a day wants.
+    stmt = stmt.order_by(URGENCY_DESC, Turnover.checkout_at).limit(limit).offset(offset)
+
+    rows = db.execute(stmt).all()
+    turnovers = [row[0] for row in rows]
+    refresh_urgency(db, turnovers)
+
+    own_bids: dict = {}
+    if turnovers:
+        own_bids = {
+            bid.turnover_id: bid
+            for bid in db.execute(
+                select(Bid).where(
+                    Bid.cleaner_id == user.id,
+                    Bid.turnover_id.in_([t.id for t in turnovers]),
+                )
+            ).scalars()
+        }
+
+    return [
+        _serialize(turnover, float(row[1]), own_bids.get(turnover.id))
+        for turnover, row in zip(turnovers, rows, strict=True)
+    ]
+
+
+@router.get("/{turnover_id}", response_model=BoardTurnoverOut)
+def read_open_turnover(
+    turnover_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_role(UserRole.CLEANER)),
+) -> BoardTurnoverOut:
+    """One open turnover, in the board's reduced shape."""
+    profile = _require_profile(db, user)
+
+    turnover = db.execute(
+        select(Turnover)
+        .join(Property, Turnover.property_id == Property.id)
+        .options(selectinload(Turnover.property))
+        .where(Turnover.id == turnover_id, Turnover.status == TurnoverStatus.OPEN)
+    ).scalar_one_or_none()
+    if turnover is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Turnover not found")
+
+    refresh_urgency(db, [turnover])
+
+    own_bid = db.execute(
+        select(Bid).where(Bid.turnover_id == turnover.id, Bid.cleaner_id == user.id)
+    ).scalar_one_or_none()
+
+    distance = 0.0
+    if (
+        profile.service_lat is not None
+        and profile.service_lng is not None
+        and turnover.property.lat is not None
+        and turnover.property.lng is not None
+    ):
+        distance = haversine_miles(
+            profile.service_lat,
+            profile.service_lng,
+            turnover.property.lat,
+            turnover.property.lng,
+        )
+
+    return _serialize(turnover, distance, own_bid)
+
+
+@router.put("/{turnover_id}/bid", response_model=BoardBidOut)
+def place_bid(
+    turnover_id: uuid.UUID,
+    payload: BidCreate,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_role(UserRole.CLEANER)),
+) -> Bid:
+    """Name a price, or change the price already named.
+
+    A PUT because a cleaner has at most one bid per turnover — the unique
+    constraint on (turnover_id, cleaner_id) makes that structural, so an owner
+    never sees the same cleaner twice on one job.
+    """
+    _require_cleared_profile(db, user)
+
+    turnover = db.execute(
+        select(Turnover).where(Turnover.id == turnover_id)
+    ).scalar_one_or_none()
+    if turnover is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Turnover not found")
+
+    if turnover.status is not TurnoverStatus.OPEN:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"This turnover is {turnover.status.value} and is no longer taking bids.",
+        )
+
+    existing = db.execute(
+        select(Bid).where(Bid.turnover_id == turnover.id, Bid.cleaner_id == user.id)
+    ).scalar_one_or_none()
+
+    if existing is not None:
+        if existing.status is BidStatus.ACCEPTED:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="This bid has been accepted and can't be changed.",
+            )
+        existing.price_cents = payload.price_cents
+        existing.message = payload.message
+        # Re-offering after a decline or a withdrawal puts it back in front of
+        # the owner rather than leaving a stale status on a fresh price.
+        existing.status = BidStatus.SUBMITTED
+        bid = existing
+    else:
+        bid = Bid(
+            turnover_id=turnover.id,
+            cleaner_id=user.id,
+            price_cents=payload.price_cents,
+            message=payload.message,
+        )
+        db.add(bid)
+
+    db.commit()
+    db.refresh(bid)
+    return bid
+
+
+@router.get("/bids/mine", response_model=list[BoardBidOut])
+def list_my_bids(
+    db: Session = Depends(get_db),
+    user: User = Depends(require_role(UserRole.CLEANER)),
+) -> list[Bid]:
+    return list(
+        db.execute(
+            select(Bid).where(Bid.cleaner_id == user.id).order_by(Bid.created_at.desc())
+        )
+        .scalars()
+        .all()
+    )
+
+
+@router.delete("/{turnover_id}/bid", response_model=BoardBidOut)
+def withdraw_bid(
+    turnover_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_role(UserRole.CLEANER)),
+) -> Bid:
+    """Withdraw a bid the owner has not accepted.
+
+    The row is kept and marked withdrawn rather than deleted: the owner may
+    already be looking at it, and "this cleaner pulled out" is information,
+    where a silently vanishing bid is not.
+    """
+    bid = db.execute(
+        select(Bid).where(Bid.turnover_id == turnover_id, Bid.cleaner_id == user.id)
+    ).scalar_one_or_none()
+    if bid is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Bid not found")
+
+    if bid.status is BidStatus.ACCEPTED:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "This bid has been accepted — you're booked for this turnover. "
+                "Cancelling an awarded job goes through the cancellation flow."
+            ),
+        )
+
+    bid.status = BidStatus.WITHDRAWN
+    db.commit()
+    db.refresh(bid)
+    return bid

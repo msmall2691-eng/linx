@@ -15,8 +15,11 @@ const LINKS = {
     { to: '/turnovers', label: 'Turnovers' },
     { to: '/properties', label: 'Properties' },
   ],
-  cleaner: [],
-  admin: [],
+  cleaner: [
+    { to: '/board', label: 'Open turnovers' },
+    { to: '/cleaner/profile', label: 'Your profile' },
+  ],
+  admin: [{ to: '/admin/vetting', label: 'Vetting queue' }],
 }
 
 export default function Nav() {

@@ -127,48 +127,49 @@ def browser():
 
 
 @pytest.fixture
-def page(browser, live_server):
-    """A fresh page that fails the test on any unexpected browser error.
+def make_page(browser, live_server):
+    """Open an independent browser context, each with its own session.
 
-    A blank screen after a successful request produces no server-side signal at
-    all. The only place it shows up is the browser console, so anything logged
-    there is treated as a failure unless the test says otherwise.
-
-    Set `LINX_E2E_SLOW_API_MS` to delay writes by that many milliseconds. A CI
-    runner is slower than a laptop, and that gap is where these tests have gone
-    wrong before — a step moving on before the request it depended on had
-    landed. It is the first thing to reach for when the suite is green locally
-    and red in CI.
+    A test that wears more than one hat gets one page per role rather than
+    logging in and out of a single session. Contexts have separate storage, so
+    there is no signed-in user to dislodge and no race against the async
+    session restore — and it matches reality, where these are three different
+    people at three different computers.
     """
-    context = browser.new_context(viewport={"width": 1100, "height": 900})
-    page = context.new_page()
+    contexts = []
+    pages = []
 
-    slow_api_ms = int(os.environ.get("LINX_E2E_SLOW_API_MS", "0"))
-    if slow_api_ms:
+    def _make_page():
+        context = browser.new_context(viewport={"width": 1100, "height": 900})
+        contexts.append(context)
+        page = context.new_page()
 
-        def _delay_api(route):
-            # Only writes. Delaying reads as well would slow the follow-up GET
-            # by the same amount and preserve the ordering, which hides exactly
-            # the race this is meant to expose: a create still in flight when
-            # the next page asks whether it exists.
-            if route.request.method in ("POST", "PATCH", "PUT", "DELETE"):
-                time.sleep(slow_api_ms / 1000)
-            route.continue_()
+        page.errors = []
+        page.on("pageerror", lambda e: page.errors.append(f"pageerror: {e}"))
+        page.on(
+            "console",
+            lambda m: page.errors.append(f"console.error: {m.text}")
+            if m.type == "error"
+            else None,
+        )
+        page.expected_errors = ["favicon"]
+        pages.append(page)
+        return page
 
-        page.route("**/api/**", _delay_api)
-
-    page.errors = []
-    page.on("pageerror", lambda e: page.errors.append(f"pageerror: {e}"))
-    page.on(
-        "console",
-        lambda m: page.errors.append(f"console.error: {m.text}") if m.type == "error" else None,
-    )
-    page.expected_errors = ["favicon"]
-
-    yield page
+    yield _make_page
 
     unexpected = [
-        e for e in page.errors if not any(x in e for x in page.expected_errors)
+        error
+        for page in pages
+        for error in page.errors
+        if not any(x in error for x in page.expected_errors)
     ]
-    context.close()
+    for context in contexts:
+        context.close()
     assert not unexpected, "browser reported errors:\n  " + "\n  ".join(unexpected)
+
+
+@pytest.fixture
+def page(make_page):
+    """A single page, for tests that only need one role."""
+    return make_page()

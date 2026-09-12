@@ -153,12 +153,21 @@ not tenant. There is deliberately no `org_id`-style scoping.
 
 Two fields carry more weight than they look like they do:
 
-- **`cleaner_profiles.can_take_jobs`** is a single honest boolean, computed from
-  the vetting statuses, and checked in **exactly one place**
-  (`CleanerProfile.compute_can_take_jobs`). A bidding gate and a display badge
-  that can disagree with each other is a real trap — one says "verified" while
-  the other silently blocks bids, and nobody can tell which is lying. Never
-  re-derive this rule inline anywhere else.
+- **`cleaner_profiles.can_take_jobs`** is a single honest boolean, computed
+  from the vetting statuses. A bidding gate and a display badge that can
+  disagree with each other is a real trap — one says "verified" while the other
+  silently blocks bids, and nobody can tell which is lying.
+
+  It is enforced in two layers, and neither is optional:
+
+  1. The column is a **Postgres generated column**. No application code can
+     write it; `UPDATE ... SET can_take_jobs` errors. There is deliberately no
+     admin endpoint to override it, because an override is precisely how a
+     cleaner ends up able to bid without a finished check.
+  2. **`app/services/vetting.py` turns that boolean into a reason**, and every
+     surface that mentions clearance reads it: the bidding gate, the cleaner's
+     own profile panel, and the admin queue. Never re-derive the rule inline —
+     the frontend renders `vetting` verbatim for the same reason.
 
 - **`turnovers.urgency`** is derived from how close checkout is to the next
   checkin (or to now, for a standing vacancy). The closer, the more urgent. This
@@ -189,6 +198,54 @@ Two fields carry more weight than they look like they do:
   recipients, and it belongs to the unclaimed-turnover path in phase 4.
 
 ---
+
+## The privacy boundary
+
+**A cleaner who has bid has not been hired.** The bench board therefore uses its
+own response shapes (`app/schemas/board.py`) rather than filtering the owner's:
+
+| Shown | Withheld until award |
+|---|---|
+| city, state, ZIP, beds/baths | street address |
+| cleaning notes, timing, urgency | **`access_notes`** — gate codes, lockbox locations |
+| owner's budget, distance in miles | the owner's identity and contact details |
+| the cleaner's **own** bid | any other cleaner's bid or price |
+
+`BoardPropertyOut` is a separate model, not a subset of `PropertyOut`, so adding
+a field to the owner's shape cannot quietly widen what cleaners see — a new
+field has to be added to the board shape deliberately. There are tests that
+assert the lockbox code and street address appear nowhere in the board
+response, including in the rendered page.
+
+**Vetting documents are never on a public path.** Uploads get a generated key
+(never a client-supplied filename, which is a path-traversal primitive), are
+written outside anything the server exposes, and come back only through an
+authenticated endpoint that checks who is asking. On Railway the storage
+directory **must be a mounted volume** — a container filesystem is replaced on
+every deploy, so without one the uploaded IDs vanish while their rows survive.
+
+## Background checks
+
+`app/services/background_check.py`. Three rules:
+
+- **The vendor collects the sensitive data, not us.** Checkr's candidate +
+  invitation flow has the cleaner give their SSN and date of birth to Checkr
+  directly. Neither ever touches this database — the same reasoning as using
+  Stripe Express for payouts.
+- **A "consider" result is never an automatic rejection.** Checkr returns
+  `clear` or `consider`; `consider` means something surfaced that a human must
+  weigh, and acting adversely on it has a legally defined process (FCRA adverse
+  action). It parks in `pending` with a note. Anything unrecognised also parks
+  in `pending` — an unknown vendor state must never read as a clearance.
+- **No key configured means manual, not broken.** Without `CHECKR_API_KEY` the
+  manual provider is used and an admin records the outcome. That is the launch
+  posture, and it means vetting works end to end before a Checkr account exists.
+
+The Checkr HTTP client is **not verified against the live API.** It is written
+to Checkr's documented interface with its response handling covered by tests
+against a mocked transport; no request has ever been made to a real Checkr
+account from this codebase. Walk one candidate through a sandbox key before
+relying on it.
 
 ## Trust & safety rules that constrain the code
 
@@ -246,7 +303,7 @@ phase.
 |---|---|---|
 | 1 | Scaffolding, JWT role auth, full schema migration | **done** |
 | 2 | Owner side: properties & turnovers, with `urgency` | **done** |
-| 3 | Cleaner side: profile, vetting docs, background check, admin review queue, bidding | not started |
+| 3 | Cleaner side: profile, vetting docs, background check, admin review queue, bidding | **done** |
 | 4 | Award + guardrail-1 concurrency + no-show / cancellation path | not started |
 | 5 | Notifications (the event list above) | not started |
 | 6 | Stripe Connect, test mode end to end, refunds, reconciliation | not started |
@@ -310,7 +367,12 @@ Conventions:
   re-derive one inline; call the function that owns it.
 - Owner-scoped rows are fetched by id **and** owner in one query, never fetched
   then checked. Something that belongs to someone else answers 404, not 403 — a
-  403 confirms the id exists.
+  403 confirms the id exists. The same applies to a cleaner's own documents.
+- The session uses `expire_on_commit=False`, so **an already-loaded collection
+  survives a commit unchanged.** Build a response after a write from a freshly
+  read object (`_fresh_detail`, `_entry_after_write`), and never call
+  `expire_all()` *before* a commit — it discards the un-flushed change the
+  commit was supposed to persist. Both of those were real bugs here.
 - Timestamps are timezone-aware UTC (`TIMESTAMP WITH TIME ZONE`).
 - Enums live in `app/models/enums.py` as Python `str, Enum` and as native
   Postgres enum types. Adding a value means a migration.

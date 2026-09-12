@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom'
 
 import StatusBadge from '../components/StatusBadge.jsx'
 import UrgencyBadge from '../components/UrgencyBadge.jsx'
+import VettingPanel from '../components/VettingPanel.jsx'
 import { apiFetch } from '../lib/api.js'
 import { useAuth } from '../lib/auth.jsx'
 import { useTimeZone } from '../lib/config.jsx'
@@ -13,16 +14,84 @@ import { showsUrgency } from '../lib/turnover.js'
 // left blank so the next phase has an explicit target, and so nobody ships a
 // screen that quietly drops one of these.
 const NEXT_UP = {
-  cleaner: [
-    'Finish your profile and set your service area.',
-    'Upload your ID and a reference, and clear a background check.',
-    'Bid on open turnovers near you once you are cleared.',
-  ],
   admin: [
-    'Review ID and background checks waiting in the queue.',
     'Watch for turnovers still unclaimed close to checkout.',
     'Handle disputes and reconcile the payment ledger.',
   ],
+}
+
+function CleanerDashboard() {
+  const [vetting, setVetting] = useState(null)
+  const [openCount, setOpenCount] = useState(null)
+
+  useEffect(() => {
+    apiFetch('/cleaner/profile')
+      .then((profile) => setVetting(profile.vetting))
+      .catch(() => setVetting(null))
+    apiFetch('/board')
+      .then((board) => setOpenCount(board.length))
+      .catch(() => setOpenCount(null))
+  }, [])
+
+  return (
+    <div className="mt-6 space-y-6">
+      {vetting ? (
+        <VettingPanel vetting={vetting} />
+      ) : (
+        <div className="card">
+          <h2 className="font-semibold">Set up your profile</h2>
+          <p className="mt-2 text-sm text-slate-600">
+            Tell us where you work, then upload an ID and a reference so a person can
+            review them.
+          </p>
+          <Link to="/cleaner/profile" className="btn-primary mt-4">
+            Set up your profile
+          </Link>
+        </div>
+      )}
+
+      <div className="flex flex-wrap gap-3">
+        <Link to="/board" className="btn-primary">
+          {openCount === null
+            ? 'Open turnovers'
+            : `Open turnovers near you (${openCount})`}
+        </Link>
+        <Link to="/cleaner/profile" className="btn-secondary">
+          Your profile
+        </Link>
+      </div>
+    </div>
+  )
+}
+
+function AdminDashboard() {
+  const [waiting, setWaiting] = useState(null)
+
+  useEffect(() => {
+    apiFetch('/admin/vetting-queue')
+      .then((queue) => setWaiting(queue.length))
+      .catch(() => setWaiting(null))
+  }, [])
+
+  return (
+    <div className="mt-6 space-y-6">
+      <div className="card">
+        <h2 className="font-semibold">Vetting queue</h2>
+        <p className="mt-2 text-sm text-slate-600">
+          {waiting === null
+            ? 'Cleaners waiting on a review.'
+            : waiting === 0
+              ? 'Nobody is waiting on a review right now.'
+              : `${waiting} cleaner${waiting === 1 ? '' : 's'} waiting on a review. A 1–2 day turnaround only holds if the queue gets worked.`}
+        </p>
+        <Link to="/admin/vetting" className="btn-primary mt-4">
+          Open the queue
+        </Link>
+      </div>
+
+      <ComingSoon steps={NEXT_UP.admin} />
+    </div>
+  )
 }
 
 function OwnerDashboard() {
@@ -151,14 +220,9 @@ export default function Dashboard() {
         Welcome, {user.full_name.split(' ')[0]}
       </h1>
 
-      {user.role === 'owner' ? (
-        <OwnerDashboard />
-      ) : (
-        <>
-          <p className="mt-1 text-slate-600">Here is what comes next.</p>
-          <ComingSoon steps={NEXT_UP[user.role] ?? []} />
-        </>
-      )}
+      {user.role === 'owner' && <OwnerDashboard />}
+      {user.role === 'cleaner' && <CleanerDashboard />}
+      {user.role === 'admin' && <AdminDashboard />}
     </div>
   )
 }
