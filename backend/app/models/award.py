@@ -1,13 +1,21 @@
-"""Awards — one turnover goes to exactly one cleaner, once.
+"""Awards — one turnover goes to exactly one cleaner at a time.
 
-**Guardrail 1 governs writes to this table.** The `turnover_id` unique
-constraint below is the database's backstop, not the mechanism: the mechanism is
+**Guardrail 1 governs writes to this table.** The partial unique index below is
+the database's backstop, not the mechanism: the mechanism is
 `SELECT ... FOR UPDATE` on the `Turnover` row taken *before* checking whether it
 is already awarded, with the check and the insert inside that same lock and
-transaction (see CLAUDE.md). The constraint turns a missed lock into a loud
-error instead of a second award, which is the right failure — but a route that
-relies on catching the constraint violation has already lost the race it was
-supposed to prevent.
+transaction (see CLAUDE.md, and `app.services.awards`). The index turns a missed
+lock into a loud error instead of a second award, which is the right failure —
+but a route that relies on catching the constraint violation has already lost
+the race it was supposed to prevent.
+
+**Why the index is partial rather than a plain unique column.** A cleaner who
+backs out — or does not show up — re-opens the turnover to the bench, and the
+next cleaner to be accepted needs an award row of their own. The invariant that
+actually matters is *at most one **live** award per turnover*, so that is what
+the index says: unique on `turnover_id` `WHERE cancelled_at IS NULL`. Cancelled
+awards stay, because who was booked and who backed out is exactly the history a
+dispute is argued from; deleting the row to free the constraint would erase it.
 """
 
 from __future__ import annotations
@@ -16,7 +24,17 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Integer, func
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    Text,
+    func,
+    text,
+)
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -32,14 +50,19 @@ class Award(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "awards"
     __table_args__ = (
         CheckConstraint("agreed_price_cents > 0", name="agreed_price_positive"),
+        # Guardrail 1's backstop: one live award per turnover, forever.
+        Index(
+            "uq_awards_live_turnover",
+            "turnover_id",
+            unique=True,
+            postgresql_where=text("cancelled_at IS NULL"),
+        ),
     )
 
-    #: Unique — one award per turnover, forever.
     turnover_id: Mapped[uuid.UUID] = mapped_column(
         PGUUID(as_uuid=True),
         ForeignKey("turnovers.id", ondelete="CASCADE"),
         nullable=False,
-        unique=True,
         index=True,
     )
     cleaner_id: Mapped[uuid.UUID] = mapped_column(
@@ -64,9 +87,41 @@ class Award(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
 
-    turnover: Mapped["Turnover"] = relationship(back_populates="award")
-    cleaner: Mapped["User"] = relationship()
+    #: Set when the booking comes undone — the cleaner cancels, the owner calls
+    #: it off, or the cleaner does not turn up. Null means the award is live,
+    #: which is what the partial unique index above keys on.
+    cancelled_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    cancellation_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: Who ended it. A cleaner backing out and an owner calling the job off have
+    #: different consequences, and "the row says cancelled" does not say which.
+    cancelled_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    #: A no-show is not a cancellation. Nobody told anyone; the owner found out
+    #: by the house not being cleaned. Flagged separately because the policy
+    #: response differs, and because it is what an admin needs to see.
+    was_no_show: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+
+    turnover: Mapped["Turnover"] = relationship(back_populates="awards")
+    cleaner: Mapped["User"] = relationship(foreign_keys=[cleaner_id])
+    cancelled_by: Mapped["User | None"] = relationship(foreign_keys=[cancelled_by_id])
     bid: Mapped["Bid | None"] = relationship()
 
+    @property
+    def is_live(self) -> bool:
+        return self.cancelled_at is None
+
+    @property
+    def cleaner_name(self) -> str:
+        """Who is booked, for the owner's screen. An id is not a person."""
+        return self.cleaner.full_name
+
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
-        return f"<Award turnover={self.turnover_id} cleaner={self.cleaner_id}>"
+        state = "live" if self.is_live else "cancelled"
+        return f"<Award turnover={self.turnover_id} cleaner={self.cleaner_id} {state}>"
