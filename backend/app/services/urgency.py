@@ -16,6 +16,11 @@ whether the next guest is booked:
 * **Standing vacancy** (`checkin_at is None`) — there is no window, so the
   signal is how soon checkout itself arrives.
 
+* **Re-posted after a cancellation** (`reopened_at` set, phase 4) — the window
+  still says what it said, but nobody is staffed for the job any more, so the
+  lead time counts again exactly as it does for a vacancy. The more urgent of
+  the two readings wins.
+
 The "nobody has claimed this and checkout is tomorrow" alarm is deliberately
 *not* here. That is an operational alert with its own cutoff and its own
 recipients (owner and admin), and it belongs to the unclaimed-turnover path in
@@ -57,31 +62,60 @@ def is_same_day(checkout_at: datetime, checkin_at: datetime | None) -> bool:
     return checkout_at.astimezone(tz).date() == checkin_at.astimezone(tz).date()
 
 
-def derive_urgency(
-    checkout_at: datetime,
-    checkin_at: datetime | None,
-    *,
-    now: datetime | None = None,
-) -> TurnoverUrgency:
-    """Place a turnover on the urgency ladder.
+#: The ladder, least urgent first — the order the enum itself declares.
+LADDER: tuple[TurnoverUrgency, ...] = tuple(TurnoverUrgency)
 
-    `now` is injectable so the rule can be tested at a fixed instant rather than
-    against the wall clock — a ladder whose tests drift with the time of day is
-    a ladder nobody trusts.
+
+def _rung_for_gap(gap: timedelta) -> TurnoverUrgency:
+    """Place a window — or a lead time — on the ladder.
+
+    A negative gap (a checkout already in the past) lands on `urgent`, which is
+    correct and the reason these comparisons are not written against abs().
     """
-    if checkin_at is not None:
-        if is_same_day(checkout_at, checkin_at):
-            return TurnoverUrgency.SAME_DAY
-        gap = checkin_at - checkout_at
-    else:
-        # Standing vacancy: measured from now to checkout. A checkout already in
-        # the past yields a negative gap, which lands on `urgent` — correct, and
-        # the reason the comparisons below are not written against abs().
-        reference = now or datetime.now(tz=region_timezone())
-        gap = checkout_at - reference
-
     if gap < URGENT_WITHIN:
         return TurnoverUrgency.URGENT
     if gap < SOON_WITHIN:
         return TurnoverUrgency.SOON
     return TurnoverUrgency.STANDARD
+
+
+def _most_urgent(*rungs: TurnoverUrgency) -> TurnoverUrgency:
+    return max(rungs, key=LADDER.index)
+
+
+def derive_urgency(
+    checkout_at: datetime,
+    checkin_at: datetime | None,
+    *,
+    reopened_at: datetime | None = None,
+    now: datetime | None = None,
+) -> TurnoverUrgency:
+    """Place a turnover on the urgency ladder.
+
+    `reopened_at` is set when a booking came undone and the job went back on the
+    bench (phase 4). It does not invent a second rule: it says that nobody is
+    staffed for this job any more, so the time left to find somebody counts
+    again — the same measure a standing vacancy has always used. Whichever of
+    the two readings is more urgent wins, so a cancellation six hours before
+    checkout is `urgent` even though the cleaning window itself is wide, and a
+    cancellation three weeks out is still judged on the window.
+
+    `now` is injectable so the rule can be tested at a fixed instant rather than
+    against the wall clock — a ladder whose tests drift with the time of day is
+    a ladder nobody trusts.
+    """
+    reference = now or datetime.now(tz=region_timezone())
+
+    if checkin_at is not None:
+        if is_same_day(checkout_at, checkin_at):
+            # Already the top rung; nothing can raise it further.
+            return TurnoverUrgency.SAME_DAY
+        schedule = _rung_for_gap(checkin_at - checkout_at)
+    else:
+        # Standing vacancy: no window to measure, so the lead time is the whole
+        # signal — which is also what a re-posted job is judged on.
+        schedule = _rung_for_gap(checkout_at - reference)
+
+    if reopened_at is None:
+        return schedule
+    return _most_urgent(schedule, _rung_for_gap(checkout_at - reference))

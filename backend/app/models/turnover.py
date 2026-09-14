@@ -8,6 +8,7 @@ itself lands in phase 2; the column shape is settled here.
 
 from __future__ import annotations
 
+import builtins
 import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING
@@ -95,22 +96,37 @@ class Turnover(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    #: Set when a cleaner backs out after being awarded. A late cancellation
-    #: re-opens the turnover urgently and alerts the owner and admin — never
-    #: silently (phase 4).
+    #: Set when the job itself is called off for good. Not the same as an award
+    #: coming undone: a cleaner backing out re-opens the turnover rather than
+    #: cancelling it, and that is recorded on the award row.
     cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     cancellation_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    #: Set when a booking came undone and the job went back on the bench. It is
+    #: an input to the urgency ladder, not a second author of it: once a job is
+    #: being re-staffed, the time left to find somebody counts again, exactly as
+    #: it does for a standing vacancy (see `app.services.urgency`).
+    reopened_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     property: Mapped["Property"] = relationship(back_populates="turnovers")
     bids: Mapped[list["Bid"]] = relationship(
         back_populates="turnover",
         cascade="all, delete-orphan",
     )
-    award: Mapped["Award | None"] = relationship(
+    #: Every award this turnover has ever had, newest first. At most one of them
+    #: is live at a time — guardrail 1, backstopped by a partial unique index.
+    awards: Mapped[list["Award"]] = relationship(
         back_populates="turnover",
-        uselist=False,
         cascade="all, delete-orphan",
+        order_by="Award.awarded_at.desc()",
     )
+
+    # `builtins.property` spelled out: this class has a relationship *named*
+    # `property`, which shadows the builtin everywhere below it in the body.
+    @builtins.property
+    def live_award(self) -> "Award | None":
+        """The award currently in force, if any. Never a cancelled one."""
+        return next((award for award in self.awards if award.cancelled_at is None), None)
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return f"<Turnover {self.id} {self.status.value}/{self.urgency.value}>"

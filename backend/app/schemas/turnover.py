@@ -14,6 +14,7 @@ from datetime import datetime
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.models.enums import TurnoverStatus, TurnoverUrgency
+from app.schemas.award import AwardOut
 from app.schemas.property import PropertyOut
 
 
@@ -92,11 +93,18 @@ class TurnoverOut(BaseModel):
     notes: str | None
     cancelled_at: datetime | None
     cancellation_reason: str | None
+    #: Set when a booking came undone and the job went back on the bench.
+    reopened_at: datetime | None
     created_at: datetime
     updated_at: datetime
 
 
 class TurnoverDetailOut(TurnoverOut):
-    """Detail view carries the property, so a screen needs one request."""
+    """Detail view carries the property and the booking, so a screen needs one
+    request — and so an action that answers with this shape cannot leave the
+    screen holding less than the GET gave it."""
 
     property: PropertyOut
+    #: The live award, read from `Turnover.live_award`: a cancelled booking is
+    #: history, and a detail screen showing one as current would be a lie.
+    award: AwardOut | None = Field(default=None, validation_alias="live_award")
