@@ -53,12 +53,11 @@ depends_on: str | Sequence[str] | None = None
 def upgrade() -> None:
     op.create_table(
         "property_calendars",
-        sa.Column(
-            "id",
-            sa.dialects.postgresql.UUID(as_uuid=True),
-            server_default=sa.text("gen_random_uuid()"),
-            nullable=False,
-        ),
+        # No server default: the id comes from `UUIDPrimaryKeyMixin`, the same
+        # as every other table here. A `gen_random_uuid()` default would be one
+        # the model does not declare, and `alembic check` fails on exactly that
+        # kind of drift — which is how this was caught.
+        sa.Column("id", sa.dialects.postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column(
             "property_id", sa.dialects.postgresql.UUID(as_uuid=True), nullable=False
         ),

@@ -74,7 +74,9 @@ class PropertyCalendar(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     #: What the owner calls it: "Airbnb", "VRBO", "the other listing". Free text
     #: because guessing the platform from the URL is a guess, and a wrong label
     #: on somebody's own screen is worse than the one they typed.
-    label: Mapped[str] = mapped_column(String(80), nullable=False, default="Calendar")
+    label: Mapped[str] = mapped_column(
+        String(80), nullable=False, default="Calendar", server_default="Calendar"
+    )
 
     is_active: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=True, server_default="true"
