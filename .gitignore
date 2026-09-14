@@ -25,3 +25,6 @@ frontend/dist/
 .idea/
 .vscode/
 *.swp
+
+# Uploaded vetting documents in local development. Never commit these.
+backend/var/
