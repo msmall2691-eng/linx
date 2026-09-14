@@ -130,6 +130,25 @@ MAX_FEED_SECONDS = 60.0
 #: caller can tell whether the thread really ended.
 CLOSE_GRACE_SECONDS = 5.0
 
+#: How many feed reads may be in flight in this process at once.
+#:
+#: **A cap on the threads themselves, rather than another fix for one way they
+#: can get stuck.** Closing the client ends a worker blocked on a socket, but it
+#: cannot interrupt one still inside `socket.getaddrinfo` — a stalled resolver
+#: is bounded by the OS (`/etc/resolv.conf` timeout × attempts × nameservers,
+#: on the order of seconds) rather than unbounded like a header-trickle, but it
+#: can still outlive `CLOSE_GRACE_SECONDS`. Rather than chase each way a worker
+#: might outstay its deadline, this bounds the population: a permit is held by
+#: the *thread*, not the caller, and released only when the thread truly ends.
+#: Whatever the cause, threads and sockets cannot accumulate past this.
+MAX_CONCURRENT_FETCHES = 4
+
+#: How long a caller waits for a permit before giving up. Short: if every slot
+#: is held, something is wrong and the next pass is a better time to try.
+FETCH_SLOT_WAIT_SECONDS = 2.0
+
+_FETCH_SLOTS = threading.BoundedSemaphore(MAX_CONCURRENT_FETCHES)
+
 #: Summaries that mean "the owner blocked these dates", not "a guest is
 #: staying". Airbnb exports both through the same feed, and a block does not
 #: need a clean at the end of it.
@@ -813,6 +832,11 @@ def _fetch_within(
     header bytes forever: the worker ends within milliseconds of the close.
     A caller that injected its own client keeps ownership of it and it is left
     alone — that path opens no real socket anyway.
+
+    **And the population is capped regardless** — see `MAX_CONCURRENT_FETCHES`.
+    Closing the client cannot interrupt a worker still inside
+    `socket.getaddrinfo`, so rather than chase each way a worker might outstay
+    its deadline, the number of live workers is bounded outright.
     """
     owned = client is None
     client = client or _default_client()
@@ -823,9 +847,27 @@ def _fetch_within(
             outcome["text"] = fetch(url, client=client)
         except BaseException as exc:  # noqa: BLE001 - re-raised on the caller's thread
             outcome["error"] = exc
+        finally:
+            # **Released by the thread, not the caller** — the caller may well
+            # have given up already, and what this counts is live workers.
+            _FETCH_SLOTS.release()
+
+    if not _FETCH_SLOTS.acquire(timeout=FETCH_SLOT_WAIT_SECONDS):
+        if owned:
+            client.close()
+        raise CalendarError(
+            "Too many calendars are being read at once just now. The next sync "
+            "will try again."
+        )
 
     worker = threading.Thread(target=work, daemon=True, name="linx-calendar-fetch")
-    worker.start()
+    try:
+        worker.start()
+    except BaseException:
+        _FETCH_SLOTS.release()
+        if owned:
+            client.close()
+        raise
     worker.join(seconds)
 
     try:

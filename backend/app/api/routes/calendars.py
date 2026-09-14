@@ -121,7 +121,11 @@ def add_calendar(
             ) from None
         return _answer(calendar, calendars.SyncResult())
 
-    _refresh_if_present(db, calendar)
+    if not _refresh_if_present(db, calendar):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="That calendar was removed while it was being read.",
+        )
     return _answer(calendar, result)
 
 
@@ -180,7 +184,15 @@ def sync_calendar(
             status_code=status.HTTP_502_BAD_GATEWAY, detail=error.detail
         ) from None
 
-    _refresh_if_present(db, calendar)
+    if not _refresh_if_present(db, calendar):
+        # **The success path needs this too.** A DELETE already waiting on the
+        # calendar's lock can commit the moment `sync` commits, and the failed
+        # refresh leaves the instance expired — so serialising it here is a 500
+        # at the very end of a request that otherwise worked.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="That calendar was removed while it was being read.",
+        )
     return _answer(calendar, result)
 
 

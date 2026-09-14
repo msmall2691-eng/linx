@@ -1935,3 +1935,136 @@ class TestBothEndpointsSurviveTheFeedVanishing:
         )
         assert resp.status_code == 409, resp.text
         assert "removed" in resp.json()["detail"]
+
+
+# --------------------------------------------------------------------------
+# Round seven — bounding the population rather than each way out of it
+# --------------------------------------------------------------------------
+
+
+class TestLiveFetchesAreCapped:
+    def test_no_more_workers_start_once_every_slot_is_held(self, monkeypatch) -> None:
+        """**A cap on the threads themselves, not another fix for one way they
+        get stuck.**
+
+        Closing the client ends a worker blocked on a socket, but it cannot
+        interrupt one still inside `socket.getaddrinfo` — bounded by the OS
+        resolver rather than unbounded, but still able to outlive the grace
+        period. Rather than chase each way a worker might outstay its deadline,
+        the number of live ones is bounded outright.
+        """
+        release = threading.Event()
+
+        def blocking(url, *, client=None):
+            release.wait(30)
+            return _feed_for(10)
+
+        monkeypatch.setattr(calendars, "fetch", blocking)
+
+        # Fill every slot with a worker that will not finish.
+        holders = [
+            threading.Thread(
+                target=lambda: _swallow(
+                    lambda: calendars._fetch_within(
+                        "https://example.test/a.ics",
+                        client=_fake_client(),
+                        seconds=0.2,
+                    )
+                ),
+                daemon=True,
+            )
+            for _ in range(calendars.MAX_CONCURRENT_FETCHES)
+        ]
+        for t in holders:
+            t.start()
+        for t in holders:
+            t.join(5)
+
+        try:
+            with pytest.raises(calendars.CalendarError) as refused:
+                calendars._fetch_within(
+                    "https://example.test/a.ics", client=_fake_client(), seconds=0.2
+                )
+            assert "Too many calendars" in refused.value.detail
+        finally:
+            release.set()
+
+    def test_a_slot_comes_back_when_its_worker_ends(self, monkeypatch) -> None:
+        """A cap that never released would take the feature down after four
+        reads."""
+        for _ in range(calendars.MAX_CONCURRENT_FETCHES + 2):
+            text = calendars._fetch_within(
+                "https://example.test/a.ics",
+                client=_fake_client(_feed_for(10)),
+                seconds=5,
+            )
+            assert "BEGIN:VCALENDAR" in text
+
+
+def _swallow(fn):
+    try:
+        fn()
+    except Exception:
+        pass
+
+
+class TestARootFeedIsOneFeed:
+    def test_an_empty_path_and_a_slash_are_the_same_calendar(
+        self, client: TestClient, make_user, db: Session
+    ) -> None:
+        """Both produce the same HTTP request target, so they must produce the
+        same string — otherwise one root-hosted feed is two calendars and every
+        booking becomes two drafts."""
+        owner = make_user(role="owner")
+        prop = _property(client, owner)
+
+        first = client.post(
+            f"/api/properties/{prop['id']}/calendars",
+            json={"url": "https://example.test", "label": "Airbnb"},
+            headers=owner["auth"],
+        )
+        assert first.status_code == 201, first.text
+
+        again = client.post(
+            f"/api/properties/{prop['id']}/calendars",
+            json={"url": "https://example.test/", "label": "Again"},
+            headers=owner["auth"],
+        )
+        assert again.status_code == 409, again.text
+
+
+class TestTheSuccessPathSurvivesTheFeedVanishing:
+    def test_a_delete_landing_right_after_a_successful_sync_is_not_a_500(
+        self, client: TestClient, make_user, db: Session, monkeypatch
+    ) -> None:
+        """A DELETE already waiting on the calendar's lock can commit the moment
+        `sync` commits. The failed refresh leaves the instance expired, and
+        serialising it is a 500 at the very end of a request that worked."""
+        owner = make_user(role="owner")
+        prop = _property(client, owner)
+        calendar = _calendar(db, prop["id"])
+        calendar_id = calendar.id
+
+        real_sync = calendars.sync
+
+        def sync_then_deleted(session, cal, **kwargs):
+            result = real_sync(session, cal, client=_fake_client(_feed_for(10)))
+            from app.db import SessionLocal
+
+            elsewhere = SessionLocal()
+            try:
+                row = elsewhere.get(PropertyCalendar, calendar_id)
+                if row is not None:
+                    elsewhere.delete(row)
+                    elsewhere.commit()
+            finally:
+                elsewhere.close()
+            return result
+
+        monkeypatch.setattr(calendars, "sync", sync_then_deleted)
+        resp = client.post(
+            f"/api/properties/{prop['id']}/calendars/{calendar_id}/sync",
+            headers=owner["auth"],
+        )
+        assert resp.status_code == 409, resp.text
+        assert "removed" in resp.json()["detail"]

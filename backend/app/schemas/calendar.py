@@ -82,8 +82,13 @@ class CalendarCreate(BaseModel):
                 credentials = f"{credentials}:{parts.password}"
             netloc = f"{credentials}@{netloc}"
 
+        # An empty path and "/" are the same request target, so they must be
+        # the same string — otherwise `https://host` and `https://host/` are two
+        # calendars pointing at one feed, and every booking becomes two drafts.
+        path = parts.path or "/"
+
         # Fragment dropped by never putting it back.
-        url = urlunsplit((scheme, netloc, parts.path, parts.query, ""))
+        url = urlunsplit((scheme, netloc, path, parts.query, ""))
         if len(url) < 10:
             raise ValueError("That does not look like a calendar link.")
         return url

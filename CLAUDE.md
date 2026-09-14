@@ -379,7 +379,8 @@ forgery primitive unless it is guarded. Two rules, both in `calendars.py`:
   the unclaimed alarm, the outbox and the review reveal for everybody.
 - **The stored URL is the one that will be fetched.** `CalendarCreate`
   canonicalises the request identity — fragment dropped, scheme and host
-  lowercased, an explicit default port removed — because
+  lowercased, an explicit default port removed, an empty path written as `/` —
+  because
   `uq_property_calendars_property_url` compares *strings* while the network
   compares *requests*, and one feed spelled three ways is three calendars and
   three drafts per booking. The path and query are left exactly as typed: those
@@ -451,6 +452,14 @@ it. The deadline therefore **closes the client**, which closes the socket under
 the blocked read and makes it raise. There is a test against a real server that
 dribbles header bytes forever, asserting the worker is gone rather than merely
 no longer waited on.
+
+**And the population is capped outright** (`MAX_CONCURRENT_FETCHES`), because
+closing the client still cannot interrupt a worker inside `socket.getaddrinfo`
+— bounded by the OS resolver rather than unbounded, but able to outlive the
+grace period. Chasing each way a worker might outstay its deadline is a losing
+game; bounding how many can exist is not. The permit is held by the *thread* and
+released when it ends, so what is counted is live workers rather than live
+callers.
 
 **The stale warning is only counted while it is still true.** A completed or
 cancelled job, or one whose checkout has passed, has no booking in the feed
