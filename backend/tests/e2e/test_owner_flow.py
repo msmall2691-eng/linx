@@ -187,3 +187,34 @@ def test_archiving_is_refused_while_a_turnover_is_still_scheduled(
     # And the property is still there.
     page.goto(f"{live_server}/properties")
     expect(page.get_by_text("Seaside Cottage")).to_be_visible()
+
+
+def test_a_protected_route_sends_you_to_login_and_back(page, live_server) -> None:
+    """Ask for a page while logged out, and land on it after logging in.
+
+    This round trip is the part of routing that is easiest to break without
+    noticing: the guard stashes where you were heading in router state, and the
+    login screen reads it back. Nothing else in the suite exercises
+    `useLocation`, `Navigate state=`, or `useNavigate` with state, which makes
+    it the behaviour worth pinning across a router upgrade.
+    """
+    email = _signup_owner(page, live_server)
+    _add_property(page, live_server)
+
+    # Wait on being logged out, not on where logout lands. Signing out from a
+    # guarded page re-renders the guard first, so it redirects to login before
+    # the nav's own "go home" arrives — a detail of that race, not a promise.
+    page.get_by_role("button", name="Log out").click()
+    expect(page.get_by_role("link", name="Log in")).to_be_visible()
+
+    # Ask for an owner-only page while logged out.
+    page.goto(f"{live_server}/turnovers")
+    page.wait_for_url("**/login")
+
+    page.fill("#email", email)
+    page.fill("#password", PASSWORD)
+    page.click("button[type=submit]")
+
+    # Back to where you were headed, not dumped on the dashboard.
+    page.wait_for_url("**/turnovers")
+    expect(page.get_by_role("heading", name="Turnovers")).to_be_visible()
