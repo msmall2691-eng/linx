@@ -81,6 +81,26 @@ class Settings(BaseSettings):
     reminder_hours_before: int = Field(default=24, ge=1, le=168)
     unclaimed_alert_hours_before: int = Field(default=24, ge=1, le=168)
 
+    # ---------------------------------------------------------------------
+    # Stripe (phase 6). TEST MODE ONLY until the go-live gate.
+    #
+    # Without STRIPE_SECRET_KEY the payment path is *disabled*, not faked: the
+    # endpoints refuse with a clear reason and no row claims to have collected
+    # anything. That differs on purpose from the Checkr and SMTP postures — a
+    # manual fallback makes sense for a background check and for an email, and
+    # makes no sense at all for money.
+    # ---------------------------------------------------------------------
+    stripe_secret_key: str | None = None
+    stripe_api_base: str = "https://api.stripe.com/v1"
+    #: Verifies the signature on incoming webhooks. Without it the webhook
+    #: endpoint refuses every delivery rather than trusting an unsigned POST
+    #: that says a payment succeeded.
+    stripe_webhook_secret: str | None = None
+    #: Where Stripe sends the owner back after hosted Checkout, and where
+    #: Express onboarding returns to. Empty means "work it out from the request",
+    #: which is right in development and wrong behind a proxy in production.
+    public_base_url: str | None = None
+
     platform_fee_bps: int = Field(
         default=1500,
         ge=0,

@@ -331,13 +331,22 @@ in `app/models/enums.py` holds exactly these and nothing else:
 - Turnover reminder, day-of, both sides
 - Cleaner cancels close to checkout → urgent re-post + alert to owner and admin
 - Turnover unclaimed past a defined cutoff → alert to owner and admin
+- Job marked complete by the cleaner → owner (added in phase 6, see below)
 - Payment receipt (owner) / payout notice (cleaner)
 - Review received (both directions, once visible)
 
-Nine of those twelve are live. The last three — payment receipt, payout notice,
-review received — are declared in the enum with no sender, because the state
-transitions that fire them arrive in phases 6 and 7. Declared-and-unwired is
-deliberate and tested as such; it is not the same as forgotten.
+Twelve of those thirteen are live; only `review_received` is still declared with
+no sender, because the transition that fires it arrives in phase 7.
+Declared-and-unwired is deliberate and tested as such; it is not the same as
+forgotten.
+
+**The list grew by one, on purpose.** `job_completed` was added in phase 6
+alongside the transition it belongs to. Before money hung off completion, "the
+cleaner says it is done" was nobody's business; now an owner who is never told
+is an owner who never pays, and a cleaner who did the work and hears nothing.
+Adding it meant a migration and a failing test, which is exactly the
+conversation a new event is supposed to start — the list being closed is what
+makes opening it a decision.
 
 `app/services/notifications.py` is the one place that decides any of this.
 Phase 4's `app/services/alerts.py` is gone, replaced by it.
@@ -406,7 +415,7 @@ phase.
 | 3 | Cleaner side: profile, vetting docs, background check, admin review queue, bidding | **done** |
 | 4 | Award + guardrail-1 concurrency + no-show / cancellation path | **done** |
 | 5 | Notifications (the event list above) | **done** |
-| 6 | Stripe Connect, test mode end to end, refunds, reconciliation | not started |
+| 6 | Stripe Connect, test mode end to end, refunds, reconciliation | **done** |
 | 7 | Mutual delayed-reveal reviews | not started |
 | 8 | Admin console — vetting queue, dispute inbox, unclaimed alerts, ledger | not started |
 | 9 | Pilot launch checklist — new Connect platform account under the new entity | not started |
@@ -425,6 +434,57 @@ individual rather than the new entity, undoing the separation this project
 exists for. Going live means opening a **new, separate Connect platform account
 under the new entity** — not migrating an existing one.
 
+### How it is built (phase 6)
+
+`app/services/stripe_client.py` is the **only door**. No route, task or webhook
+handler calls Stripe directly, because the moment there are two places that can
+charge a card, one of them is missing an idempotency key. `post()` refuses a
+mutating call that carries neither a key nor an explicit `non_idempotent_reason`
+saying why it cannot duplicate anything that matters — exactly one call signs
+that second form (an Express onboarding link, which expires and moves no money),
+so skipping the key is a greppable decision rather than an omission.
+
+**Money moves for work that happened.** The owner is charged when the cleaner
+marks the job complete, not when a bid is accepted. An ordinary cancellation
+therefore costs nobody anything and needs no refund, and the refund path stays
+reserved for something going wrong *after* the work was done.
+
+- **One destination charge**, through Stripe's hosted Checkout: one
+  `PaymentIntent` with `transfer_data` at the cleaner's account and
+  `application_fee_amount` as the platform cut. Card details never reach this
+  server. The fee comes **out of** the cleaner's price rather than being added
+  on top, so the bid on screen is what the owner pays, and the cleaner's share
+  is the remainder — one subtraction, never two roundings.
+- **A payment is only true when Stripe says so.** The request that starts a
+  checkout creates an intent to pay; the webhook reports the money moving.
+  Receipts are queued from the second, never the first. The webhook is the one
+  unauthenticated endpoint in the product and it refuses every delivery that is
+  not signed for our secret — including all of them when no secret is set.
+- **Refunds are decided, not reversed.** `refund_application_fee` *and*
+  `reverse_transfer`, both explicit: without the second the owner is made whole
+  out of the platform's balance while the cleaner keeps the full amount, and
+  nothing errors. Full refunds only at v1, admin-only, with a required reason —
+  a partial refund has to decide how to split the shortfall, and that is a
+  policy question with somebody's income on the other end.
+- **Payout readiness is not the trust gate.** `cleaner_profiles.stripe_*` is
+  deliberately outside `can_take_jobs`. Being trusted in a stranger's house and
+  being able to receive a transfer are different questions; folding Stripe into
+  the generated column would let a verification delay silently stop a vetted
+  cleaner from bidding. The payment step refuses out loud instead, naming what
+  is missing.
+- **No key configured means the payment path is off, not faked.** Different
+  from Checkr (manual fallback) and SMTP (log instead of send), on purpose: a
+  human can run a background check by hand and a log line can stand in for an
+  email. Nothing stands in for money, and no row may claim to have collected
+  something it did not.
+
+The Stripe client is **not verified against the live API** — same honesty as the
+Checkr client. Its request shapes and response handling are covered by tests
+against a recording fake, and the browser test drives a fake Stripe over real
+HTTP (real form encoding, real redirect, real signed webhook), but no request
+has ever been made to a real Stripe account from this codebase. Walk one payment
+through with a test-mode key before relying on it.
+
 ---
 
 ## Carry-over test list
@@ -433,11 +493,11 @@ Written down from day one, built with their phases:
 
 - ~~Double-award concurrency test (guardrail 1) — two simultaneous accepts, exactly one wins~~ — `tests/test_awards.py`, with a second test proving the check happens *inside* the lock rather than before it
 - ~~No-show / late-cancellation re-post — turnover reopens urgent, owner and admin both alerted~~ — `tests/test_cancellation.py`
-- Stripe idempotency — replay the same charge attempt, assert no duplicate
-- Collected-vs-paid-out reconciliation — collected always equals payout + platform fee, no drift
-- Refund path — fee and transfer both resolve, nothing left stranded
+- ~~Stripe idempotency — replay the same charge attempt, assert no duplicate~~ — `tests/test_payments.py`, asserting the *same derived key* on both attempts rather than merely that a key was sent
+- ~~Collected-vs-paid-out reconciliation — collected always equals payout + platform fee, no drift~~ — `payments.reconcile()`, asserted across a range of prices and after a refund
+- ~~Refund path — fee and transfer both resolve, nothing left stranded~~ — `tests/test_payments.py::TestRefunds`, asserting `refund_application_fee` and `reverse_transfer` on the wire
 - Mutual review reveal — a one-sided review never shows before the other side submits or the timeout passes
-- A real click-through of bid → award → payment, not just "the button renders" — bid → award → back out is `tests/e2e/test_award_flow.py`; payment joins it in phase 6
+- ~~A real click-through of bid → award → payment, not just "the button renders"~~ — bid → award → back out is `tests/e2e/test_award_flow.py`; bid → award → done → paid is `tests/e2e/test_payment_flow.py`, against a Stripe that answers over real HTTP
 
 ---
 

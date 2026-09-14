@@ -18,11 +18,13 @@ import { showsUrgency } from '../lib/turnover.js'
  * comes back with the access notes empty, which is why this screen renders
  * whatever the field holds rather than deciding for itself.
  */
-function Job({ job, timeZone, onCancel, busy }) {
+function Job({ job, timeZone, onCancel, onStart, onComplete, busy }) {
   const [confirming, setConfirming] = useState(false)
   const [reason, setReason] = useState('')
   const property = job.property
   const cancelled = Boolean(job.cancelled_at)
+  const started = Boolean(job.started_at)
+  const done = Boolean(job.completed_at)
 
   return (
     <li className="card" data-testid="job">
@@ -124,8 +126,43 @@ function Job({ job, timeZone, onCancel, busy }) {
         )}
       </dl>
 
-      {!cancelled && (
-        <div className="mt-6 border-t border-slate-200 pt-4">
+      {done && (
+        <div className="mt-6 rounded-lg bg-emerald-50 p-3 text-sm" data-testid="job-done">
+          <p className="font-medium text-emerald-900">You marked this done.</p>
+          <p className="mt-1 text-emerald-800">
+            The owner has been asked to pay. Your share lands in your Stripe account
+            once they do.
+          </p>
+        </div>
+      )}
+
+      {!cancelled && !done && (
+        <div className="mt-6 flex flex-wrap gap-2 border-t border-slate-200 pt-4">
+          {!started && (
+            <button
+              type="button"
+              onClick={() => onStart(job.turnover_id)}
+              disabled={busy}
+              className="btn-secondary"
+              data-testid="start-job"
+            >
+              I&rsquo;m on site
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => onComplete(job.turnover_id)}
+            disabled={busy}
+            className="btn-primary"
+            data-testid="complete-job"
+          >
+            {busy ? 'Saving…' : 'Mark this job done'}
+          </button>
+        </div>
+      )}
+
+      {!cancelled && !done && (
+        <div className="mt-4 border-t border-slate-200 pt-4">
           {confirming ? (
             <div className="space-y-3">
               <label htmlFor={`why-${job.turnover_id}`} className="field-label">
@@ -204,6 +241,26 @@ export default function CleanerJobs() {
     }
   }, [])
 
+  async function act(turnoverId, action) {
+    setError(null)
+    setBusy(true)
+    try {
+      const updated = await apiFetch(`/board/jobs/${turnoverId}/${action}`, {
+        method: 'POST',
+      })
+      // The action answers with the whole job — the same shape the list was
+      // built from — so it can be spliced in rather than re-fetched. An action
+      // that returned less than the GET would blank the card it replaced.
+      setJobs((prev) =>
+        prev.map((job) => (job.turnover_id === turnoverId ? updated : job)),
+      )
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
   async function cancelJob(turnoverId, reason) {
     setError(null)
     setBusy(true)
@@ -252,6 +309,8 @@ export default function CleanerJobs() {
               job={job}
               timeZone={timeZone}
               onCancel={cancelJob}
+              onStart={(id) => act(id, 'start')}
+              onComplete={(id) => act(id, 'complete')}
               busy={busy}
             />
           ))}

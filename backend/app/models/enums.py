@@ -89,10 +89,17 @@ class NotificationEvent(str, Enum):
     adding an event is a migration and therefore a decision somebody makes on
     purpose, not a string that appears in one call site and nowhere else.
 
-    The last three have no state transition to fire them yet — payments land in
-    phase 6, reviews in phase 7. They are declared here for the same reason
-    phase 1 declared every table: the shape is settled now, the behavior arrives
-    with its phase.
+    The list started at twelve and is now thirteen. `JOB_COMPLETED` was added in
+    phase 6 with the transition it belongs to: the owner is charged for a
+    finished job rather than a booked one, so "the cleaner says it is done" went
+    from being nobody's business to being the moment the owner has to act on.
+    Nobody learning about it means nobody pays and the cleaner is never paid —
+    which is exactly the question this list exists to force somebody to answer
+    out loud. Adding it was a migration, on purpose.
+
+    Only `REVIEW_RECEIVED` is still declared without a sender; reviews land in
+    phase 7. Declared-and-unwired is tested as such, so a phase cannot quietly
+    skip one.
     """
 
     TURNOVER_POSTED = "turnover_posted"
@@ -104,6 +111,7 @@ class NotificationEvent(str, Enum):
     CLEANER_NO_SHOW = "cleaner_no_show"
     OWNER_CANCELLED_AWARDED = "owner_cancelled_awarded"
     TURNOVER_UNCLAIMED = "turnover_unclaimed"
+    JOB_COMPLETED = "job_completed"
     PAYMENT_RECEIPT = "payment_receipt"
     PAYOUT_NOTICE = "payout_notice"
     REVIEW_RECEIVED = "review_received"

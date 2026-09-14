@@ -199,6 +199,61 @@ def accept_bid(db: Session, *, turnover: Turnover, bid_id: uuid.UUID) -> Award:
     return award
 
 
+def start_job(db: Session, *, turnover: Turnover, award: Award) -> Award:
+    """The cleaner is on site. **The turnover row must already be locked.**
+
+    Nothing but the screen hangs off this one — it exists so "started" and
+    "finished" are two separate facts rather than one, which is what an owner
+    asking "did anyone actually turn up" needs.
+    """
+    if award.cancelled_at is not None:
+        raise AwardConflict("This booking has been cancelled.")
+    if award.completed_at is not None:
+        raise AwardConflict("This job is already marked complete.")
+
+    if award.started_at is None:
+        award.started_at = datetime.now(timezone.utc)
+    turnover.status = TurnoverStatus.IN_PROGRESS
+    db.commit()
+    return award
+
+
+def complete_job(db: Session, *, turnover: Turnover, award: Award) -> Award:
+    """The cleaner says the job is done. **The turnover row must be locked.**
+
+    This is the transition money hangs off: the owner is charged for a finished
+    job, not a booked one. That is why it is a deliberate act by the person who
+    did the work rather than a clock rolling past checkout — a turnover whose
+    checkout time has passed is not evidence that anybody cleaned anything.
+
+    Marking complete does **not** charge anybody. It makes the job payable and
+    tells the owner; the charge is a separate act by the owner, through Stripe's
+    own page. Nothing here moves money, which is why it needs no lock beyond the
+    one it already requires and no idempotency key.
+    """
+    if award.cancelled_at is not None:
+        raise AwardConflict("This booking has been cancelled.")
+    if award.completed_at is not None:
+        # Idempotent by intent: a double tap on a phone in a driveway is not an
+        # error, and it must not produce a second "job done" to the owner.
+        return award
+
+    now = datetime.now(timezone.utc)
+    if award.started_at is None:
+        award.started_at = now
+    award.completed_at = now
+    turnover.status = TurnoverStatus.COMPLETED
+
+    prop = db.execute(
+        select(Property).where(Property.id == turnover.property_id)
+    ).scalar_one()
+    notifications.job_completed(db, turnover, prop, award)
+
+    db.commit()
+    notifications.deliver_pending(db)
+    return award
+
+
 def cancel_award(
     db: Session,
     *,

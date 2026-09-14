@@ -134,6 +134,11 @@ class AwardedJobOut(BaseModel):
     #: Integer cents, frozen when the bid was accepted.
     agreed_price_cents: int
     awarded_at: datetime
+    #: The cleaner said they were on site, and that the job was done. The
+    #: second one is what makes the turnover payable, so it is on the shape the
+    #: cleaner's own screen reads rather than inferred from the status.
+    started_at: datetime | None
+    completed_at: datetime | None
     cancelled_at: datetime | None
     cancellation_reason: str | None
     was_no_show: bool

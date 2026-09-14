@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 
 import Alert from '../components/Alert.jsx'
 import DocumentList from '../components/DocumentList.jsx'
+import PayoutPanel from '../components/PayoutPanel.jsx'
 import VettingPanel from '../components/VettingPanel.jsx'
 import { apiFetch } from '../lib/api.js'
 import { useConfig } from '../lib/config.jsx'
@@ -110,6 +111,9 @@ export default function CleanerProfile() {
         <Alert>{error}</Alert>
 
         {profile.vetting && <VettingPanel vetting={profile.vetting} />}
+        {/* Nothing to connect until there is a profile to connect it to —
+            asking Stripe about an account that cannot exist yet just 409s. */}
+        {!profile.isNew && <PayoutPanel />}
 
         <form onSubmit={handleSave} className="card space-y-4">
           <h2 className="font-semibold">Where you work</h2>

@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 
 import Alert from '../components/Alert.jsx'
+import PaymentPanel from '../components/PaymentPanel.jsx'
 import StatusBadge from '../components/StatusBadge.jsx'
 import UrgencyBadge from '../components/UrgencyBadge.jsx'
 import { apiFetch } from '../lib/api.js'
@@ -278,6 +279,14 @@ export default function TurnoverDetail() {
             Nobody can see this draft yet.
           </p>
         </div>
+      )}
+
+      {turnover.award && (
+        <PaymentPanel
+          turnoverId={turnoverId}
+          award={turnover.award}
+          status={turnover.status}
+        />
       )}
 
       {turnover.award && (

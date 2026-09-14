@@ -12,7 +12,7 @@ reference to any other codebase.
 
 ---
 
-## Status: phase 5 — notifications
+## Status: phase 6 — payments
 
 What works today:
 
@@ -39,17 +39,28 @@ What works today:
 - **Cancellations and no-shows** — an award is cancelled, never deleted; the job
   goes back on the bench; and the owner, the cleaner and an admin are told every
   time, never conditional on the cancellation being late.
-- **Notifications** — nine of the twelve events in the fixed list, recorded in
-  the same transaction as the state change and delivered after it, with a unique
-  `dedupe_key` so a retry cannot send twice. Payment, payout and review notices
-  are declared and wait for their phases.
+- **Notifications** — twelve of the thirteen events in the fixed list, recorded
+  in the same transaction as the state change and delivered after it, with a
+  unique `dedupe_key` so a retry cannot send twice. Only the review notice waits
+  for its phase.
+- **Payments** — the cleaner marks a job done, the owner pays on Stripe's own
+  hosted page, and one **destination charge** settles both halves at once: the
+  cleaner's share transfers to their Express account and the platform fee comes
+  out of the same transaction. Refunds are admin-only and reverse both halves.
+  Every Stripe call goes through one helper with an idempotency key derived from
+  a database id, and the attempt is written before the call.
 - The full v1 database schema — eleven tables — built by Alembic migrations.
   Tables belonging to later phases exist and are empty on purpose.
 - A single-container deploy: the backend serves the built frontend.
-- 268 tests against real PostgreSQL, plus 7 browser click-throughs.
+- 323 tests against real PostgreSQL, plus 8 browser click-throughs — including bid → award → job done → paid, against a Stripe that answers over real HTTP.
 
-Payments and reviews are **not** built yet. Each is its own phase, reviewed
-before the next begins — see the phase table in [`CLAUDE.md`](CLAUDE.md).
+Reviews are **not** built yet, and neither is the admin console. Each is its own
+phase, reviewed before the next begins — see the phase table in
+[`CLAUDE.md`](CLAUDE.md).
+
+**All Stripe work is test mode.** Going live means a new, separate Connect
+platform account under the new entity — never a migrated one, and never real
+pilot transactions under a personal SSN or another company's EIN.
 
 ---
 
@@ -192,7 +203,20 @@ One Railway service, one Postgres, nothing shared with any other project.
    written to the log, but they stay `pending`, because nothing was sent. That
    is the launch posture, and it is deliberately visible rather than silent.
 
-6. Deploy. The entrypoint runs `alembic upgrade head` before starting the
+6. Set the Stripe variables when you are ready to take money — **test mode**:
+
+   | Variable | Value |
+   |---|---|
+   | `STRIPE_SECRET_KEY` | `sk_test_…`. Without it the payment path is off, not faked |
+   | `STRIPE_WEBHOOK_SECRET` | from the webhook endpoint you create, pointed at `/api/stripe/webhook` |
+   | `PUBLIC_BASE_URL` | your deployed origin — where Stripe sends people back to |
+
+   The webhook is what makes a payment true; without the secret every delivery
+   is refused rather than trusted. Going live is **not** a matter of swapping
+   these for live keys: it means a new, separate Connect platform account under
+   the new entity.
+
+7. Deploy. The entrypoint runs `alembic upgrade head` before starting the
    server, and aborts the boot if a migration fails rather than serving traffic
    against a schema it does not match.
 
@@ -224,6 +248,8 @@ backend/
     services/geo.py      service-radius distance, in Python and in SQL
     services/storage.py  vetting documents, never on a public path
     services/background_check.py  Checkr, or manual when no key is set
+    services/stripe_client.py  the ONLY door to Stripe; keys are not optional
+    services/payments.py   the destination charge, the split, and refunds
     services/awards.py   guardrail 1 — the row lock, and the cancellation policy
     services/notifications.py  the one place that decides who hears about what
     services/delivery.py   the sender — SMTP, or the log when none is configured

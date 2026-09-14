@@ -87,6 +87,18 @@ class Award(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
 
+    #: The cleaner says they are on site. Nothing hangs off it but the screen —
+    #: it exists so "started" and "finished" are two facts rather than one.
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    #: The cleaner says the job is done. **This is what money hangs off**: the
+    #: owner is charged for a completed job, not a booked one, so the refund
+    #: path handles disputes rather than every ordinary cancellation.
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
     #: Set when the booking comes undone — the cleaner cancels, the owner calls
     #: it off, or the cleaner does not turn up. Null means the award is live,
     #: which is what the partial unique index above keys on.
