@@ -22,6 +22,7 @@ The .ics samples are the real shape Airbnb sends: all-day `VALUE=DATE` events,
 
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import date, datetime, time, timedelta, timezone
 from time import monotonic, sleep
@@ -1318,6 +1319,19 @@ class TestOneSpellingPerFeed:
         )
         assert again.status_code == 409, again.text
 
+    def test_an_ipv6_host_keeps_the_brackets_that_make_it_a_host(self) -> None:
+        """`parts.hostname` strips them, and a bare `2606:4700:4700::1111` is
+        not a host — re-parsing reads everything after the first colon as a
+        port and raises, so the stored URL could never be fetched again."""
+        from urllib.parse import urlsplit
+
+        from app.schemas.calendar import CalendarCreate
+
+        url = CalendarCreate(url="https://[2606:4700:4700::1111]/feed.ics").url
+        assert url == "https://[2606:4700:4700::1111]/feed.ics"
+        assert urlsplit(url).hostname == "2606:4700:4700::1111"
+        assert urlsplit(url).port is None
+
     def test_a_token_in_the_path_or_query_is_left_alone(self) -> None:
         """Canonicalising must not touch the parts that are case-sensitive —
         listing sites put a token in one of them."""
@@ -1634,3 +1648,119 @@ class TestEveryFailureLeavesItsReason:
         db.expire_all()
         assert db.execute(select(Turnover)).scalars().all() == []
         assert db.get(PropertyCalendar, calendar.id).last_error is not None
+
+
+# --------------------------------------------------------------------------
+# Round five — new ground, not the class the restructure retired
+# --------------------------------------------------------------------------
+
+
+class TestAFeedUrlIsNotWrittenToTheLog:
+    def test_a_sync_never_logs_the_credential_in_the_url(
+        self, client: TestClient, make_user, db: Session, caplog
+    ) -> None:
+        """**The product treats a feed URL as a secret everywhere except here.**
+
+        httpx logs `HTTP Request: GET <url>` at INFO, listing sites put the
+        token in the path or query, and the scheduled entry point turns the root
+        logger up to INFO — so every unattended sync wrote every owner's
+        credential into the application log. There is already a test that the
+        URL appears nowhere in a board response; a log file is not an exception
+        to the same rule.
+        """
+        owner = make_user(role="owner")
+        secret = "https://www.airbnb.com/calendar/ical/9.ics?s=SUPERSECRETTOKEN"
+        calendar = _calendar(db, _property(client, owner)["id"], url=secret)
+
+        with caplog.at_level(logging.DEBUG):
+            calendars.sync(db, calendar, client=_fake_client(_feed_for(10)))
+
+        assert "SUPERSECRETTOKEN" not in caplog.text
+
+
+class TestOneEventIsOneIdentity:
+    def test_a_recurrence_override_is_its_own_booking(self) -> None:
+        """iCalendar's own rule: an occurrence is identified by UID **and**
+        RECURRENCE-ID. Reading the UID alone made two events one identity, and
+        `(source_calendar_id, external_ref)` is a unique constraint — so both
+        rows were inserted and the *commit* failed. Not a `CalendarError`, so it
+        surfaced as a 500 with no reason recorded anywhere."""
+        feed = _ics(
+            _event("stay", "20991101", "20991104"),
+            "BEGIN:VEVENT\n"
+            "DTSTART;VALUE=DATE:20991201\n"
+            "DTEND;VALUE=DATE:20991204\n"
+            "UID:stay\n"
+            "RECURRENCE-ID;VALUE=DATE:20991201\n"
+            "SUMMARY:Reserved\n"
+            "END:VEVENT",
+        )
+        assert [b.uid for b in calendars.parse(feed)] == ["stay", "stay#2099-12-01"]
+
+    def test_that_identity_does_not_depend_on_a_library_repr(self) -> None:
+        """Identity that moves between library versions would orphan every
+        turnover keyed to the old spelling."""
+        feed = _ics(
+            "BEGIN:VEVENT\n"
+            "DTSTART;VALUE=DATE:20991201\n"
+            "DTEND;VALUE=DATE:20991204\n"
+            "UID:stay\n"
+            "RECURRENCE-ID;VALUE=DATE:20991201\n"
+            "SUMMARY:Reserved\n"
+            "END:VEVENT"
+        )
+        assert calendars.parse(feed)[0].uid == "stay#2099-12-01"
+
+    def test_a_genuinely_repeated_event_is_kept_once(
+        self, client: TestClient, make_user, db: Session
+    ) -> None:
+        """Past UID+RECURRENCE-ID a repeat is a feed we cannot interpret rather
+        than two stays. Keeping the first is a choice; inserting both is a
+        constraint violation at commit time, which is a 500 with no reason."""
+        owner = make_user(role="owner")
+        calendar = _calendar(db, _property(client, owner)["id"])
+
+        start = date.today() + timedelta(days=10)
+        twice = _ics(
+            _event("same", start.strftime("%Y%m%d"), (start + timedelta(days=3)).strftime("%Y%m%d")),
+            _event("same", start.strftime("%Y%m%d"), (start + timedelta(days=3)).strftime("%Y%m%d")),
+        )
+        result = calendars.sync(db, calendar, client=_fake_client(twice))
+        assert result.created == 1
+
+        db.expire_all()
+        assert len(db.execute(select(Turnover)).scalars().all()) == 1
+
+
+class TestTheSyncEndpointSurvivesTheFeedVanishing:
+    def test_a_calendar_deleted_mid_sync_answers_502_not_500(
+        self, client: TestClient, make_user, db: Session, monkeypatch
+    ) -> None:
+        """`sync` can refuse because the row is gone — another request can
+        delete the feed while this one is out on the network. Refreshing it
+        unconditionally in the handler turns a deliberate 502 into a 500 that
+        says nothing."""
+        owner = make_user(role="owner")
+        prop = _property(client, owner)
+        calendar = _calendar(db, prop["id"])
+        calendar_id = calendar.id
+
+        def vanished(session, cal, **kwargs):
+            from app.db import SessionLocal
+
+            elsewhere = SessionLocal()
+            try:
+                row = elsewhere.get(PropertyCalendar, calendar_id)
+                elsewhere.delete(row)
+                elsewhere.commit()
+            finally:
+                elsewhere.close()
+            raise calendars.CalendarError("That calendar has been removed.")
+
+        monkeypatch.setattr(calendars, "sync", vanished)
+        resp = client.post(
+            f"/api/properties/{prop['id']}/calendars/{calendar_id}/sync",
+            headers=owner["auth"],
+        )
+        assert resp.status_code == 502, resp.text
+        assert "removed" in resp.json()["detail"]

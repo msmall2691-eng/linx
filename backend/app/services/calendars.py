@@ -71,6 +71,25 @@ from app.services.urgency import SOON_WITHIN, region_timezone
 
 logger = logging.getLogger("linx.calendars")
 
+# **httpx logs the full request URL at INFO, and a feed URL is a credential.**
+#
+# `HTTP Request: GET https://www.airbnb.com/calendar/ical/123.ics?s=<token> "200 OK"`
+# — that is httpx 0.28's own line, and listing sites put the token in the path
+# or the query. The scheduled entry point turns the root logger up to INFO, so
+# without this every unattended sync writes every owner's secret feed URL into
+# the application log, where it is retained and readable by anyone with log
+# access. The product treats that URL as secret everywhere else: it is on no
+# cleaner-facing or admin shape, and there is a test that it appears nowhere in
+# a board response. A log file is not an exception to that.
+#
+# **Module scope on purpose.** The leak happens in two processes — the web app
+# for the Sync button, and the scheduled task — and this module is imported by
+# both. Configuring it at each entry point instead would be two places to keep
+# in step, which is exactly the shape of mistake this file has already made
+# four times. The cost is httpx's request line for Stripe and Checkr too; both
+# of those log their own outcomes, and neither line was load-bearing.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
 #: How long to wait on somebody else's server. Short on purpose: a scheduled
 #: pass syncs every calendar in the product, and one slow host must not hold
 #: up the rest.
@@ -389,6 +408,7 @@ def parse(text: str) -> list[Booking]:
         ) from exc
 
     bookings: list[Booking] = []
+    seen: set[str] = set()
     for component in calendar.walk("VEVENT"):
         arrives = _as_date(getattr(component.get("DTSTART"), "dt", None))
         departs = _as_date(getattr(component.get("DTEND"), "dt", None))
@@ -415,8 +435,31 @@ def parse(text: str) -> list[Booking]:
             # every fifteen minutes.
             continue
 
+        # **An occurrence is identified by UID *and* RECURRENCE-ID**, which is
+        # iCalendar's own rule, not a workaround: a recurring event's overridden
+        # instance legitimately repeats its parent's UID. Reading the UID alone
+        # made two events one identity, and `(source_calendar_id, external_ref)`
+        # is a unique constraint — so both rows were inserted and the *commit*
+        # failed. Not a `CalendarError`, so it surfaced as a 500 with no reason
+        # recorded anywhere, which is the one outcome this module is built to
+        # avoid.
+        # Formatted from the value, never `str()` of the library's object: that
+        # is a repr which can change between versions, and identity that moves
+        # would orphan every turnover keyed to the old spelling.
+        occurrence = _as_date(getattr(component.get("RECURRENCE-ID"), "dt", None))
+        identity = f"{uid}#{occurrence.isoformat()}" if occurrence else uid
+
+        if identity in seen:
+            # Past that, a repeat is a feed we cannot interpret rather than two
+            # stays. Keeping the first is a choice; inserting both is a crash.
+            logger.info("calendar event %s appears more than once; keeping the first", identity)
+            continue
+        seen.add(identity)
+
         bookings.append(
-            Booking(uid=uid, arrives_on=arrives, departs_on=departs, summary=summary)
+            Booking(
+                uid=identity, arrives_on=arrives, departs_on=departs, summary=summary
+            )
         )
 
     bookings.sort(key=lambda b: b.arrives_on)

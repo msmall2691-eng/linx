@@ -14,7 +14,7 @@ from __future__ import annotations
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.api.deps import require_role
@@ -144,7 +144,20 @@ def sync_calendar(
     try:
         result = calendars.sync(db, calendar)
     except calendars.CalendarError as error:
-        db.refresh(calendar)
+        # **The row may be gone**, which is one of the things `sync` can refuse
+        # for: another request can delete the feed while this one is out on the
+        # network. Refreshing it unconditionally then raises inside the handler
+        # and turns a deliberate 502 into a 500 that says nothing.
+        #
+        # Asked for forgiveness rather than permission, because the obvious
+        # guard does not work: `db.get` answers from the session's identity map
+        # and hands back the deleted instance without touching the database, so
+        # a `is not None` check passes and the refresh fails anyway. That is the
+        # same stale-cache trap as `_claim`, one layer up.
+        try:
+            db.refresh(calendar)
+        except SQLAlchemyError:
+            pass
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY, detail=error.detail
         ) from None

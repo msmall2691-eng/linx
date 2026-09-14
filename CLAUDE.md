@@ -305,9 +305,17 @@ one sentence: **linx owns the turnover; the listing site owns the booking.**
 3. **Vanishing from the feed is not permission to delete.** An untouched draft
    goes, because nothing was staffed for it. A posted or awarded job stays and
    is *reported* — a guest cancelling does not get to cancel a cleaner.
-4. **Identity is the event's UID, not its dates** — unique on
-   `(source_calendar_id, external_ref)`. A booking whose dates move is one
-   booking; without this it becomes a second job while the first sits orphaned.
+4. **Identity is the event's UID *and* its RECURRENCE-ID, not its dates** —
+   unique on `(source_calendar_id, external_ref)`. A booking whose dates move is
+   one booking; without that it becomes a second job while the first sits
+   orphaned. The RECURRENCE-ID half is iCalendar's own rule rather than a
+   workaround: an overridden occurrence legitimately repeats its parent's UID,
+   and reading the UID alone made two events one identity — so both rows were
+   inserted and the *commit* failed, surfacing as a 500 with no reason recorded.
+   It is formatted from the value, never `str()` of the library's object, since
+   identity that moves between library versions orphans everything keyed to the
+   old spelling. Past that pair, a repeat is a feed we cannot interpret: the
+   first is kept and the rest logged, because inserting both is a crash.
 5. **An unreadable feed changes nothing.** "The feed is empty" legitimately
    deletes drafts, so "the feed did not load" must never look the same. A
    failure is recorded on the calendar row and every turnover is left alone.
@@ -336,6 +344,14 @@ Two things the feed cannot tell us, and where they come from instead:
 **A feed URL is secret the way a link is secret** — anybody holding it can read
 the booking dates for somebody's house. It is owner-only, on no cleaner-facing
 or admin shape, and there is a test that it appears nowhere in a board response.
+
+**A log file is not an exception to that.** httpx logs the full request URL at
+INFO and listing sites put the token in the path or query, so every unattended
+sync wrote every owner's credential into the application log until
+`calendars.py` turned that logger down. It is a module-level global on purpose:
+the leak happens in two processes (the web app for the Sync button, the
+scheduled task) and this module is imported by both, so configuring it at each
+entry point would be two places to keep in step.
 The URL is also not editable in place: changing it would keep the calendar's id
 while pointing it at different bookings, so every turnover keyed to it would
 claim a source it never came from.

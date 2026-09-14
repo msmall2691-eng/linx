@@ -67,6 +67,13 @@ class CalendarCreate(BaseModel):
         if not host:
             raise ValueError("That calendar link has no host in it.")
 
+        # **An IPv6 literal keeps its brackets.** `parts.hostname` strips them,
+        # and a bare `2606:4700:4700::1111` is not a host — re-parsing it reads
+        # everything after the first colon as a port and raises, so the stored
+        # URL could never be fetched again.
+        if ":" in host:
+            host = f"[{host}]"
+
         default_port = 443 if scheme == "https" else 80
         netloc = host if parts.port in (None, default_port) else f"{host}:{parts.port}"
         if parts.username:
