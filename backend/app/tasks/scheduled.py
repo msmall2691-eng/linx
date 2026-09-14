@@ -39,17 +39,24 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.models.award import Award
-from app.models.enums import TurnoverStatus
 from app.models.property import Property
 from app.models.turnover import Turnover
-from app.services import awards, calendars, geocoding, notifications, reviews
+from app.services import (
+    awards,
+    calendars,
+    geocoding,
+    notifications,
+    reviews,
+    turnovers,
+)
 
 logger = logging.getLogger("linx.scheduled")
 
-#: How far past checkout an unclaimed turnover keeps alarming. Without a floor,
-#: a first run against an old database would alert on every job the product
-#: never had, and the one that matters would be buried in them.
-UNCLAIMED_LOOKBACK = timedelta(days=1)
+#: The unclaimed window's floor now lives with the query that uses it, in
+#: `app/services/turnovers.py`, so the admin console and this alarm cannot
+#: disagree about what "unclaimed" means. Re-exported because that is where it
+#: was, and a name that moves silently is a name somebody still imports.
+UNCLAIMED_LOOKBACK = turnovers.UNCLAIMED_LOOKBACK
 
 #: The outbox drain is allowed to be much larger here than in a request: this
 #: process exists to send, where a request only clears what it made.
@@ -91,19 +98,7 @@ def alert_unclaimed(db: Session, *, now: datetime | None = None) -> int:
     *staffing* that only matters because a date is approaching, and it has its
     own cutoff and its own recipients.
     """
-    reference = now or datetime.now(timezone.utc)
-    window_end = reference + timedelta(hours=settings.unclaimed_alert_hours_before)
-
-    rows = db.execute(
-        select(Turnover, Property)
-        .join(Property, Turnover.property_id == Property.id)
-        .where(
-            Turnover.status == TurnoverStatus.OPEN,
-            Turnover.checkout_at <= window_end,
-            Turnover.checkout_at >= reference - UNCLAIMED_LOOKBACK,
-        )
-        .order_by(Turnover.checkout_at)
-    ).all()
+    rows = turnovers.unclaimed_alarming(db, now=now)
 
     queued = 0
     for turnover, prop in rows:

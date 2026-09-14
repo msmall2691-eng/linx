@@ -20,7 +20,10 @@ const LINKS = {
     { to: '/jobs', label: 'Your jobs' },
     { to: '/cleaner/profile', label: 'Your profile' },
   ],
-  admin: [{ to: '/admin/vetting', label: 'Vetting queue' }],
+  admin: [
+    { to: '/admin', label: 'Console' },
+    { to: '/admin/vetting', label: 'Vetting queue' },
+  ],
 }
 
 export default function Nav() {

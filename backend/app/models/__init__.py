@@ -10,9 +10,12 @@ from app.models.base import Base
 from app.models.bid import Bid
 from app.models.calendar import PropertyCalendar
 from app.models.cleaner_profile import CleanerProfile
+from app.models.dispute import Dispute
 from app.models.document import Document
 from app.models.enums import (
     BidStatus,
+    DisputeReason,
+    DisputeStatus,
     DocumentStatus,
     DocumentType,
     NotificationChannel,
@@ -40,6 +43,9 @@ __all__ = [
     "Bid",
     "BidStatus",
     "CleanerProfile",
+    "Dispute",
+    "DisputeReason",
+    "DisputeStatus",
     "Document",
     "DocumentStatus",
     "DocumentType",

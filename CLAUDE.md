@@ -174,6 +174,7 @@ not tenant. There is deliberately no `org_id`-style scoping.
 | `awards` | One **live** row per turnover — guardrail 1 governs this; a cancelled one is kept as history |
 | `documents` | Cleaner vetting uploads (id / insurance / reference), admin-reviewed |
 | `property_calendars` | A booking feed an owner connected, and how its last read went |
+| `disputes` | A complaint about a job, decided by a human |
 | `reviews` | Mutual, delayed reveal |
 | `payments_in` | Collects from the owner |
 | `payouts` | Pays the cleaner |
@@ -599,7 +600,33 @@ relying on it.
     list below). `GET /cleaners/{id}/reputation` is readable by any signed-in
     user because a rating is the thing a marketplace makes public; there is
     deliberately no public, unauthenticated cleaner directory at v1.
-- **Disputes go to a human inbox, not a bot, at v1.**
+- **Disputes go to a human inbox, not a bot, at v1.** Built in phase 8
+  (`app/services/disputes.py`), and the shape follows from that sentence:
+  - **Three statuses and no `rejected`.** The outcome is `resolution_notes` —
+    prose an admin wrote — because at this size the outcomes are not an
+    enumerable set, and pretending otherwise puts a policy in a column.
+    `acknowledged` is separate from `open` because "somebody has picked this
+    up" and "this is settled" are different facts, and an admin working a
+    backlog needs to tell what they have already read.
+  - **Raising one tells an admin and the person who raised it — and nobody
+    else.** The receipt is not a courtesy: somebody who reports that a stranger
+    was in their house and hears nothing assumes it went nowhere. The *other
+    side is deliberately not told*, because at this size a human decides when
+    to involve somebody in a complaint about them, and a system that forwards
+    it automatically has replaced the judgement the inbox exists for. They hear
+    at resolution, with the note.
+  - **Filing one changes nothing about the money or the booking.** No refund,
+    no cancellation, no rating moves. That is the policy, not a gap.
+  - **Either party may raise one on a job that went wrong**, including a
+    cancelled award — `disputes.parties` reads the most recent award whether it
+    is live or not, where `reviews.participants` insists on a completed one.
+    The jobs most worth complaining about are the ones that did not finish,
+    which is also why the panel is not gated on completion the way the review
+    beside it is.
+  - The duplicate guard is **a courtesy, not an invariant**, and says so: two
+    simultaneous submissions could both pass it, and the cost is one extra card
+    in a queue a human closes. It deliberately takes no row lock, because a lock
+    would imply an atomicity this path does not need.
 - **No-show / cancellation policy is defined before launch.** Built in phase 4
   (`app/services/awards.py`), and the definition is:
   - **Any** cancellation of a live award — the cleaner backs out, or never turns
@@ -640,13 +667,15 @@ in `app/models/enums.py` holds exactly these and nothing else:
 - Job marked complete by the cleaner → owner (added in phase 6, see below)
 - Payment receipt (owner) / payout notice (cleaner)
 - Review received (both directions, once visible)
+- Dispute raised → an admin **and the person who raised it** (added in phase 8)
+- Dispute resolved → both parties, carrying the admin's note
 
-**All thirteen now have a sender.** Nothing is declared-and-unwired any more;
+**All fifteen have a sender.** Nothing is declared-and-unwired any more;
 the test that guarded that has flipped to guarding the other direction — a new
 enum value with nothing behind it fails, which is the conversation adding one is
 supposed to start.
 
-**The list grew by one, on purpose.** `job_completed` was added in phase 6
+**The list has grown twice, both times on purpose.** `job_completed` was added in phase 6
 alongside the transition it belongs to. Before money hung off completion, "the
 cleaner says it is done" was nobody's business; now an owner who is never told
 is an owner who never pays, and a cleaner who did the work and hears nothing.
@@ -745,7 +774,7 @@ phase.
 | 5 | Notifications (the event list above) | **done** |
 | 6 | Stripe Connect, test mode end to end, refunds, reconciliation | **done** |
 | 7 | Mutual delayed-reveal reviews | **done** |
-| 8 | Admin console — vetting queue, dispute inbox, unclaimed alerts, ledger | not started |
+| 8 | Admin console — vetting queue, dispute inbox, unclaimed alerts, ledger | **done** |
 | 9 | Pilot launch checklist — new Connect platform account under the new entity | not started |
 
 **Phase 1 built the schema for every table, with no business logic.** Tables for
@@ -828,6 +857,26 @@ Written down from day one, built with their phases:
 - ~~A real click-through of bid → award → payment, not just "the button renders"~~ — bid → award → back out is `tests/e2e/test_award_flow.py`; bid → award → done → paid is `tests/e2e/test_payment_flow.py`, against a Stripe that answers over real HTTP
 
 ---
+
+### The admin console (phase 8)
+
+`app/api/routes/console.py`, mounted under `/admin` beside the vetting queue
+phase 3 built rather than absorbing it — the trust gate has one author and the
+console reads it rather than re-deciding it.
+
+**The console carries no definitions of its own.** Every number on it is read
+from the function that already owns it, because a screen an admin trusts that
+disagrees with the alert an admin was sent is worse than either alone: both
+become untrustworthy and there is no way to tell which is lying.
+
+- The unclaimed list is `turnovers.unclaimed_alarming` — the same call the
+  scheduled alarm makes, moved out of `app/tasks/scheduled.py` so the two
+  cannot drift. `UNCLAIMED_LOOKBACK` moved with it and is re-exported from its
+  old home, because a name that moves silently is a name somebody still imports.
+- The ledger sums its own rows rather than querying totals separately, and
+  carries `total_drift_cents` from `payments.reconcile`. Two queries that could
+  disagree about the same money is how a reconciliation screen ends up
+  reassuring somebody about a number it did not check.
 
 ## Working in this repo
 

@@ -1273,3 +1273,49 @@ class TestUnconfigured:
             stripe_client.post("/refunds", {}, idempotency_key="refund:payment:1")
         with pytest.raises(stripe_client.StripeNotConfigured):
             stripe_client.get("/accounts/acct_1")
+
+
+# --------------------------------------------------------------------------
+# The ledger an admin reads (phase 8)
+# --------------------------------------------------------------------------
+
+
+class TestTheAdminLedger:
+    def test_the_ledger_never_drifts_on_a_real_settled_job(
+        self, client: TestClient, make_cleaner, make_open_turnover, db: Session,
+        admin_user, stripe, webhook_secret,
+    ) -> None:
+        """Collected equals paid out plus the fee kept — the carry-over check
+        from day one, asserted again where an admin reads it.
+
+        **With a real settled payment in the table**, because the same
+        assertion over an empty ledger passes without testing anything, which
+        is the failure mode this suite has already hit more than once.
+        """
+        job = _completed_job(
+            client, make_cleaner, make_open_turnover, db, price_cents=20_000
+        )
+        client.post(
+            f"/api/turnovers/{job['turnover']['id']}/pay", headers=job["owner"]["auth"]
+        )
+        paid = _webhook(
+            client,
+            "checkout.session.completed",
+            {
+                "object": "checkout.session",
+                "id": "cs_test_ledger",
+                "payment_status": "paid",
+                "payment_intent": "pi_test_ledger",
+                "metadata": {"turnover_id": job["turnover"]["id"]},
+            },
+        )
+        assert paid.status_code == 200, paid.text
+
+        body = client.get("/api/admin/ledger", headers=admin_user["auth"]).json()
+        assert body["rows"], "the settled job has to appear, or this proves nothing"
+        assert body["total_collected_cents"] == 20_000
+        assert (
+            body["total_collected_cents"]
+            == body["total_paid_out_cents"] + body["total_platform_fee_cents"]
+        )
+        assert body["total_drift_cents"] == 0

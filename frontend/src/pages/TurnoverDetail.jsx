@@ -5,6 +5,7 @@ import Alert from '../components/Alert.jsx'
 import PaymentPanel from '../components/PaymentPanel.jsx'
 import Rating from '../components/Rating.jsx'
 import { JobSchedule, ScopeBadge } from '../components/JobScope.jsx'
+import DisputePanel from '../components/DisputePanel.jsx'
 import ReviewPanel from '../components/ReviewPanel.jsx'
 import StatusBadge from '../components/StatusBadge.jsx'
 import UrgencyBadge from '../components/UrgencyBadge.jsx'
@@ -287,6 +288,13 @@ export default function TurnoverDetail() {
       {turnover.award?.completed_at && (
         <ReviewPanel turnoverId={turnoverId} side="owner" />
       )}
+
+      {/* **Not gated on completion**, unlike the review beside it. A review is
+          about how a finished job went; a dispute is about something going
+          wrong, and the jobs most worth complaining about are the ones that
+          did not finish — which is why `disputes.parties` reads the most
+          recent award whether it was cancelled or not. */}
+      {turnover.award && <DisputePanel turnoverId={turnoverId} />}
 
       {turnover.award && (
         <div

@@ -20,6 +20,8 @@ from app.api.routes import (
     board,
     calendars,
     cleaners,
+    console,
+    disputes,
     health,
     payments,
     properties,
@@ -54,8 +56,13 @@ api_router.include_router(turnovers.router)
 api_router.include_router(cleaners.router)
 api_router.include_router(board.router)
 api_router.include_router(admin.router)
+# The console sits beside the vetting queue under the same /admin prefix rather
+# than absorbing it: the trust gate works and is tested, and phase 8 is not the
+# moment to destabilise it for tidiness.
+api_router.include_router(console.router)
 api_router.include_router(payments.router)
 api_router.include_router(reviews.router)
+api_router.include_router(disputes.router)
 app.include_router(api_router)
 
 

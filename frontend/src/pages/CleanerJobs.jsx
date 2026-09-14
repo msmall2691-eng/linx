@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react'
 import Alert from '../components/Alert.jsx'
 import EmptyState from '../components/EmptyState.jsx'
 import { JobSchedule, ScopeBadge } from '../components/JobScope.jsx'
+import DisputePanel from '../components/DisputePanel.jsx'
 import ReviewPanel from '../components/ReviewPanel.jsx'
 import StatusBadge from '../components/StatusBadge.jsx'
 import UrgencyBadge from '../components/UrgencyBadge.jsx'
@@ -121,6 +122,12 @@ function Job({ job, timeZone, onCancel, onStart, onComplete, busy }) {
           <ReviewPanel turnoverId={job.turnover_id} side="cleaner" />
         </>
       )}
+
+      {/* **Not gated on `done`**, unlike the review above it. A cleaner's
+          complaints — a lockbox code that was wrong, somebody home who should
+          not have been — are about jobs that went badly, which are exactly the
+          ones nobody marks complete. */}
+      <DisputePanel turnoverId={job.turnover_id} />
 
       {!cancelled && !done && (
         <div className="mt-6 flex flex-wrap gap-2 border-t border-slate-200 pt-4">

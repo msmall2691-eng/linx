@@ -52,6 +52,13 @@ EXPECTED_TABLES = {
     # table should be a decision somebody makes out loud rather than a file that
     # appears.
     "property_calendars",
+    # Phase 8. A dispute is the one thing in this product deliberately *not*
+    # resolved by code: it is a disagreement between two people that a human
+    # decides, and the table exists so the decision has somewhere to live and
+    # something to be argued from later. Phase 1 declared no table for it
+    # because at that point "disputes go to a human inbox" was a policy with no
+    # shape; giving it one is what phase 8 is.
+    "disputes",
 }
 
 

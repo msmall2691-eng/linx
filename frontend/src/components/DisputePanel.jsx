@@ -1,0 +1,210 @@
+import { useEffect, useState } from 'react'
+
+import Alert from './Alert.jsx'
+import { apiFetch } from '../lib/api.js'
+import { useTimeZone } from '../lib/config.jsx'
+import { formatDateTime } from '../lib/datetime.js'
+
+/**
+ * Raising a dispute about a job, and reading your own.
+ *
+ * Used by both sides — an owner on their turnover page, a cleaner on their job
+ * card — because both have the same right to complain about a job they were on
+ * together.
+ *
+ * **It shows only your own.** A dispute the other side raised is not here, and
+ * neither is a count of them: at v1 a person decides when somebody is told they
+ * are being complained about, and a badge on this screen would make that
+ * decision for them.
+ *
+ * Deliberately behind a link rather than open by default. A complaint form
+ * sitting permanently under every finished job invites one; this is the version
+ * you go looking for.
+ */
+const REASONS = [
+  { value: 'quality', label: 'The clean itself' },
+  { value: 'access', label: 'Getting in' },
+  { value: 'damage', label: 'Damage' },
+  { value: 'payment', label: 'Money' },
+  { value: 'conduct', label: 'How someone behaved' },
+  { value: 'other', label: 'Something else' },
+]
+
+const STATUS_WORDS = {
+  open: 'Waiting for someone to pick it up',
+  acknowledged: 'Someone is looking at it',
+  resolved: 'Resolved',
+}
+
+function DisputeCard({ dispute, timeZone }) {
+  return (
+    <div className="rounded-lg bg-slate-50 p-3" data-testid="dispute">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <span className="text-xs font-medium uppercase tracking-wide text-slate-500">
+          {REASONS.find((r) => r.value === dispute.reason)?.label ?? dispute.reason}
+        </span>
+        <span className="text-xs text-slate-500" data-testid="dispute-status">
+          {STATUS_WORDS[dispute.status] ?? dispute.status}
+        </span>
+      </div>
+      <p className="mt-2 whitespace-pre-wrap text-sm text-slate-700">{dispute.description}</p>
+      <p className="mt-2 text-xs text-slate-400">
+        Raised {formatDateTime(dispute.created_at, timeZone)}
+      </p>
+
+      {dispute.resolution_notes && (
+        <div className="mt-3 rounded border border-slate-200 bg-white p-3">
+          <p className="text-xs font-medium uppercase tracking-wide text-slate-500">
+            What was decided
+          </p>
+          {/* The admin's note, verbatim. A decision somebody has to live with
+              should reach them in the words of the person who made it. */}
+          <p className="mt-1 whitespace-pre-wrap text-sm text-slate-700" data-testid="dispute-resolution">
+            {dispute.resolution_notes}
+          </p>
+        </div>
+      )}
+    </div>
+  )
+}
+
+export default function DisputePanel({ turnoverId }) {
+  const timeZone = useTimeZone()
+
+  const [state, setState] = useState(null)
+  const [open, setOpen] = useState(false)
+  const [reason, setReason] = useState('quality')
+  const [description, setDescription] = useState('')
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    apiFetch(`/turnovers/${turnoverId}/disputes`)
+      .then((data) => !cancelled && setState(data))
+      .catch((err) => !cancelled && setError(err.message))
+    return () => {
+      cancelled = true
+    }
+  }, [turnoverId])
+
+  async function submit(event) {
+    event.preventDefault()
+    setBusy(true)
+    setError('')
+    try {
+      // The action answers with the same shape the GET did, so replacing state
+      // with it keeps everything the screen was showing.
+      setState(
+        await apiFetch(`/turnovers/${turnoverId}/disputes`, {
+          method: 'POST',
+          body: { reason, description },
+        }),
+      )
+      setDescription('')
+      setOpen(false)
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  if (!state) return null
+  // Nothing raised and nothing raisable — no reason to take up the screen.
+  if (!state.can_raise && state.mine.length === 0) return null
+
+  return (
+    <div className="mt-6 card" data-testid="dispute-panel">
+      <h2 className="font-semibold">Something go wrong?</h2>
+
+      {state.mine.length > 0 && (
+        <div className="mt-3 space-y-3">
+          {state.mine.map((dispute) => (
+            <DisputeCard key={dispute.id} dispute={dispute} timeZone={timeZone} />
+          ))}
+        </div>
+      )}
+
+      {state.can_raise && !open && (
+        <button
+          type="button"
+          onClick={() => setOpen(true)}
+          className="btn-secondary mt-3"
+          data-testid="open-dispute-form"
+        >
+          Raise a dispute
+        </button>
+      )}
+
+      {state.can_raise && open && (
+        <form onSubmit={submit} className="mt-3 space-y-3">
+          <p className="text-sm text-slate-600">
+            A person reads every one of these. Nothing is decided automatically, and
+            nobody is charged or refunded because a dispute was opened.
+          </p>
+
+          <div>
+            <label htmlFor="dispute-reason" className="field-label">
+              What kind of problem?
+            </label>
+            <select
+              id="dispute-reason"
+              value={reason}
+              onChange={(e) => setReason(e.target.value)}
+              className="field-input"
+              data-testid="dispute-reason"
+            >
+              {REASONS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <label htmlFor="dispute-description" className="field-label">
+              What happened?
+            </label>
+            <textarea
+              id="dispute-description"
+              rows={4}
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              placeholder="As much detail as you can — this is what a person reads."
+              className="field-input"
+              data-testid="dispute-description"
+            />
+          </div>
+
+          <div className="flex gap-2">
+            <button
+              type="submit"
+              className="btn-primary"
+              disabled={busy || description.trim().length === 0}
+              data-testid="submit-dispute"
+            >
+              {busy ? 'Sending…' : 'Send it'}
+            </button>
+            <button type="button" className="btn-secondary" onClick={() => setOpen(false)}>
+              Cancel
+            </button>
+          </div>
+        </form>
+      )}
+
+      {!state.can_raise && state.blocker && (
+        <p className="mt-3 text-sm text-slate-600" data-testid="dispute-blocker">
+          {state.blocker}
+        </p>
+      )}
+
+      {error && (
+        <div className="mt-4">
+          <Alert>{error}</Alert>
+        </div>
+      )}
+    </div>
+  )
+}
