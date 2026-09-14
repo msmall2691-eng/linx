@@ -202,8 +202,26 @@ def test_a_dispute_reaches_a_person_and_the_other_side_is_not_told(
     )
     admin_page.get_by_test_id("submit-resolution").click()
 
-    # The console keeps rendering after the write, and the queue reflects it.
+    # **Wait for the write, not for the page.** `dispute-inbox` is the
+    # container `<ul>` — visible before the resolve and after it — so asserting
+    # on it here synchronises with nothing: it passes instantly while the POST
+    # is still in flight, and the owner's `goto` below can then read the
+    # database before the resolve has committed. `to_have_text` would retry
+    # against a DOM that never re-fetches, so the failure surfaced two steps
+    # away from its cause, on the owner's screen, reading like a product bug.
+    #
+    # The card's own status is a real synchronisation point: it only says
+    # resolved once the POST has answered and the console has re-rendered from
+    # the answer. It is also a real check — a resolve that 500s now fails here,
+    # naming the resolve, instead of looking like the owner's page not updating.
+    expect(admin_page.get_by_test_id("admin-dispute-status").first).to_have_text(
+        re.compile("resolved", re.I)
+    )
+    # And the console keeps rendering after the write, carrying the note.
     expect(admin_page.get_by_test_id("dispute-inbox")).to_be_visible()
+    expect(
+        admin_page.get_by_text("Cleaner returning Thursday at no charge.")
+    ).to_be_visible()
 
     # --- now both sides see the outcome ----------------------------------
     owner_page.goto(turnover_url)
