@@ -51,6 +51,7 @@ from __future__ import annotations
 import ipaddress
 import logging
 import socket
+import threading
 import uuid
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
@@ -663,6 +664,99 @@ def refuse_ineligible(prop: Property) -> None:
         )
 
 
+def _gate(calendar: PropertyCalendar, prop: Property) -> None:
+    """Whether this feed may be read at all, over both rows at once.
+
+    **One predicate, called twice**: cheaply before the network, and again on
+    freshly locked rows before anything is written. That shape is the fix for a
+    whole family of findings this module kept producing one at a time — a rule
+    enforced on the scheduled query but not the button, or checked before the
+    fetch but not after, or applied to the property but not to the calendar. If
+    the answer can change, it has to be asked at both moments; if it is asked
+    at both moments, it has to be the same question.
+    """
+    if not calendar.is_active:
+        raise CalendarError(
+            "This calendar is switched off. Turn it back on to read it again."
+        )
+    refuse_ineligible(prop)
+
+
+def _claim(
+    db: Session, calendar_id: uuid.UUID, property_id: uuid.UUID
+) -> tuple[PropertyCalendar | None, Property | None]:
+    """Lock both rows and re-read them, so what is checked is what is written.
+
+    Two things, and missing either one loses the point:
+
+    * **The lock**, held to the commit, so a settings change cannot land between
+      the check and the write. `update_property` takes the same row lock.
+    * **`populate_existing`**, because a locking SELECT still hands back the
+      instance already in the identity map *with its old attribute values*. The
+      row would be locked and then read stale, which is the entire failure.
+      Verified by doing it both ways against a row changed in another session.
+
+    Property first, then calendar, always — a consistent order is what stops
+    two paths that take both locks from deadlocking against each other.
+    """
+    prop = db.execute(
+        select(Property)
+        .where(Property.id == property_id)
+        .with_for_update(key_share=True)
+        .execution_options(populate_existing=True)
+    ).scalar_one_or_none()
+    calendar = db.execute(
+        select(PropertyCalendar)
+        .where(PropertyCalendar.id == calendar_id)
+        .with_for_update(key_share=True)
+        .execution_options(populate_existing=True)
+    ).scalar_one_or_none()
+    return calendar, prop
+
+
+def _fetch_within(
+    url: str, *, client: httpx.Client | None, seconds: float
+) -> str:
+    """`fetch`, with a deadline the caller can actually rely on.
+
+    **`MAX_FEED_SECONDS` inside the streaming loop does not bound the call**, and
+    the gap is the interesting part: `client.stream()` has to receive the whole
+    response *head* before the loop is ever reached, and httpx's read timeout is
+    per-receive inactivity. A host trickling header bytes just inside it holds
+    the call open for as long as it likes — which ties up the request worker on
+    the Sync button and stalls the scheduled pass, whose own budget is only
+    checked between feeds and so cannot interrupt this.
+
+    A blocking socket read cannot be cancelled, so the work happens on a daemon
+    thread and the caller stops waiting on time. **The residual is named rather
+    than hidden**: an abandoned thread lives until its own read timeout or the
+    body deadline ends it, holding one socket. What it can no longer do is hold
+    up the pass or the person who pressed the button, which is the property that
+    was actually missing.
+    """
+    outcome: dict[str, object] = {}
+
+    def work() -> None:
+        try:
+            outcome["text"] = fetch(url, client=client)
+        except BaseException as exc:  # noqa: BLE001 - re-raised on the caller's thread
+            outcome["error"] = exc
+
+    worker = threading.Thread(target=work, daemon=True, name="linx-calendar-fetch")
+    worker.start()
+    worker.join(seconds)
+
+    if worker.is_alive():
+        raise CalendarError(
+            "That calendar took too long to answer. It is usually temporary — "
+            "the next sync will try again."
+        )
+    error = outcome.get("error")
+    if error is not None:
+        raise error  # type: ignore[misc]
+    return str(outcome["text"])
+
+
 def sync(
     db: Session,
     calendar: PropertyCalendar,
@@ -672,71 +766,64 @@ def sync(
 ) -> SyncResult:
     """Fetch, parse, reconcile, and record what happened. **Commits.**
 
-    A failure is written to the calendar row and re-raised: the owner needs to
-    see it on their own screen, and the caller needs to know not to count this
-    as a successful pass. Crucially, **nothing about the turnovers changes** —
-    "the feed is empty" and "the feed did not load" must never look the same,
-    because the first one legitimately deletes drafts.
+    The sequence is the design, and it is written out here because four review
+    rounds produced findings that were all really one finding: *a step in the
+    wrong place*.
 
-    **Everything a caller could be wrong about is checked here**, not in the
-    caller: whether the feed is switched on, and whether the property can have
-    one at all. The alternative has already cost this module three rounds of
-    the same correction — a rule that lives in the scheduled path's query is
-    not enforced on the button beside it.
+    1. **Gate, before touching the network.** An archived property or a
+       switched-off feed is refused without an outbound request, so pressing
+       Sync on a property the product says it no longer reads does not sit
+       through a network timeout first.
+    2. **Fetch, under a deadline the caller can rely on** — see `_fetch_within`.
+    3. **Claim: lock and re-read both rows, then gate again.** The answer can
+       have changed while we were on the network, and this is the copy that gets
+       written from.
+    4. **Reconcile and record**, inside that lock.
+
+    **Every `CalendarError` out of here leaves its reason on the row**, from any
+    step, because one of them previously escaped the recording block and a
+    caller swallowed it assuming a reason had been written — the owner got a
+    success with no jobs and no explanation. A uniform handler is what makes
+    that class impossible rather than fixed.
+
+    Nothing about the turnovers changes on a failure: "the feed is empty" and
+    "the feed did not load" must never look the same, because the first one
+    legitimately deletes drafts.
     """
     moment = now or datetime.now(tz=region_timezone())
 
-    if not calendar.is_active:
-        # Switched off through the PATCH endpoint. The scheduled query skips it;
-        # without this, the Sync button did not, so a feed the API describes as
-        # off could still create, move and delete drafts.
-        raise CalendarError(
-            "This calendar is switched off. Turn it back on to read it again."
+    try:
+        prop = db.get(Property, calendar.property_id)
+        if prop is None:
+            raise CalendarError("That property no longer exists.")
+        _gate(calendar, prop)
+
+        text = _fetch_within(calendar.url, client=client, seconds=MAX_FEED_SECONDS)
+        bookings = parse(text)
+
+        calendar_locked, prop = _claim(db, calendar.id, calendar.property_id)
+        if calendar_locked is None:
+            raise CalendarError("That calendar has been removed.")
+        if prop is None:
+            raise CalendarError("That property no longer exists.")
+        calendar = calendar_locked
+        _gate(calendar, prop)
+
+        result = reconcile(
+            db, calendar, jobs_for(bookings, prop, now=moment), now=moment
         )
 
-    try:
-        text = fetch(calendar.url, client=client)
-        bookings = parse(text)
-    except CalendarError as error:
-        calendar.last_error = error.detail
+        calendar.last_error = None
         calendar.last_synced_at = moment
+        calendar.last_booking_count = len(bookings)
+        # **Persisted, not just returned.** The scheduled pass is the one that
+        # usually finds this, and it has nobody to hand a return value to — see
+        # `PropertyCalendar.last_stale_kept`.
+        calendar.last_stale_kept = result.stale_but_kept
         db.commit()
+    except CalendarError as error:
+        _record_failure(db, calendar.id, error, moment)
         raise
-
-    # **Re-read under a lock, rather than trusting what is already loaded.**
-    # `db.get` can hand back the instance an earlier ownership check put in the
-    # identity map, which is a copy from before this transaction. Worse, the
-    # eligibility answer can change underneath us: `update_property` locks the
-    # property, counts zero live turnovers, and commits `residential` — and if
-    # that lands between this check and the reconcile commit, the feed writes a
-    # rental turnover onto a home. Taking the same row lock it takes, and
-    # holding it through the commit, is what makes the two serialize.
-    prop = db.execute(
-        select(Property)
-        .where(Property.id == calendar.property_id)
-        .with_for_update(key_share=True)
-        # **`populate_existing` is not optional here, and that is not obvious.**
-        # A locking SELECT takes the lock, but SQLAlchemy still hands back the
-        # instance already in the identity map *with its old attribute values* —
-        # so without this the row is locked and then read stale, which is
-        # precisely the half of the bug this re-read exists to fix. Verified by
-        # doing it both ways against a row changed in another session.
-        .execution_options(populate_existing=True)
-    ).scalar_one_or_none()
-    if prop is None:
-        raise CalendarError("That property no longer exists.")
-    refuse_ineligible(prop)
-
-    result = reconcile(db, calendar, jobs_for(bookings, prop, now=moment), now=moment)
-
-    calendar.last_error = None
-    calendar.last_synced_at = moment
-    calendar.last_booking_count = len(bookings)
-    # **Persisted, not just returned.** The scheduled pass is the one that
-    # usually finds this, and it has nobody to hand a return value to — see
-    # `PropertyCalendar.last_stale_kept`.
-    calendar.last_stale_kept = result.stale_but_kept
-    db.commit()
 
     logger.info(
         "calendar %s: %d bookings, %d created, %d updated, %d removed, %d kept",
@@ -748,6 +835,26 @@ def sync(
         result.stale_but_kept,
     )
     return result
+
+
+def _record_failure(
+    db: Session, calendar_id: uuid.UUID, error: CalendarError, moment: datetime
+) -> None:
+    """Leave the reason where the owner will see it, and change nothing else.
+
+    **Rolls back first**, which matters now that this covers the reconcile step
+    too: a failure partway through must not commit half a sync alongside its own
+    error message.
+    """
+    db.rollback()
+    calendar = db.get(PropertyCalendar, calendar_id)
+    if calendar is None:
+        # The feed was deleted underneath us. Nothing to write the reason on,
+        # and nothing that needs it.
+        return
+    calendar.last_error = error.detail
+    calendar.last_synced_at = moment
+    db.commit()
 
 
 def active_calendars(db: Session) -> list[PropertyCalendar]:

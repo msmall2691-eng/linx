@@ -378,25 +378,52 @@ promised and then dropped. Whether it should also *notify* is a genuine open
 question rather than an oversight: `NotificationEvent` is a closed list, and
 opening it is meant to be a decision somebody makes out loud.
 
-**A feed is only read while its property is still a live short-term rental, and
-while the feed itself is switched on.** `calendars.refuse_ineligible` is the one
-author of the first rule and `sync` is the one gate for both, so the scheduled
-pass, the Sync button and the add endpoint cannot answer differently.
-`active_calendars` carries the same condition in SQL, but only so the pass does
-not fetch feeds it would then refuse.
+**`sync()` is an explicit sequence, and the sequence is the design.** Four
+rounds of review on this feature produced findings that were all really one
+finding — *a step in the wrong place* — so the function is now written as the
+order itself:
 
-That single-author arrangement took three review rounds to arrive at, and each
-round the rule was real, written down, and reachable around on one path: first
-`sync` had it and `active_calendars` did not, then `active_calendars` had it and
-the Sync button did not, then the add endpoint carried its own copy that covered
-only the residential half.
+1. **Gate, before touching the network.** `_gate(calendar, prop)` is one
+   predicate over both rows: the feed switched on, and the property still a live
+   short-term rental. An archived property costs no outbound request.
+2. **Fetch, under a deadline the caller can rely on** (`_fetch_within`).
+3. **Claim — lock and re-read both rows, then gate again** with the same
+   predicate. The answer can change while we are on the network.
+4. **Reconcile and record**, inside that lock.
 
-**The property is re-read under a lock, with `populate_existing`.** Both halves
-matter and the second is easy to miss: a locking `SELECT` takes the lock but
-still hands back the instance already in the session's identity map, *with its
-old attribute values* — so without it the row is locked and then read stale,
-which is the whole failure. `update_property` takes the same row lock, so a
-reclassification cannot land between the check and the reconcile commit.
+The single-author rule (`refuse_ineligible`, which the add endpoint also asks
+rather than copying) took three rounds to arrive at, and each round the rule was
+real, written down, and reachable around on exactly one path: first `sync` had
+it and `active_calendars` did not; then `active_calendars` had it and the Sync
+button did not; then the add endpoint carried its own copy covering only the
+residential half. **Asking one predicate at both moments is what retired the
+class** — if an answer can change, it must be asked before *and* after, and it
+must be the same question both times.
+
+**`_claim` needs the lock and `populate_existing`, and the second is easy to
+miss.** A locking `SELECT` takes the lock but still hands back the instance
+already in the session's identity map, *with its old attribute values* — so
+without it the row is locked and then read stale, which is the whole failure.
+Property first, then calendar, always: a consistent lock order is what stops two
+paths that take both from deadlocking. `update_property` takes the same row lock.
+
+**Every `CalendarError` out of `sync` leaves its reason on the row**, from any
+step, via one handler that rolls back first. A gate refusal once escaped the
+recording block and a caller swallowed it assuming a reason had been written —
+the owner got a success with no jobs and no explanation. A uniform handler makes
+that impossible rather than fixed, and the rollback matters now that it covers
+reconcile: a failure partway through must not commit half a sync alongside its
+own error message.
+
+**The fetch deadline is enforced on a worker thread, because a blocking socket
+read cannot be cancelled.** `MAX_FEED_SECONDS` inside the streaming loop does not
+bound the call: `client.stream()` must receive the whole response *head* first,
+and httpx's read timeout is per-receive inactivity, so a host trickling header
+bytes holds the call open indefinitely — tying up the request worker behind the
+Sync button and stalling the scheduled pass, whose budget is only checked
+*between* feeds. The residual is named in the code rather than hidden: an
+abandoned thread lives until its own timeout, holding one socket. What it can no
+longer do is hold up the pass or the person who pressed the button.
 
 **The stale warning is only counted while it is still true.** A completed or
 cancelled job, or one whose checkout has passed, has no booking in the feed

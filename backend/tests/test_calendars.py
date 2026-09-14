@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import date, datetime, time, timedelta, timezone
+from time import monotonic, sleep
 from unittest import mock
 
 import httpx
@@ -1463,3 +1464,173 @@ class TestADayIsARegionDay:
             "END:VEVENT"
         )
         assert calendars.parse(feed)[0].departs_on == date(2026, 9, 15)
+
+
+# --------------------------------------------------------------------------
+# The restructure — sequence, not patches
+#
+# Four rounds of findings were really one finding repeated: a step in the wrong
+# place. `sync` is now an explicit sequence — gate, fetch under a real deadline,
+# claim and gate again, reconcile — and these pin the properties that sequence
+# is supposed to have, rather than the individual bugs it retired.
+# --------------------------------------------------------------------------
+
+
+class TestTheDeadlineTheCallerCanRelyOn:
+    def test_a_host_that_never_sends_headers_does_not_hold_the_caller(self) -> None:
+        """**The byte-loop deadline could not see this.**
+
+        `client.stream()` must receive the whole response *head* before the loop
+        is reached, and httpx's read timeout is per-receive inactivity — so a
+        host trickling header bytes holds the call open indefinitely. That ties
+        up the request worker behind the Sync button and stalls the scheduled
+        pass, whose budget is only checked *between* feeds.
+        """
+        started = monotonic()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            sleep(30)  # never gets as far as returning a head
+            return httpx.Response(200, text="unreachable")
+
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        with pytest.raises(calendars.CalendarError) as refused:
+            calendars._fetch_within(
+                "https://example.test/a.ics", client=client, seconds=0.5
+            )
+
+        assert "too long" in refused.value.detail
+        # The point is not the error, it is that we stopped waiting for it.
+        assert monotonic() - started < 10
+
+    def test_a_feed_that_answers_normally_still_comes_back(self) -> None:
+        """A deadline that also breaks the working case is not a fix."""
+        text = calendars._fetch_within(
+            "https://example.test/a.ics",
+            client=_fake_client(_feed_for(10)),
+            seconds=30,
+        )
+        assert "BEGIN:VCALENDAR" in text
+
+
+class TestTheGateRunsBeforeTheNetwork:
+    def test_an_ineligible_property_is_refused_without_an_outbound_request(
+        self, client: TestClient, make_user, db: Session
+    ) -> None:
+        """Pressing Sync on a property the product says it no longer reads
+        should not sit through a network timeout before saying so."""
+        owner = make_user(role="owner")
+        prop = _property(client, owner)
+        calendar = _calendar(db, prop["id"])
+
+        row = db.get(Property, uuid.UUID(prop["id"]))
+        row.is_active = False
+        db.commit()
+
+        asked: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            asked.append(str(request.url))
+            return httpx.Response(200, text=_feed_for(10))
+
+        feed_client = httpx.Client(transport=httpx.MockTransport(handler))
+        with pytest.raises(calendars.CalendarError):
+            calendars.sync(db, calendar, client=feed_client)
+
+        assert asked == [], "the feed must not be contacted at all"
+
+
+class TestTheGateRunsAgainOnTheLockedRow:
+    def test_switching_the_feed_off_mid_fetch_stops_the_write(
+        self, client: TestClient, make_user, db: Session
+    ) -> None:
+        """**The pre-fetch gate is not enough on its own.**
+
+        The answer can change while we are on the network, and the copy in
+        memory would never notice. This flips the switch *during* the fetch, so
+        only the locked re-read with `populate_existing` can catch it.
+        """
+        from app.db import SessionLocal
+
+        owner = make_user(role="owner")
+        prop = _property(client, owner)
+        calendar = _calendar(db, prop["id"])
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            # The owner presses "switch off" while the feed is being read.
+            elsewhere = SessionLocal()
+            try:
+                row = elsewhere.get(PropertyCalendar, calendar.id)
+                row.is_active = False
+                elsewhere.commit()
+            finally:
+                elsewhere.close()
+            return httpx.Response(200, text=_feed_for(10))
+
+        feed_client = httpx.Client(transport=httpx.MockTransport(handler))
+        with pytest.raises(calendars.CalendarError) as refused:
+            calendars.sync(db, calendar, client=feed_client)
+        assert "switched off" in refused.value.detail
+
+        db.rollback()
+        db.expire_all()
+        assert db.execute(select(Turnover)).scalars().all() == []
+
+
+class TestEveryFailureLeavesItsReason:
+    """One of these escaped the recording block before, and a caller swallowed
+    it assuming a reason had been written — the owner got a success with no jobs
+    and no explanation. A uniform handler is what makes that impossible rather
+    than fixed."""
+
+    def test_a_feed_that_will_not_load_records_why(
+        self, client: TestClient, make_user, db: Session
+    ) -> None:
+        owner = make_user(role="owner")
+        calendar = _calendar(db, _property(client, owner)["id"])
+
+        with pytest.raises(calendars.CalendarError):
+            calendars.sync(db, calendar, client=_fake_client(status=404))
+
+        db.expire_all()
+        assert "not found" in db.get(PropertyCalendar, calendar.id).last_error
+
+    def test_a_gate_refusal_records_why_too(
+        self, client: TestClient, make_user, db: Session
+    ) -> None:
+        """Not only the fetch step — this is the one that used to escape."""
+        owner = make_user(role="owner")
+        prop = _property(client, owner)
+        calendar = _calendar(db, prop["id"])
+
+        row = db.get(Property, uuid.UUID(prop["id"]))
+        row.is_active = False
+        db.commit()
+
+        with pytest.raises(calendars.CalendarError):
+            calendars.sync(db, calendar, client=_fake_client(_feed_for(10)))
+
+        db.expire_all()
+        assert "archived" in db.get(PropertyCalendar, calendar.id).last_error
+
+    def test_a_failure_part_way_through_commits_nothing_of_the_sync(
+        self, client: TestClient, make_user, db: Session, monkeypatch
+    ) -> None:
+        """The recording handler rolls back first, which matters now that it
+        covers reconcile as well as the fetch."""
+        owner = make_user(role="owner")
+        prop = _property(client, owner)
+        calendar = _calendar(db, prop["id"])
+
+        real_reconcile = calendars.reconcile
+
+        def explode(session, cal, proposed, **kwargs):
+            real_reconcile(session, cal, proposed, **kwargs)
+            raise calendars.CalendarError("something went wrong late on")
+
+        monkeypatch.setattr(calendars, "reconcile", explode)
+        with pytest.raises(calendars.CalendarError):
+            calendars.sync(db, calendar, client=_fake_client(_feed_for(10)))
+
+        db.expire_all()
+        assert db.execute(select(Turnover)).scalars().all() == []
+        assert db.get(PropertyCalendar, calendar.id).last_error is not None
