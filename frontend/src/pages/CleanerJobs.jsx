@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 
 import Alert from '../components/Alert.jsx'
 import EmptyState from '../components/EmptyState.jsx'
-import { ScopeBadge } from '../components/JobScope.jsx'
+import { JobSchedule, ScopeBadge } from '../components/JobScope.jsx'
 import ReviewPanel from '../components/ReviewPanel.jsx'
 import StatusBadge from '../components/StatusBadge.jsx'
 import UrgencyBadge from '../components/UrgencyBadge.jsx'
@@ -49,32 +49,12 @@ function Job({ job, timeZone, onCancel, onStart, onComplete, busy }) {
       </div>
 
       <dl className="mt-4 grid gap-4 sm:grid-cols-2">
-        <div>
-          <dt className="text-xs font-medium uppercase tracking-wide text-slate-500">
-            Guest checks out
-          </dt>
-          <dd className="mt-1 text-sm font-medium">
-            {formatDateTime(job.checkout_at, timeZone)}
-          </dd>
-        </div>
-        <div>
-          <dt className="text-xs font-medium uppercase tracking-wide text-slate-500">
-            Next guest checks in
-          </dt>
-          <dd className="mt-1 text-sm font-medium">
-            {job.checkin_at ? (
-              formatDateTime(job.checkin_at, timeZone)
-            ) : (
-              <span className="text-slate-400">None booked yet</span>
-            )}
-          </dd>
-        </div>
-        <div>
-          <dt className="text-xs font-medium uppercase tracking-wide text-slate-500">
-            Your window
-          </dt>
-          <dd className="mt-1 text-sm">{formatTurnaround(job.checkout_at, job.checkin_at)}</dd>
-        </div>
+        <JobSchedule
+          job={job}
+          timeZone={timeZone}
+          formatDateTime={formatDateTime}
+          formatTurnaround={formatTurnaround}
+        />
         <div>
           <dt className="text-xs font-medium uppercase tracking-wide text-slate-500">
             Agreed price

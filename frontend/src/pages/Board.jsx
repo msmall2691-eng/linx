@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom'
 
 import Alert from '../components/Alert.jsx'
 import EmptyState from '../components/EmptyState.jsx'
-import { PropertySpecs, ScopeBadge } from '../components/JobScope.jsx'
+import { JobSchedule, PropertySpecs, ScopeBadge } from '../components/JobScope.jsx'
 import UrgencyBadge from '../components/UrgencyBadge.jsx'
 import { apiFetch } from '../lib/api.js'
 import { useTimeZone } from '../lib/config.jsx'
@@ -202,30 +202,12 @@ export default function Board() {
             </div>
 
             <dl className="mt-4 grid gap-3 text-sm sm:grid-cols-2">
-              <div>
-                <dt className="text-xs font-medium uppercase tracking-wide text-slate-500">
-                  Checkout
-                </dt>
-                <dd className="mt-0.5">{formatDateTime(turnover.checkout_at, timeZone)}</dd>
-              </div>
-              <div>
-                <dt className="text-xs font-medium uppercase tracking-wide text-slate-500">
-                  Next checkin
-                </dt>
-                <dd className="mt-0.5">
-                  {turnover.checkin_at
-                    ? formatDateTime(turnover.checkin_at, timeZone)
-                    : 'None booked'}
-                </dd>
-              </div>
-              <div>
-                <dt className="text-xs font-medium uppercase tracking-wide text-slate-500">
-                  Your window
-                </dt>
-                <dd className="mt-0.5">
-                  {formatTurnaround(turnover.checkout_at, turnover.checkin_at)}
-                </dd>
-              </div>
+              <JobSchedule
+                job={turnover}
+                timeZone={timeZone}
+                formatDateTime={formatDateTime}
+                formatTurnaround={formatTurnaround}
+              />
               <div>
                 <dt className="text-xs font-medium uppercase tracking-wide text-slate-500">
                   Owner&apos;s budget

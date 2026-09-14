@@ -123,6 +123,39 @@ def update_property(
     # exclude_unset so an omitted field keeps its value; a PATCH that sent
     # every default would blank out notes the owner never touched.
     fields = payload.model_dump(exclude_unset=True)
+
+    # **Reclassifying a property with work on it would strand that work.** A
+    # rental's live turnovers carry `service_type=turnover`, which a home is
+    # not allowed to have — so flipping the type underneath them produces jobs
+    # that could never have been posted, on a screen that asks about guests
+    # for a house somebody lives in. Refused while anything is live; the owner
+    # can finish or cancel those first.
+    new_type = fields.get("property_type")
+    if new_type is not None and new_type != prop.property_type:
+        # Lock the property before counting, and hold it to the commit — the
+        # same row `create_turnover` locks. Without this the count and the job
+        # creation can interleave and produce exactly the incompatible live job
+        # this guard exists to prevent.
+        db.execute(
+            select(Property.id).where(Property.id == prop.id).with_for_update()
+        ).scalar_one()
+
+        live = db.execute(
+            select(func.count(Turnover.id)).where(
+                Turnover.property_id == prop.id,
+                Turnover.status.in_(LIVE_TURNOVER_STATUSES),
+            )
+        ).scalar_one()
+        if live:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    f"This property has {live} job(s) still scheduled. Finish or "
+                    "cancel them before changing what kind of place it is — the "
+                    "jobs already posted were written for the old kind."
+                ),
+            )
+
     for field, value in fields.items():
         setattr(prop, field, value)
 

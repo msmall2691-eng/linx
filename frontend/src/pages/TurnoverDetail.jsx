@@ -4,7 +4,7 @@ import { Link, useParams } from 'react-router-dom'
 import Alert from '../components/Alert.jsx'
 import PaymentPanel from '../components/PaymentPanel.jsx'
 import Rating from '../components/Rating.jsx'
-import { ScopeBadge } from '../components/JobScope.jsx'
+import { JobSchedule, ScopeBadge } from '../components/JobScope.jsx'
 import ReviewPanel from '../components/ReviewPanel.jsx'
 import StatusBadge from '../components/StatusBadge.jsx'
 import UrgencyBadge from '../components/UrgencyBadge.jsx'
@@ -217,39 +217,21 @@ export default function TurnoverDetail() {
       </div>
 
       <dl className="card mt-6 grid gap-4 sm:grid-cols-2">
-        <div>
-          <dt className="text-xs font-medium uppercase tracking-wide text-slate-500">
-            Guest checks out
-          </dt>
-          <dd className="mt-1 text-sm font-medium">
-            {formatDateTime(turnover.checkout_at, timeZone)}
-          </dd>
-        </div>
-        <div>
-          <dt className="text-xs font-medium uppercase tracking-wide text-slate-500">
-            Next guest checks in
-          </dt>
-          <dd className="mt-1 text-sm font-medium">
-            {turnover.checkin_at ? (
-              formatDateTime(turnover.checkin_at, timeZone)
-            ) : (
-              <span className="text-slate-400">None booked yet</span>
-            )}
-          </dd>
-        </div>
-        <div className="sm:col-span-2">
-          <dt className="text-xs font-medium uppercase tracking-wide text-slate-500">
-            The window
-          </dt>
-          <dd className="mt-1 text-sm">
-            {formatTurnaround(turnover.checkout_at, turnover.checkin_at)}
-            {turnover.is_same_day && showsUrgency(turnover.status) && (
-              <span className="ml-2 font-medium text-urgency-urgent">
-                Same-day turnaround
-              </span>
-            )}
-          </dd>
-        </div>
+        <JobSchedule
+          job={turnover}
+          timeZone={timeZone}
+          formatDateTime={formatDateTime}
+          formatTurnaround={formatTurnaround}
+        />
+        {/* Only a rental can be one, and only a rental's schedule row is there
+            for it to sit under. */}
+        {turnover.is_same_day && showsUrgency(turnover.status) && (
+          <div className="sm:col-span-2 -mt-2">
+            <span className="text-sm font-medium text-urgency-urgent">
+              Same-day turnaround
+            </span>
+          </div>
+        )}
         <div>
           <dt className="text-xs font-medium uppercase tracking-wide text-slate-500">
             Your budget
