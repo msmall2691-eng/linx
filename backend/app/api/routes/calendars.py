@@ -105,16 +105,47 @@ def add_calendar(
 
     try:
         result = calendars.sync(db, calendar)
-    except calendars.CalendarError:
+    except calendars.CalendarError as error:
         # **A 201 with the reason on the row, not an error.** Adding the
         # calendar genuinely succeeded; it is the *reading* that failed, which
         # may be a temporary outage. Throwing away what the owner typed helps
         # nobody, and `sync` has already written the reason to `last_error`
         # where their screen will show it.
-        result = calendars.SyncResult()
+        #
+        # Unless the row itself is gone — another request can delete the feed
+        # while this one is still fetching, and then there is nothing to answer
+        # with and no row carrying the reason.
+        if not _refresh_if_present(db, calendar):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT, detail=error.detail
+            ) from None
+        return _answer(calendar, calendars.SyncResult())
 
-    db.refresh(calendar)
+    _refresh_if_present(db, calendar)
     return _answer(calendar, result)
+
+
+def _refresh_if_present(db: Session, calendar: PropertyCalendar) -> bool:
+    """Re-read the row, unless it is gone. Answers whether it is still there.
+
+    **Both endpoints call this, which is the point.** `sync` can refuse because
+    another request deleted the feed while this one was out on the network, and
+    an unguarded `db.refresh` then raises *inside the error handler* and turns a
+    deliberate answer into a 500 that says nothing. Round five fixed exactly
+    that on the sync endpoint and left the identical line on the add endpoint —
+    the same rule on one of two paths, which is the mistake this file has now
+    made often enough to stop writing the line twice.
+
+    Asked for forgiveness rather than permission, because the obvious guard does
+    not work: `db.get` answers from the session's identity map and hands back
+    the deleted instance without touching the database, so a `is not None` check
+    passes and the refresh fails anyway.
+    """
+    try:
+        db.refresh(calendar)
+    except SQLAlchemyError:
+        return False
+    return True
 
 
 def _answer(calendar: PropertyCalendar, result: calendars.SyncResult) -> SyncOut:
@@ -144,25 +175,12 @@ def sync_calendar(
     try:
         result = calendars.sync(db, calendar)
     except calendars.CalendarError as error:
-        # **The row may be gone**, which is one of the things `sync` can refuse
-        # for: another request can delete the feed while this one is out on the
-        # network. Refreshing it unconditionally then raises inside the handler
-        # and turns a deliberate 502 into a 500 that says nothing.
-        #
-        # Asked for forgiveness rather than permission, because the obvious
-        # guard does not work: `db.get` answers from the session's identity map
-        # and hands back the deleted instance without touching the database, so
-        # a `is not None` check passes and the refresh fails anyway. That is the
-        # same stale-cache trap as `_claim`, one layer up.
-        try:
-            db.refresh(calendar)
-        except SQLAlchemyError:
-            pass
+        _refresh_if_present(db, calendar)
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY, detail=error.detail
         ) from None
 
-    db.refresh(calendar)
+    _refresh_if_present(db, calendar)
     return _answer(calendar, result)
 
 

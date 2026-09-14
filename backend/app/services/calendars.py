@@ -54,6 +54,7 @@ import socket
 import threading
 import uuid
 from dataclasses import dataclass
+from hashlib import sha256
 from datetime import date, datetime, time, timedelta
 from time import monotonic
 from urllib.parse import urlparse
@@ -124,6 +125,11 @@ MAX_REDIRECTS = 5
 #: the review reveal is the one scheduled job this product cannot do without.
 MAX_FEED_SECONDS = 60.0
 
+#: How long to wait for a worker to notice its socket has been closed. Short,
+#: because the read raises as soon as the close lands; this is only here so the
+#: caller can tell whether the thread really ended.
+CLOSE_GRACE_SECONDS = 5.0
+
 #: Summaries that mean "the owner blocked these dates", not "a guest is
 #: staying". Airbnb exports both through the same feed, and a block does not
 #: need a clean at the end of it.
@@ -147,6 +153,10 @@ BLOCK_MARKERS = (
 #: owner's screen long before it is useful, and the feed will still be there
 #: when it gets closer.
 HORIZON = timedelta(days=120)
+
+#: The width of `Turnover.external_ref`. An identity that does not fit is
+#: hashed rather than truncated — see `parse`.
+MAX_EXTERNAL_REF = 500
 
 #: How far *behind* now a departure can be and still be worth proposing.
 #:
@@ -344,9 +354,20 @@ def fetch(url: str, *, client: httpx.Client | None = None) -> str:
                     )
                 chunks.append(chunk)
 
-            text = b"".join(chunks).decode(
-                response.charset_encoding or "utf-8", errors="replace"
-            )
+            # A charset name we do not have a codec for raises `LookupError`,
+            # which is not an httpx error and so escaped every handler here —
+            # a malformed reply from somebody else's server became a 500 with
+            # no reason recorded, while every other unreadable feed is a
+            # sentence on the owner's screen. UTF-8 is the honest fallback:
+            # the file is text, and `errors="replace"` means a wrong guess
+            # costs a mangled character rather than the whole sync.
+            raw = b"".join(chunks)
+            declared = response.charset_encoding or "utf-8"
+            try:
+                text = raw.decode(declared, errors="replace")
+            except LookupError:
+                logger.info("feed declared unknown charset %r; reading as utf-8", declared)
+                text = raw.decode("utf-8", errors="replace")
 
         if "BEGIN:VCALENDAR" not in text:
             raise CalendarError(
@@ -448,6 +469,15 @@ def parse(text: str) -> list[Booking]:
         # would orphan every turnover keyed to the old spelling.
         occurrence = _as_date(getattr(component.get("RECURRENCE-ID"), "dt", None))
         identity = f"{uid}#{occurrence.isoformat()}" if occurrence else uid
+        if len(identity) > MAX_EXTERNAL_REF:
+            # **It has to fit `Turnover.external_ref`.** A UID near the column's
+            # limit plus `#YYYY-MM-DD` runs past it, and the failure lands at
+            # commit as a database error rather than a `CalendarError` — a 500
+            # on the button and, on the scheduled pass, nothing the owner can
+            # see. A digest is used rather than a truncation because two long
+            # UIDs sharing a prefix would truncate to the same identity, which
+            # is the one thing identity may never do.
+            identity = "sha256:" + sha256(identity.encode()).hexdigest()
 
         if identity in seen:
             # Past that, a repeat is a feed we cannot interpret rather than two
@@ -758,25 +788,34 @@ def _claim(
 
 
 def _fetch_within(
-    url: str, *, client: httpx.Client | None, seconds: float
+    url: str, *, client: httpx.Client | None = None, seconds: float
 ) -> str:
-    """`fetch`, with a deadline the caller can actually rely on.
+    """`fetch`, with a deadline that ends the work rather than walking away.
 
     **`MAX_FEED_SECONDS` inside the streaming loop does not bound the call**, and
-    the gap is the interesting part: `client.stream()` has to receive the whole
+    the gap is the interesting part: `client.stream()` must receive the whole
     response *head* before the loop is ever reached, and httpx's read timeout is
-    per-receive inactivity. A host trickling header bytes just inside it holds
-    the call open for as long as it likes — which ties up the request worker on
-    the Sync button and stalls the scheduled pass, whose own budget is only
-    checked between feeds and so cannot interrupt this.
+    per-receive inactivity. A host trickling header bytes holds the call open
+    for as long as it likes — tying up the request worker behind the Sync button
+    and stalling the scheduled pass, whose own budget is only checked between
+    feeds and so cannot interrupt this.
 
     A blocking socket read cannot be cancelled, so the work happens on a daemon
-    thread and the caller stops waiting on time. **The residual is named rather
-    than hidden**: an abandoned thread lives until its own read timeout or the
-    body deadline ends it, holding one socket. What it can no longer do is hold
-    up the pass or the person who pressed the button, which is the property that
-    was actually missing.
+    thread. **Stopping waiting is not enough on its own, though**, and an
+    earlier version of this stopped there and called the leftover thread an
+    acceptable residual. It is not: the body deadline is never reached, so no
+    timeout ever fires for that thread, and each retry — every scheduled pass,
+    every press of the button — starts another one that also never ends. That is
+    not one leaked socket, it is an unbounded leak with a scheduler feeding it.
+
+    So the deadline **closes the client**, which closes the socket underneath the
+    blocked read and makes it raise. Verified against a server that dribbles
+    header bytes forever: the worker ends within milliseconds of the close.
+    A caller that injected its own client keeps ownership of it and it is left
+    alone — that path opens no real socket anyway.
     """
+    owned = client is None
+    client = client or _default_client()
     outcome: dict[str, object] = {}
 
     def work() -> None:
@@ -789,15 +828,23 @@ def _fetch_within(
     worker.start()
     worker.join(seconds)
 
-    if worker.is_alive():
-        raise CalendarError(
-            "That calendar took too long to answer. It is usually temporary — "
-            "the next sync will try again."
-        )
-    error = outcome.get("error")
-    if error is not None:
-        raise error  # type: ignore[misc]
-    return str(outcome["text"])
+    try:
+        if worker.is_alive():
+            if owned:
+                # Pull the socket out from under the blocked read.
+                client.close()
+                worker.join(CLOSE_GRACE_SECONDS)
+            raise CalendarError(
+                "That calendar took too long to answer. It is usually temporary "
+                "— the next sync will try again."
+            )
+        error = outcome.get("error")
+        if error is not None:
+            raise error  # type: ignore[misc]
+        return str(outcome["text"])
+    finally:
+        if owned and not worker.is_alive():
+            client.close()
 
 
 def sync(

@@ -23,6 +23,8 @@ The .ics samples are the real shape Airbnb sends: all-day `VALUE=DATE` events,
 from __future__ import annotations
 
 import logging
+import socket
+import threading
 import uuid
 from datetime import date, datetime, time, timedelta, timezone
 from time import monotonic, sleep
@@ -1763,4 +1765,173 @@ class TestTheSyncEndpointSurvivesTheFeedVanishing:
             headers=owner["auth"],
         )
         assert resp.status_code == 502, resp.text
+        assert "removed" in resp.json()["detail"]
+
+
+# --------------------------------------------------------------------------
+# Round six — three of these four were my own previous fixes
+# --------------------------------------------------------------------------
+
+
+class TestAStuckFetchIsEndedNotAbandoned:
+    def test_the_worker_dies_rather_than_leaking(self, monkeypatch) -> None:
+        """**Stopping waiting is not the same as stopping.**
+
+        The previous version raised on the caller's thread and left the worker
+        running, calling it an acceptable residual. It is not: for a host that
+        trickles *header* bytes the body deadline is never reached, so no
+        timeout ever fires for that thread — and every scheduled pass and every
+        press of the button starts another that also never ends.
+
+        A real server, because this is precisely the behaviour a mock transport
+        cannot have: there is no socket to leave open.
+        """
+        server = socket.socket()
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server.bind(("127.0.0.1", 0))
+        server.listen(1)
+        port = server.getsockname()[1]
+
+        def trickle() -> None:
+            conn, _ = server.accept()
+            conn.recv(65536)
+            conn.sendall(b"HTTP/1.1 200 OK\r\n")
+            try:
+                while True:
+                    # Header bytes forever; the blank line never comes.
+                    conn.sendall(b"X-Pad: y\r\n")
+                    sleep(0.05)
+            except OSError:
+                pass
+            finally:
+                conn.close()
+
+        threading.Thread(target=trickle, daemon=True).start()
+
+        # The address guard correctly refuses loopback, and this test is about
+        # what happens to the *thread* — so that one rule is stood down here,
+        # deliberately and narrowly. It has its own tests in
+        # `TestTheServerIsNotAProxy`; what cannot be faked is a real socket
+        # that never finishes sending its headers.
+        monkeypatch.setattr(calendars, "_refuse_private_address", lambda url: None)
+        before = {t.name for t in threading.enumerate()}
+
+        with pytest.raises(calendars.CalendarError) as refused:
+            calendars._fetch_within(f"http://127.0.0.1:{port}/a.ics", seconds=1.0)
+        assert "too long" in refused.value.detail
+
+        # The worker must be gone, not merely no longer waited on.
+        deadline = monotonic() + 10
+        while monotonic() < deadline:
+            leaked = {
+                t.name for t in threading.enumerate() if t.name == "linx-calendar-fetch"
+            } - before
+            if not leaked:
+                break
+            sleep(0.1)
+        assert not leaked, "the fetch worker outlived its deadline"
+        server.close()
+
+
+class TestAnUnreadableEncodingIsAnUnreadableFeed:
+    def test_an_unknown_charset_does_not_become_a_500(self) -> None:
+        """`bytes.decode` raises `LookupError` for a charset with no codec, and
+        that is not an httpx error — so it escaped every handler and became a
+        500 with no reason recorded, while every other unreadable feed is a
+        sentence on the owner's screen."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                content=_feed_for(10).encode(),
+                headers={"content-type": "text/calendar; charset=x-not-a-real-charset"},
+            )
+
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        text = calendars.fetch("https://example.test/a.ics", client=client)
+        assert "BEGIN:VCALENDAR" in text
+
+
+class TestAnIdentityFitsItsColumn:
+    def test_a_very_long_uid_with_a_recurrence_is_hashed_not_truncated(self) -> None:
+        """A UID near `external_ref`'s 500-character limit plus `#YYYY-MM-DD`
+        runs past it, and the failure lands at *commit* as a database error
+        rather than a `CalendarError` — a 500 on the button and nothing the
+        owner can see on the scheduled pass.
+
+        Hashed rather than truncated, because two long UIDs sharing a prefix
+        would truncate to the same identity, which is the one thing identity may
+        never do."""
+        long_uid = "u" * 495
+        feed = _ics(
+            "BEGIN:VEVENT\n"
+            "DTSTART;VALUE=DATE:20991201\n"
+            "DTEND;VALUE=DATE:20991204\n"
+            f"UID:{long_uid}\n"
+            "RECURRENCE-ID;VALUE=DATE:20991201\n"
+            "SUMMARY:Reserved\n"
+            "END:VEVENT"
+        )
+        identity = calendars.parse(feed)[0].uid
+        assert len(identity) <= calendars.MAX_EXTERNAL_REF
+        assert identity.startswith("sha256:")
+
+    def test_two_long_uids_sharing_a_prefix_stay_distinct(self) -> None:
+        """The reason it is a digest and not a slice."""
+
+        def identity_for(uid: str) -> str:
+            return calendars.parse(
+                _ics(
+                    "BEGIN:VEVENT\n"
+                    "DTSTART;VALUE=DATE:20991201\n"
+                    "DTEND;VALUE=DATE:20991204\n"
+                    f"UID:{uid}\n"
+                    "RECURRENCE-ID;VALUE=DATE:20991201\n"
+                    "SUMMARY:Reserved\n"
+                    "END:VEVENT"
+                )
+            )[0].uid
+
+        shared = "p" * 495
+        assert identity_for(shared + "a") != identity_for(shared + "b")
+
+    def test_an_ordinary_uid_is_left_exactly_as_it_is(self) -> None:
+        """Hashing everything would throw away the readable identity, and the
+        whole point is that a booking keeps the id the feed gave it."""
+        assert calendars.parse(_ics(_event("normal", "20991101", "20991104")))[0].uid == (
+            "normal"
+        )
+
+
+class TestBothEndpointsSurviveTheFeedVanishing:
+    def test_adding_a_feed_deleted_mid_fetch_does_not_500(
+        self, client: TestClient, make_user, db: Session, monkeypatch
+    ) -> None:
+        """**The same rule on one of two paths, again.** Round five guarded the
+        sync endpoint's refresh and left the identical line on the add endpoint,
+        which commits the calendar *before* fetching and so has exactly the same
+        window."""
+        owner = make_user(role="owner")
+        prop = _property(client, owner)
+
+        def vanished(session, cal, **kwargs):
+            from app.db import SessionLocal
+
+            elsewhere = SessionLocal()
+            try:
+                row = elsewhere.get(PropertyCalendar, cal.id)
+                if row is not None:
+                    elsewhere.delete(row)
+                    elsewhere.commit()
+            finally:
+                elsewhere.close()
+            raise calendars.CalendarError("That calendar has been removed.")
+
+        monkeypatch.setattr(calendars, "sync", vanished)
+        resp = client.post(
+            f"/api/properties/{prop['id']}/calendars",
+            json={"url": "https://example.test/a.ics", "label": "Airbnb"},
+            headers=owner["auth"],
+        )
+        assert resp.status_code == 409, resp.text
         assert "removed" in resp.json()["detail"]

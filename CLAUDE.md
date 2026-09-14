@@ -315,7 +315,10 @@ one sentence: **linx owns the turnover; the listing site owns the booking.**
    It is formatted from the value, never `str()` of the library's object, since
    identity that moves between library versions orphans everything keyed to the
    old spelling. Past that pair, a repeat is a feed we cannot interpret: the
-   first is kept and the rest logged, because inserting both is a crash.
+   first is kept and the rest logged, because inserting both is a crash. An
+   identity too long for `external_ref` is **hashed, never truncated** — two long
+   UIDs sharing a prefix would truncate to the same identity, which is the one
+   thing identity may never do.
 5. **An unreadable feed changes nothing.** "The feed is empty" legitimately
    deletes drafts, so "the feed did not load" must never look the same. A
    failure is recorded on the calendar row and every turnover is left alone.
@@ -431,15 +434,23 @@ that impossible rather than fixed, and the rollback matters now that it covers
 reconcile: a failure partway through must not commit half a sync alongside its
 own error message.
 
-**The fetch deadline is enforced on a worker thread, because a blocking socket
-read cannot be cancelled.** `MAX_FEED_SECONDS` inside the streaming loop does not
-bound the call: `client.stream()` must receive the whole response *head* first,
-and httpx's read timeout is per-receive inactivity, so a host trickling header
-bytes holds the call open indefinitely — tying up the request worker behind the
-Sync button and stalling the scheduled pass, whose budget is only checked
-*between* feeds. The residual is named in the code rather than hidden: an
-abandoned thread lives until its own timeout, holding one socket. What it can no
-longer do is hold up the pass or the person who pressed the button.
+**The fetch deadline runs on a worker thread and *ends* the work, because a
+blocking socket read cannot be cancelled.** `MAX_FEED_SECONDS` inside the
+streaming loop does not bound the call: `client.stream()` must receive the whole
+response *head* first, and httpx's read timeout is per-receive inactivity, so a
+host trickling header bytes holds the call open indefinitely — tying up the
+request worker behind the Sync button and stalling the scheduled pass, whose
+budget is only checked *between* feeds.
+
+**Stopping waiting is not the same as stopping**, and the first version of this
+stopped there and called the leftover thread an acceptable residual. It was not:
+for a header-trickler the body deadline is never reached, so no timeout ever
+fires for that thread, and every scheduled pass and every press of the button
+starts another that also never ends — an unbounded leak with a scheduler feeding
+it. The deadline therefore **closes the client**, which closes the socket under
+the blocked read and makes it raise. There is a test against a real server that
+dribbles header bytes forever, asserting the worker is gone rather than merely
+no longer waited on.
 
 **The stale warning is only counted while it is still true.** A completed or
 cancelled job, or one whose checkout has passed, has no booking in the feed
