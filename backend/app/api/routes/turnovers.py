@@ -30,7 +30,7 @@ import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.api.deps import require_role
@@ -173,8 +173,17 @@ def list_turnovers(
     if status_filter is not None:
         stmt = stmt.where(Turnover.status == status_filter)
     elif not include_finished:
+        # A finished job the owner can still review is **not** finished with
+        # them. Phase 7 made the review window close for good once the other
+        # side's is published, so a job that only appears behind a toggle is a
+        # window somebody misses by never finding the toggle. `reviews.py` owns
+        # the rule; this asks it rather than re-deriving it.
+        reviewable = reviews.open_review_windows(db, owner)
+        unfinished = Turnover.status.notin_(
+            (TurnoverStatus.COMPLETED, TurnoverStatus.CANCELLED)
+        )
         stmt = stmt.where(
-            Turnover.status.notin_((TurnoverStatus.COMPLETED, TurnoverStatus.CANCELLED))
+            or_(unfinished, Turnover.id.in_(reviewable)) if reviewable else unfinished
         )
 
     if property_id is not None:

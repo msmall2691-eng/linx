@@ -901,3 +901,122 @@ class TestBothSidesSubmittingAtOnce:
         body = answer.json()
         assert body["mine"]["visible_at"] is not None
         assert [r["text"] for r in body["visible"]] == ["First in."]
+
+
+# --------------------------------------------------------------------------
+# Reaching the window before it shuts
+# --------------------------------------------------------------------------
+
+
+class TestTheOwnerCanFindTheJobToReviewIt:
+    """**A window you can only reach through a toggle is a window you miss.**
+
+    Marking a job complete sets the turnover `completed`, and the owner's list
+    hides completed turnovers unless `include_finished` is on — a checkbox, off
+    by default. Before the window closed for good that cost a delay. It does
+    close for good now: once the sweep publishes the cleaner's review,
+    `too_late` refuses the owner's permanently, with no edits and one review per
+    side. So an owner who never finds the checkbox loses their say entirely, on
+    a job they paid for.
+
+    A finished job the owner can still review is therefore not finished with
+    them, and stays in the default list until it is.
+    """
+
+    def _default_list(self, client: TestClient, owner: dict) -> list[str]:
+        resp = client.get("/api/turnovers", headers=owner["auth"])
+        assert resp.status_code == 200, resp.text
+        return [turnover["id"] for turnover in resp.json()]
+
+    def test_a_finished_job_stays_until_its_owner_has_reviewed(
+        self, client: TestClient, make_cleaner, make_open_turnover
+    ) -> None:
+        job = _finished_job(client, make_cleaner, make_open_turnover)
+        turnover_id = job["turnover"]["id"]
+
+        assert turnover_id in self._default_list(client, job["owner"]), (
+            "the owner's only route to the review screen was behind a toggle"
+        )
+
+        _write(client, job["owner"], turnover_id, 4)
+        assert turnover_id not in self._default_list(client, job["owner"]), (
+            "a job the owner has finished with is still cluttering their list"
+        )
+
+        # Still there behind the toggle, as any completed job is.
+        resp = client.get("/api/turnovers?include_finished=true", headers=job["owner"]["auth"])
+        assert turnover_id in [t["id"] for t in resp.json()]
+
+    def test_it_drops_out_once_the_window_has_shut(
+        self, client: TestClient, make_cleaner, make_open_turnover, db: Session, monkeypatch
+    ) -> None:
+        """Nothing left to do there — keeping it would be a prompt that lies."""
+        job = _finished_job(client, make_cleaner, make_open_turnover)
+        turnover_id = job["turnover"]["id"]
+        _write(client, job["cleaner"], turnover_id, 2)
+
+        assert turnover_id in self._default_list(client, job["owner"])
+
+        monkeypatch.setattr(settings, "review_reveal_after_days", 1)
+        reviews.reveal_overdue(db, now=datetime.now(timezone.utc) + timedelta(days=1, minutes=1))
+        db.expire_all()
+
+        assert turnover_id not in self._default_list(client, job["owner"])
+        # And the endpoint says why, in words, rather than by omission.
+        answer = client.get(f"/api/turnovers/{turnover_id}/reviews", headers=job["owner"]["auth"])
+        assert answer.json()["can_review"] is False
+        assert "window for yours has closed" in answer.json()["blocker"]
+
+    def test_a_cancelled_turnover_is_still_hidden(
+        self, client: TestClient, make_open_turnover
+    ) -> None:
+        """Only the review window reopens the default list, not "finished"."""
+        job = make_open_turnover()
+        turnover_id = job["turnover"]["id"]
+        assert client.post(
+            f"/api/turnovers/{turnover_id}/cancel",
+            json={"reason": "Guest rebooked."},
+            headers=job["owner"]["auth"],
+        ).status_code == 200
+
+        assert turnover_id not in self._default_list(client, job["owner"])
+
+    def test_the_window_is_not_a_tell(
+        self, client: TestClient, make_cleaner, make_open_turnover
+    ) -> None:
+        """It must not move when the *other side* writes.
+
+        This is the same rule the review panel follows: whether they have
+        written is the one fact the delay withholds, and a job appearing or
+        vanishing from a list is as good a signal as a badge.
+        """
+        job = _finished_job(client, make_cleaner, make_open_turnover)
+        turnover_id = job["turnover"]["id"]
+
+        before = self._default_list(client, job["owner"])
+        _write(client, job["cleaner"], turnover_id, 1, "Left in a state.")
+        assert self._default_list(client, job["owner"]) == before, (
+            "the owner's list changed when the cleaner wrote, which tells them "
+            "a review exists and how soon to get theirs in"
+        )
+
+    def test_the_cleaner_side_answers_the_same_way(
+        self, client: TestClient, make_cleaner, make_open_turnover, db: Session
+    ) -> None:
+        """Both sides, one query. A cleaner reads it through `/board/jobs`,
+        which keeps a completed job anyway — but the rule must not be
+        owner-only, or the next screen to need it re-derives it."""
+        from app.models.user import User
+
+        job = _finished_job(client, make_cleaner, make_open_turnover)
+        cleaner = db.get(User, uuid.UUID(job["cleaner"]["user"]["id"]))
+        owner = db.get(User, uuid.UUID(job["owner"]["user"]["id"]))
+        turnover_id = uuid.UUID(job["turnover"]["id"])
+
+        assert turnover_id in reviews.open_review_windows(db, cleaner)
+        assert turnover_id in reviews.open_review_windows(db, owner)
+
+        _write(client, job["cleaner"], job["turnover"]["id"], 5)
+        db.expire_all()
+        assert turnover_id not in reviews.open_review_windows(db, cleaner)
+        assert turnover_id in reviews.open_review_windows(db, owner)

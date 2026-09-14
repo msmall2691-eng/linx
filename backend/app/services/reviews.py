@@ -343,6 +343,56 @@ def visible_for(db: Session, turnover_id: uuid.UUID) -> list[Review]:
     )
 
 
+def open_review_windows(db: Session, user: User) -> set[uuid.UUID]:
+    """Turnovers this person may still review. **The same rule `submit` applies.**
+
+    Exists because the window now closes for good: once the sweep publishes the
+    other side's review, `too_late` refuses yours permanently — there are no
+    edits and one review per side. A window that can be missed by never finding
+    a screen is a window that gets missed, so the owner's turnover list asks
+    this rather than hiding a finished job behind a toggle.
+
+    **It gives nothing away.** It is true while the job is finished, you have
+    not written, and the other side's review is not yet *visible* — and a
+    visible review is one you can already read. So it says nothing about whether
+    they have written, which is the one fact the delay withholds.
+
+    Both sides in one query, because reviewing is the symmetrical part of the
+    product: an owner reads it through their turnovers, a cleaner through their
+    jobs.
+    """
+    mine_exists = (
+        select(Review.id)
+        .where(Review.turnover_id == Turnover.id, Review.author_id == user.id)
+        .exists()
+    )
+    theirs_is_out = (
+        select(Review.id)
+        .where(
+            Review.turnover_id == Turnover.id,
+            Review.author_id != user.id,
+            Review.visible_at.is_not(None),
+        )
+        .exists()
+    )
+
+    rows = db.execute(
+        select(Turnover.id)
+        .join(Property, Property.id == Turnover.property_id)
+        .join(Award, Award.turnover_id == Turnover.id)
+        .where(
+            Turnover.status == TurnoverStatus.COMPLETED,
+            Award.cancelled_at.is_(None),
+            Award.completed_at.is_not(None),
+            # Either side of the job, the same rights.
+            (Property.owner_id == user.id) | (Award.cleaner_id == user.id),
+            ~mine_exists,
+            ~theirs_is_out,
+        )
+    ).scalars()
+    return set(rows)
+
+
 def own_review(db: Session, turnover_id: uuid.UUID, author: User) -> Review | None:
     """The review this person wrote, visible or not.
 

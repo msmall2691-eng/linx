@@ -57,14 +57,18 @@ What works today:
   does: not even the fact that a review exists. Once a review is visible it
   counts towards a rating, shown on the owner's bid list and on a cleaner's own
   profile — shown, never ranked: the bid list still sorts cheapest-first.
-- 368 tests against real PostgreSQL, plus 9 browser click-throughs — including
+- 375 tests against real PostgreSQL, plus 9 browser click-throughs — including
   bid → award → job done → paid against a Stripe that answers over real HTTP,
   and a two-browser check that one side's page does not change when the other
   reviews them.
 
-The admin console is **not** built yet — vetting review, the dispute inbox and
-the ledger each have working endpoints but no dedicated screen. That is phase 8;
-see the phase table in [`CLAUDE.md`](CLAUDE.md).
+The admin console is **not** built yet. The vetting queue is the exception and
+predates it — a real screen since phase 3, because a human reviewing a photo ID
+is what stands between "hands off" and "anyone can walk into a stranger's
+house". The dispute inbox and the ledger have neither: disputes are a policy
+written into comments and answered by a person today, and `payments.reconcile()`
+is a service function with no route and no page. That is phase 8; see the phase
+table in [`CLAUDE.md`](CLAUDE.md).
 
 **All Stripe work is test mode.** Going live means a new, separate Connect
 platform account under the new entity — never a migrated one, and never real

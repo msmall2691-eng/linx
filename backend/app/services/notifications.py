@@ -655,7 +655,10 @@ def job_completed(
             f"Checkout: {_when(turnover.checkout_at)}\n"
             f"Agreed price: {_money(award.agreed_price_cents)}\n\n"
             "Open the turnover to pay. Your cleaner is paid out of the same "
-            "charge, so paying is what closes this out for both of you."
+            "charge, so paying is what closes this out for both of you.\n\n"
+            "You can also review each other now. Neither review is visible "
+            "until you have both written, or the window passes — and once "
+            "theirs is published, yours can no longer be added."
         ),
         dedupe_scope=str(award.id),
         turnover_id=turnover.id,

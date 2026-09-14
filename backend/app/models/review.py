@@ -4,7 +4,8 @@ Neither side's review is visible until both are submitted or a timeout passes â€
 `visible_at` carries that. Showing a review the moment it lands creates an
 incentive to leave a pre-emptive bad one to suppress the other side's, which is
 a known failure mode worth designing around from the start rather than patching
-later. The reveal logic is phase 7; the shape is settled here.
+later. The reveal itself lives in `app/services/reviews.py`, which is the only
+thing that writes `visible_at`; this file is just the shape.
 """
 
 from __future__ import annotations

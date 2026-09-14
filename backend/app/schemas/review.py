@@ -85,5 +85,7 @@ class ReviewsOut(BaseModel):
     blocker: str | None
     #: The reader's own review, revealed or not. Null if they have not written.
     mine: ReviewOut | None
-    #: Everything visible to everyone. Excludes `mine` while `mine` is hidden.
+    #: Everything visible to everyone, with the reader's own row left out —
+    #: always, not only while it is hidden, because `mine` above already
+    #: carries it and a screen rendering both would show it twice.
     visible: list[ReviewOut]
