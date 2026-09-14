@@ -352,6 +352,16 @@ forgery primitive unless it is guarded. Two rules, both in `calendars.py`:
 - **`MAX_FEED_BYTES` is enforced while the body streams**, never on
   `len(response.content)` — reading the whole thing before measuring it is not a
   limit at all, and this path runs unattended for every owner on every pass.
+- **`MAX_FEED_SECONDS` is a second, separate limit**, because the byte cap does
+  not bound time and `FETCH_TIMEOUT_SECONDS` is per-receive inactivity rather
+  than a total deadline: a host dribbling one small chunk every nineteen seconds
+  trips neither. That matters here more than elsewhere, since the scheduled pass
+  reads feeds **serially and first** — one slow feed would stop the reminders,
+  the unclaimed alarm, the outbox and the review reveal for everybody.
+- **The stored URL is the one that will be fetched.** Fragments are dropped in
+  `CalendarCreate`, because they are never sent in an HTTP request — so
+  `feed.ics` and `feed.ics#copy` are one feed to the network and two rows to a
+  unique constraint, which is every booking becoming two drafts.
 
 **A booking that vanishes from a job somebody is already on is reported, and the
 report is stored.** `property_calendars.last_stale_kept` holds it, because the
@@ -361,11 +371,19 @@ promised and then dropped. Whether it should also *notify* is a genuine open
 question rather than an oversight: `NotificationEvent` is a closed list, and
 opening it is meant to be a decision somebody makes out loud.
 
-**A feed is only polled while its property is still a live short-term rental.**
+**A feed is only read while its property is still a live short-term rental.**
 An owner may archive a property or reclassify it as residential once its live
 work is finished; `reconcile` writes `service_type=turnover`, which is a
-category error on a home and refused everywhere else, so `active_calendars`
-joins the property rather than trusting the calendar's own flag.
+category error on a home and refused everywhere else. `calendars._refuse_ineligible`
+is the authority and it sits inside `sync`, so the owner's own "Sync now" button
+gets the same answer as the scheduled pass — `active_calendars` carries the rule
+in SQL too, but only so the pass does not fetch feeds it would then refuse.
+
+**The stale warning is only counted while it is still true.** A completed or
+cancelled job, or one whose checkout has passed, has no booking in the feed
+either — counting those would make `last_stale_kept` climb on every sync until
+"a guest cancelled and a cleaner may still be coming" mostly described last
+month's finished work, and a warning that is usually wrong is one nobody reads.
 
 ---
 

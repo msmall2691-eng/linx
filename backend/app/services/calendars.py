@@ -54,6 +54,7 @@ import socket
 import uuid
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
+from time import monotonic
 from urllib.parse import urlparse
 
 import httpx
@@ -87,6 +88,21 @@ MAX_FEED_BYTES = 4 * 1024 * 1024
 #: A feed that needs more hops than this is not a feed. httpx's own default is
 #: twenty, which is twenty chances for one of them to point somewhere private.
 MAX_REDIRECTS = 5
+
+#: A hard ceiling on how long one feed may take in total.
+#:
+#: **`FETCH_TIMEOUT_SECONDS` does not bound this**, and the difference is the
+#: whole point: httpx's read timeout is an inactivity timeout for each receive,
+#: so a host dribbling one small chunk every nineteen seconds never trips it and
+#: never reaches `MAX_FEED_BYTES` either. It can hold the connection for as long
+#: as it likes.
+#:
+#: That matters here more than it would elsewhere, because the scheduled pass
+#: reads feeds **serially and first** — ahead of the day-of reminders, the
+#: unclaimed alarm, the review reveal and the outbox drain. One slow feed would
+#: not just fail to sync; it would stop every one of those for every user, and
+#: the review reveal is the one scheduled job this product cannot do without.
+MAX_FEED_SECONDS = 60.0
 
 #: Summaries that mean "the owner blocked these dates", not "a guest is
 #: staying". Airbnb exports both through the same feed, and a block does not
@@ -123,6 +139,15 @@ HORIZON = timedelta(days=120)
 #: Not zero, because a checkout this morning is a job somebody may still need
 #: doing — the ladder deliberately rates an already-past checkout `urgent`.
 PAST_TOLERANCE = timedelta(days=1)
+
+#: Statuses where a booking disappearing is still the owner's problem: somebody
+#: is lined up to clean a stay that is not happening. A `completed` or
+#: `cancelled` job is not — the work is behind them either way.
+STILL_NEEDS_A_DECISION = (
+    TurnoverStatus.OPEN,
+    TurnoverStatus.AWARDED,
+    TurnoverStatus.IN_PROGRESS,
+)
 
 #: How close behind a departure the next arrival has to be to count as *this*
 #: turnover's checkin.
@@ -276,11 +301,14 @@ def fetch(url: str, *, client: httpx.Client | None = None) -> str:
                     "have expired, or it may not be the export link."
                 )
 
-            # Counted as it arrives, and abandoned the moment it is too big.
-            # `iter_bytes` leaves the rest of the body unread, and the `with`
-            # closes the connection on the way out.
+            # Counted as it arrives, and abandoned the moment it is too big
+            # **or has taken too long**. Two separate limits because they catch
+            # two different hosts: one that sends too much, and one that sends
+            # too slowly to ever trip a per-read timeout. `iter_bytes` leaves
+            # the rest of the body unread, and the `with` closes the connection.
             size = 0
             chunks: list[bytes] = []
+            deadline = monotonic() + MAX_FEED_SECONDS
             for chunk in response.iter_bytes():
                 size += len(chunk)
                 if size > MAX_FEED_BYTES:
@@ -288,6 +316,11 @@ def fetch(url: str, *, client: httpx.Client | None = None) -> str:
                         "That link returned something far too large to be a "
                         "calendar — it is probably a web page rather than the "
                         ".ics export link."
+                    )
+                if monotonic() > deadline:
+                    raise CalendarError(
+                        "That calendar took too long to send. It is usually "
+                        "temporary — the next sync will try again."
                     )
                 chunks.append(chunk)
 
@@ -434,7 +467,14 @@ def jobs_for(
             # has always claimed and did not previously enforce. A stay weeks
             # later is a different week, and calling it this clean's checkin
             # measures the wrong thing — see `NEXT_STAY_WITHIN`.
-            if candidate - checkout < NEXT_STAY_WITHIN:
+            # Bounded at both ends. The lower bound is not theoretical: an
+            # owner whose checkout time is later in the day than their checkin
+            # time — a plausible thing to type — produces a *negative* window
+            # on two stays that share a date, which a one-sided `<` accepts.
+            # The row then violates the `checkin_after_checkout` constraint, so
+            # connecting the feed 500s after the calendar has already been
+            # saved and every later sync rolls back.
+            if timedelta(0) <= candidate - checkout < NEXT_STAY_WITHIN:
                 checkin = candidate
 
         proposed.append(
@@ -566,11 +606,21 @@ def reconcile(
         result.updated += 1
 
     # Whatever is left had a booking and does not any more.
+    floor = moment - PAST_TOLERANCE
     for turnover in existing.values():
         if not _belongs_to_the_feed(turnover):
             # **A guest cancelling does not cancel a cleaner.** Reported so the
             # owner can decide, never removed underneath them.
-            result.stale_but_kept += 1
+            #
+            # Only while there is still a decision to make, though. A finished
+            # or cancelled job has no booking in the feed either — and neither
+            # does one whose checkout has passed, because `jobs_for` stopped
+            # proposing it. Counting those would make the warning climb by one
+            # every sync forever, until "a guest cancelled and a cleaner may
+            # still be coming" was mostly describing last month's completed
+            # work. A warning that is usually wrong is one nobody reads.
+            if turnover.status in STILL_NEEDS_A_DECISION and turnover.checkout_at >= floor:
+                result.stale_but_kept += 1
             continue
         db.delete(turnover)
         result.removed += 1
@@ -581,6 +631,28 @@ def reconcile(
 # --------------------------------------------------------------------------
 # One pass
 # --------------------------------------------------------------------------
+
+
+def _refuse_ineligible(prop: Property) -> None:
+    """A feed only makes sense on a live short-term rental.
+
+    **Here rather than only in `active_calendars`**, because that filters the
+    scheduled pass and nothing else — the owner's own "Sync now" button reaches
+    `sync` directly, and an archived property still renders the calendar panel.
+    A rule enforced on one of two paths is not a rule, which is the same
+    correction this module has now needed three times.
+    """
+    if not prop.is_active:
+        raise CalendarError(
+            "This property is archived, so its calendar is not being read. "
+            "Restore the property to start syncing again."
+        )
+    if prop.property_type is not PropertyType.SHORT_TERM_RENTAL:
+        raise CalendarError(
+            "A booking calendar describes guests checking out, which a home "
+            "does not have. Remove the calendar, or set this back to a "
+            "short-term rental."
+        )
 
 
 def sync(
@@ -612,6 +684,7 @@ def sync(
     prop = db.get(Property, calendar.property_id)
     if prop is None:
         raise CalendarError("That property no longer exists.")
+    _refuse_ineligible(prop)
 
     result = reconcile(db, calendar, jobs_for(bookings, prop, now=moment), now=moment)
 
@@ -648,14 +721,11 @@ def active_calendars(db: Session) -> list[PropertyCalendar]:
             .join(Property, Property.id == PropertyCalendar.property_id)
             .where(
                 PropertyCalendar.is_active.is_(True),
-                # **The property has to still be one a turnover fits.** A feed
-                # only describes guests checking out, and `reconcile` writes
-                # `service_type=turnover` — which is a category error on a home
-                # and refused everywhere else in the product. An owner may
-                # archive a property or reclassify it as residential once its
-                # live work is finished, and the feed would otherwise keep
-                # proposing rental jobs onto it, on a screen that no longer
-                # even shows the calendar panel.
+                # The same rule `_refuse_ineligible` enforces, expressed in SQL
+                # so the pass does not fetch feeds it would then refuse. **That
+                # function is the authority**; this is an optimisation, and if
+                # the two ever disagree the one in `sync` is the one that
+                # decides, because every caller goes through it.
                 Property.is_active.is_(True),
                 Property.property_type == PropertyType.SHORT_TERM_RENTAL,
             )

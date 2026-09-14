@@ -218,3 +218,36 @@ def test_a_protected_route_sends_you_to_login_and_back(page, live_server) -> Non
     # Back to where you were headed, not dumped on the dashboard.
     page.wait_for_url("**/turnovers")
     expect(page.get_by_role("heading", name="Turnovers")).to_be_visible()
+
+
+def test_connecting_a_calendar_refreshes_the_jobs_beside_it(page, live_server) -> None:
+    """**A sync writes turnovers, so the list of them goes stale the instant it
+    finishes.**
+
+    This panel used to reload only its own feeds. The result was two halves of
+    one screen disagreeing: "3 drafts ready to post" directly above a Turnovers
+    section still reading "Nothing scheduled" — which a person reads as the
+    feature not having worked, and fixes by reloading the page.
+
+    The assertion is on the request rather than on drafts appearing, and that is
+    deliberate: a feed the server could actually fetch would have to be served
+    from this test process, and `calendars._refuse_private_address` correctly
+    refuses loopback. The claim worth pinning here is the wiring — a calendar
+    action causes the turnover list to be re-read — and the drafts themselves
+    are covered against a real feed in `tests/test_calendars.py`.
+    """
+    _signup_owner(page, live_server)
+    _add_property(page, live_server, nickname="Feed Cottage")
+
+    expect(page.get_by_test_id("calendar-feeds")).to_be_visible()
+    page.get_by_test_id("calendar-url").fill("https://example.invalid/calendar.ics")
+
+    # The POST answers 201 even when the feed cannot be read — the error lands
+    # on the row rather than failing the request — so this is the ordinary path,
+    # not an error path.
+    with page.expect_request(
+        lambda r: "/api/turnovers?property_id=" in r.url
+    ) as reread:
+        page.get_by_test_id("add-calendar").click()
+
+    assert reread.value is not None

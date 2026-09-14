@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import date, datetime, time, timedelta, timezone
+from unittest import mock
 
 import httpx
 import pytest
@@ -992,3 +993,193 @@ class TestAFeedOnlyBelongsToARental:
         db.commit()
 
         assert calendars.active_calendars(db) == []
+
+
+# --------------------------------------------------------------------------
+# Second review round — six more, and the shape repeats
+#
+# The recurring one is worth naming: a rule enforced on one of two paths. The
+# byte cap without a clock, the eligibility filter on the scheduled pass but not
+# the button, uniqueness on a string that is not the thing actually fetched.
+# --------------------------------------------------------------------------
+
+
+class TestAFeedCannotHoldThePassOpen:
+    def test_a_slow_drip_is_cut_off_on_time_not_just_on_size(self) -> None:
+        """**`FETCH_TIMEOUT_SECONDS` does not bound this.**
+
+        httpx's read timeout is per-receive inactivity, so a host sending one
+        small chunk just inside it never trips it and never reaches the byte
+        cap either. The scheduled pass reads feeds serially *before* reminders,
+        the unclaimed alarm, the review reveal and the outbox drain — so one
+        such feed does not merely fail to sync, it stops all of those for
+        everybody.
+        """
+        def slow():
+            # Each chunk reports enough elapsed time to pass the deadline,
+            # without the test actually waiting a minute to find out.
+            for _ in range(1000):
+                yield b"BEGIN:VCALENDAR\n"
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=slow())
+
+        clock = iter([0.0] + [calendars.MAX_FEED_SECONDS * 2] * 2000)
+        with mock.patch.object(calendars, "monotonic", lambda: next(clock)):
+            client = httpx.Client(transport=httpx.MockTransport(handler))
+            with pytest.raises(calendars.CalendarError) as refused:
+                calendars.fetch("https://example.test/a.ics", client=client)
+
+        assert "too long" in refused.value.detail
+
+
+class TestTheUrlStoredIsTheUrlFetched:
+    def test_a_fragment_cannot_smuggle_the_same_feed_in_twice(
+        self, client: TestClient, make_user, db: Session
+    ) -> None:
+        """A fragment is never sent in an HTTP request, so two URLs differing
+        only by one fetch the identical calendar — while the unique constraint
+        sees two different strings and lets both in. Every booking would then
+        become two drafts under two calendar ids."""
+        owner = make_user(role="owner")
+        prop = _property(client, owner)
+
+        first = client.post(
+            f"/api/properties/{prop['id']}/calendars",
+            json={"url": "https://example.test/feed.ics", "label": "Airbnb"},
+            headers=owner["auth"],
+        )
+        assert first.status_code == 201, first.text
+
+        second = client.post(
+            f"/api/properties/{prop['id']}/calendars",
+            json={"url": "https://example.test/feed.ics#copy", "label": "Airbnb again"},
+            headers=owner["auth"],
+        )
+        assert second.status_code == 409, second.text
+
+
+class TestTheStaleWarningStaysTrue:
+    def test_finished_work_is_not_counted_as_a_vanished_booking(
+        self, client: TestClient, make_user, db: Session
+    ) -> None:
+        """**A warning that is usually wrong is one nobody reads.**
+
+        Once a feed-created job is completed and its checkout has passed,
+        `jobs_for` stops proposing it but it is still in the calendar's
+        turnovers — and every non-draft fails `_belongs_to_the_feed`. Counting
+        those made the number climb by one on every sync forever, until "a guest
+        cancelled and a cleaner may still be coming" was mostly describing last
+        month's finished work.
+        """
+        owner = make_user(role="owner")
+        prop = _property(client, owner)
+        calendar = _calendar(db, prop["id"])
+        calendars.sync(db, calendar, client=_fake_client(_feed_for(10)))
+
+        turnover = db.execute(select(Turnover)).scalars().one()
+        turnover.status = TurnoverStatus.COMPLETED
+        turnover.checkout_at = datetime.now(tz=timezone.utc) - timedelta(days=30)
+        db.commit()
+
+        # The booking is long gone from the feed, as it would be.
+        result = calendars.sync(
+            db, calendar, client=_fake_client(_ics(_event("other", "20990101", "20990104")))
+        )
+        assert result.stale_but_kept == 0
+
+        db.expire_all()
+        assert db.get(PropertyCalendar, calendar.id).last_stale_kept == 0
+
+    def test_a_live_job_whose_booking_vanished_is_still_counted(
+        self, client: TestClient, make_user, db: Session
+    ) -> None:
+        """Narrowing the warning must not switch it off — this is the case it
+        exists for."""
+        owner = make_user(role="owner")
+        prop = _property(client, owner)
+        calendar = _calendar(db, prop["id"])
+        calendars.sync(db, calendar, client=_fake_client(_feed_for(10)))
+
+        turnover = db.execute(select(Turnover)).scalars().one()
+        client.post(f"/api/turnovers/{turnover.id}/publish", headers=owner["auth"])
+
+        result = calendars.sync(
+            db, calendar, client=_fake_client(_ics(_event("other", "20990101", "20990104")))
+        )
+        assert result.stale_but_kept == 1
+
+
+class TestANegativeWindowIsNotAWindow:
+    def test_a_checkout_later_in_the_day_than_checkin_does_not_write_a_bad_row(
+        self, client: TestClient, make_user, db: Session
+    ) -> None:
+        """An owner can plausibly type a checkout time later than their checkin
+        time. Two stays sharing a date then produce a *negative* window, which a
+        one-sided `< NEXT_STAY_WITHIN` accepts — and the row violates
+        `checkin_after_checkout`, so connecting the feed 500s after the calendar
+        has already been saved, and every later sync rolls back."""
+        owner = make_user(role="owner")
+        prop = db.get(
+            Property,
+            uuid.UUID(
+                _property(
+                    client,
+                    owner,
+                    default_checkout_time="16:00:00",
+                    default_checkin_time="11:00:00",
+                )["id"]
+            ),
+        )
+
+        shared = date.today() + timedelta(days=5)
+        bookings = calendars.parse(
+            _ics(
+                _event("a", (shared - timedelta(days=2)).strftime("%Y%m%d"), shared.strftime("%Y%m%d")),
+                _event("b", shared.strftime("%Y%m%d"), (shared + timedelta(days=2)).strftime("%Y%m%d")),
+            )
+        )
+        for job in calendars.jobs_for(bookings, prop):
+            if job.checkin_at is not None:
+                assert job.checkin_at >= job.checkout_at
+
+
+class TestEveryCallerGetsTheSameRule:
+    def test_the_sync_button_refuses_an_archived_property_too(
+        self, client: TestClient, make_user, db: Session
+    ) -> None:
+        """`active_calendars` filters the scheduled pass and nothing else. The
+        owner's own "Sync now" reaches `sync` directly, and an archived property
+        still renders the calendar panel — so the rule has to live where every
+        caller passes through."""
+        owner = make_user(role="owner")
+        prop = _property(client, owner)
+        calendar = _calendar(db, prop["id"])
+
+        row = db.get(Property, uuid.UUID(prop["id"]))
+        row.is_active = False
+        db.commit()
+
+        with pytest.raises(calendars.CalendarError) as refused:
+            calendars.sync(db, calendar, client=_fake_client(_feed_for(10)))
+        assert "archived" in refused.value.detail
+
+        db.expire_all()
+        assert db.execute(select(Turnover)).scalars().all() == []
+
+    def test_the_sync_button_refuses_a_home_too(
+        self, client: TestClient, make_user, db: Session
+    ) -> None:
+        owner = make_user(role="owner")
+        prop = _property(client, owner)
+        calendar = _calendar(db, prop["id"])
+
+        row = db.get(Property, uuid.UUID(prop["id"]))
+        row.property_type = PropertyType.RESIDENTIAL
+        db.commit()
+
+        with pytest.raises(calendars.CalendarError):
+            calendars.sync(db, calendar, client=_fake_client(_feed_for(10)))
+
+        db.expire_all()
+        assert db.execute(select(Turnover)).scalars().all() == []

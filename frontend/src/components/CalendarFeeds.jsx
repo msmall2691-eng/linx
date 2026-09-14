@@ -125,7 +125,7 @@ function Feed({ feed, propertyId, onChanged, timeZone }) {
   )
 }
 
-export default function CalendarFeeds({ propertyId, isHome }) {
+export default function CalendarFeeds({ propertyId, isHome, onJobsChanged }) {
   const timeZone = useTimeZone()
 
   const [feeds, setFeeds] = useState(null)
@@ -141,6 +141,14 @@ export default function CalendarFeeds({ propertyId, isHome }) {
     } catch (err) {
       setError(err.message)
     }
+  }
+
+  // A sync creates, moves and removes turnovers, so anything that triggers one
+  // has to tell the screen around this panel to re-read them. Otherwise this
+  // panel says drafts are ready while the list beside it still shows none.
+  async function reload() {
+    await load()
+    await onJobsChanged?.()
   }
 
   useEffect(() => {
@@ -161,7 +169,7 @@ export default function CalendarFeeds({ propertyId, isHome }) {
       })
       setUrl('')
       setLastSync(result)
-      await load()
+      await reload()
     } catch (err) {
       setError(err.message)
     } finally {
@@ -187,7 +195,7 @@ export default function CalendarFeeds({ propertyId, isHome }) {
               key={feed.id}
               feed={feed}
               propertyId={propertyId}
-              onChanged={load}
+              onChanged={reload}
               timeZone={timeZone}
             />
           ))}

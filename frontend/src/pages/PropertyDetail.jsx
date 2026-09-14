@@ -39,6 +39,19 @@ export default function PropertyDetail() {
     }
   }, [propertyId])
 
+  // **A sync writes turnovers, so the list of them is stale the moment it
+  // finishes.** Without this, connecting a calendar reports "3 drafts ready to
+  // post" while the Turnovers section directly below it still says nothing is
+  // scheduled — the panel and the list disagreeing on the same screen, which
+  // reads as the feature not having worked.
+  async function reloadTurnovers() {
+    try {
+      setTurnovers(await apiFetch(`/turnovers?property_id=${propertyId}`))
+    } catch (err) {
+      setError(err.message)
+    }
+  }
+
   async function handleSave(payload) {
     setFormError(null)
     try {
@@ -118,6 +131,7 @@ export default function PropertyDetail() {
           <CalendarFeeds
             propertyId={propertyId}
             isHome={property.property_type === 'residential'}
+            onJobsChanged={reloadTurnovers}
           />
 
           <dl className="card mt-6 grid gap-4 sm:grid-cols-2">

@@ -38,12 +38,23 @@ class CalendarCreate(BaseModel):
         `webcal://` is the same feed with a different scheme — listing sites
         hand it out for one-click subscription — so it is rewritten rather than
         refused, which is what the owner meant.
+
+        **The fragment is dropped, because uniqueness has to mean the same
+        thing the network does.** A fragment is never sent in an HTTP request,
+        so `feed.ics` and `feed.ics#copy` fetch byte-for-byte the same calendar
+        — but they are different strings, so
+        `uq_property_calendars_property_url` would let both be added and every
+        booking would become two drafts under two calendar ids. Stored as what
+        will actually be requested.
         """
         url = v.strip()
         if url.lower().startswith("webcal://"):
             url = "https://" + url[len("webcal://") :]
         if not url.lower().startswith(("http://", "https://")):
             raise ValueError("A calendar link must start with http:// or https://")
+        url, _, _ = url.partition("#")
+        if len(url) < 10:
+            raise ValueError("That does not look like a calendar link.")
         return url
 
 
