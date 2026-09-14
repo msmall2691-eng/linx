@@ -1074,6 +1074,55 @@ class TestRefunds:
             "a refund with an unknown outcome still reads as a settled payment"
         )
 
+    def test_a_refused_refund_does_not_erase_the_collection(
+        self, client, make_cleaner, make_open_turnover, admin_user, db, stripe,
+        webhook_secret,
+    ) -> None:
+        """**A failed refund is not a failed collection.**
+
+        Stripe answering with a definitive error means the refund did not
+        happen: the charge is still collected, the transfer still out, and the
+        row still carries both. Writing `failed` said the opposite, and the
+        ledger believed it — zero revenue, zero fee, and the cleaner's payout
+        reported as negative drift. The one screen that exists to say what
+        moved would have misstated the books every time a refund was refused.
+
+        `mark_failed` already holds this principle for webhooks arriving out of
+        order: a success already recorded is not undone by a later failure
+        notice. It applies just as much to a failure this code writes itself.
+        """
+        job = self._paid_job(client, make_cleaner, make_open_turnover, db, stripe)
+        stripe.failures["/refunds"] = stripe_client.StripeError(
+            "charge already refunded", code="charge_already_refunded", status=400
+        )
+
+        resp = client.post(
+            f"/api/turnovers/{job['turnover']['id']}/refund",
+            json={"reason": "Disputed."},
+            headers=admin_user["auth"],
+        )
+        assert resp.status_code == 409
+
+        payment = _payment(db, job["turnover"]["id"])
+        assert payment.status is PaymentStatus.SUCCEEDED, (
+            "the collection is still in force; only the refund failed"
+        )
+        assert "refund failed" in (payment.failure_message or ""), (
+            "and the attempt has to stay visible on the row"
+        )
+        assert payment.refunded_amount_cents == 0
+
+        body = client.get("/api/admin/ledger", headers=admin_user["auth"]).json()
+        assert body["total_collected_cents"] == 20_000
+        assert (
+            body["total_collected_cents"]
+            == body["total_paid_out_cents"] + body["total_platform_fee_cents"]
+        )
+        assert body["total_drift_cents"] == 0, (
+            "a refused refund made the books look like money had gone out "
+            "with nothing ever collected"
+        )
+
     def test_a_refunded_turnover_is_not_quietly_re_chargeable(
         self, client, make_cleaner, make_open_turnover, admin_user, db, stripe, webhook_secret
     ) -> None:

@@ -306,3 +306,66 @@ def test_a_cancelled_booking_leaves_both_sides_able_to_complain(
     # privacy rule does not relax because the booking ended badly.
     assert "lockbox code in the notes" not in owner_page.inner_text("body")
     assert "Cancelled on me the night before" not in cleaner_page.inner_text("body")
+
+
+def test_acting_on_one_booking_leaves_the_other_alone(
+    make_page, live_server, db
+) -> None:
+    """**Two bookings on one turnover, and only one of them should move.**
+
+    Showing cancelled work made `turnover_id` stop being unique in this list: a
+    cleaner who backs out and later wins the same job again has two cards on
+    one turnover. The splice that keeps the screen alive after an action
+    matched on the turnover, so pressing "I'm on site" on the live booking
+    overwrote the cancelled one with the same object — the history gone, and
+    two cards sharing an `award_id`, which is the list's React key.
+
+    Invisible to an endpoint test: the API answered correctly both times.
+    """
+    base_url = live_server
+    owner_page, cleaner_page = make_page(), make_page()
+
+    _booked_job(owner_page, cleaner_page, base_url, db, nickname="Twice Booked")
+
+    # --- back out ---------------------------------------------------------
+    cleaner_page.goto(f"{base_url}/jobs")
+    cleaner_page.get_by_test_id("cancel-job").click()
+    cleaner_page.get_by_role("textbox").fill("My van is off the road.")
+    cleaner_page.get_by_test_id("confirm-cancel-job").click()
+    expect(cleaner_page.get_by_test_id("job")).to_have_count(1)
+
+    # --- and win the re-posted job again ----------------------------------
+    cleaner_page.goto(f"{base_url}/board")
+    # **"Update bid", not "Place bid".** Cancelling withdraws the bid rather
+    # than deleting it — `test_cancellation` asserts exactly that, so the
+    # cleaner is not locked out of a job they can now make — and a withdrawn
+    # bid is still a bid on record, so the board offers to change it.
+    expect(cleaner_page.get_by_role("button", name="Update bid")).to_be_visible()
+    cleaner_page.fill("input[id^=price-]", "160")
+    cleaner_page.get_by_role("button", name="Update bid").click()
+    expect(cleaner_page.get_by_text(re.compile(r"Your bid:\s*\$160"))).to_be_visible()
+
+    owner_page.reload()
+    expect(owner_page.get_by_test_id("bid")).to_have_count(1)
+    owner_page.get_by_test_id("accept-bid").click()
+
+    cleaner_page.goto(f"{base_url}/jobs")
+    cleaner_page.get_by_test_id("show-cancelled-jobs").check()
+    expect(cleaner_page.get_by_test_id("job")).to_have_count(2)
+
+    # --- act on the live one ----------------------------------------------
+    cleaner_page.get_by_test_id("start-job").click()
+
+    # Still two cards: the live one moved, the cancelled one did not.
+    expect(cleaner_page.get_by_test_id("job")).to_have_count(2)
+
+    # **The discriminating assertion.** Spliced by turnover, both cards became
+    # the live booking — two cards still, but the cancelled one's reason gone
+    # from the screen entirely. Spliced by award, it is there exactly once.
+    body = cleaner_page.inner_text("body")
+    assert body.count("My van is off the road.") == 1, (
+        "the cancelled booking was overwritten with a copy of the live one"
+    )
+    # And the live one really did move: started jobs lose that button.
+    expect(cleaner_page.get_by_test_id("start-job")).to_have_count(0)
+    expect(cleaner_page.get_by_test_id("complete-job")).to_have_count(1)

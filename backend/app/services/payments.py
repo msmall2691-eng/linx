@@ -643,8 +643,28 @@ def refund_payment(db: Session, *, payment: PaymentIn, reason: str) -> PaymentIn
             idempotency_key=f"refund:payment:{payment.id}",
         )
     except stripe_client.StripeError as exc:
+        # **A failed refund is not a failed collection**, and writing `FAILED`
+        # here said it was. The charge succeeded, the transfer went out, and
+        # the row still carries both — so marking it failed told the ledger no
+        # money had ever been collected, zeroing real revenue and the fee while
+        # reporting the cleaner's payout as negative drift. The one screen that
+        # exists to say what moved would have materially misstated the books,
+        # every time a refund attempt was refused.
+        #
+        # `mark_failed` twenty lines up already holds the principle this broke:
+        # a success already recorded is not undone by a later failure notice.
+        # The same applies to a failure this code writes about itself.
+        #
+        # So the two branches say different things, because they are different
+        # facts. Stripe answering (`exc.status`) means the refund definitively
+        # did not happen: nothing moved, the pre-refund state is still exactly
+        # true, and restoring it is recording what is known rather than
+        # assuming success. Stripe not answering means the refund may or may
+        # not have gone through, and `requires_review` is the honest word for
+        # that — the whole amount's disposition is genuinely unknown, which is
+        # what the ledger's `unknown_cents` bucket says.
         payment.status = (
-            PaymentStatus.FAILED if exc.status else PaymentStatus.REQUIRES_REVIEW
+            PaymentStatus.SUCCEEDED if exc.status else PaymentStatus.REQUIRES_REVIEW
         )
         payment.failure_message = f"refund failed: {exc}"
         db.commit()

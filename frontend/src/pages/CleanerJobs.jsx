@@ -246,8 +246,15 @@ export default function CleanerJobs() {
       // The action answers with the whole job — the same shape the list was
       // built from — so it can be spliced in rather than re-fetched. An action
       // that returned less than the GET would blank the card it replaced.
+      //
+      // **Matched on `award_id`, not `turnover_id`.** Those were the same
+      // thing until this list started showing cancelled bookings: a cleaner
+      // who backed out and later won the same job again has two cards on one
+      // turnover. Keyed on the turnover, acting on the live one overwrote the
+      // cancelled one too — the history erased, and two cards carrying the
+      // same `award_id`, which is the list's React key.
       setJobs((prev) =>
-        prev.map((job) => (job.turnover_id === turnoverId ? updated : job)),
+        prev.map((job) => (job.award_id === updated.award_id ? updated : job)),
       )
     } catch (err) {
       setError(err.message)

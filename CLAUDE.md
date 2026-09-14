@@ -623,6 +623,12 @@ relying on it.
     worth complaining about are the ones that did not finish, which is also why
     neither panel is gated on completion the way the review beside it is.
 
+    Showing cancelled work also made `turnover_id` stop identifying a card: a
+    cleaner who backs out and later wins the same job again has two, so the
+    splice that keeps the screen alive after "I'm on site" matches on
+    `award_id`. Keyed on the turnover it overwrote both, erasing the history
+    card and leaving two React keys the same.
+
     That reachability is a rule in its own right, because it was broken on both
     screens at once and neither looked broken. The owner's panel was gated on
     `turnover.award`, which aliases `live_award` and so is null the moment a
@@ -947,6 +953,20 @@ become untrustworthy and there is no way to tell which is lying.
   which is how an alarm becomes something people scroll past. It also claimed
   money as collected that Stripe had not confirmed, on the one screen whose job
   is saying what actually moved.
+
+  `payments.settled()` reads `status`, which means **`status` has to keep
+  meaning "what happened to the collection"** rather than "what happened last".
+  A refund that Stripe refuses used to write `failed` onto an already-settled
+  payment, so the ledger read a row whose charge and payout both still existed
+  as money never collected — zero revenue, zero fee, and the cleaner's payout
+  reported as negative drift, every time a refund attempt was refused. A
+  definitive refusal now restores `succeeded`, because the collection is still
+  in force and only the refund failed; `failure_message` carries that, and an
+  indeterminate one still parks in `requires_review` because there the whole
+  amount's disposition is genuinely unknown. `payments.mark_failed` already
+  held this principle for out-of-order webhooks — a success already recorded is
+  not undone by a later failure notice — and it applies just as much to a
+  failure this code writes about itself.
 
   `payments.settled()` is the single author for "has this been collected", and
   four buckets fall out of it, each meaning something different: **settled**
