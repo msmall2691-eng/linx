@@ -132,6 +132,14 @@ def update_property(
     # can finish or cancel those first.
     new_type = fields.get("property_type")
     if new_type is not None and new_type != prop.property_type:
+        # Lock the property before counting, and hold it to the commit — the
+        # same row `create_turnover` locks. Without this the count and the job
+        # creation can interleave and produce exactly the incompatible live job
+        # this guard exists to prevent.
+        db.execute(
+            select(Property.id).where(Property.id == prop.id).with_for_update()
+        ).scalar_one()
+
         live = db.execute(
             select(func.count(Turnover.id)).where(
                 Turnover.property_id == prop.id,

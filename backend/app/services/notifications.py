@@ -47,7 +47,6 @@ from app.models.cleaner_profile import CleanerProfile
 from app.models.enums import (
     NotificationEvent,
     NotificationStatus,
-    PropertyType,
     ServiceType,
     TurnoverStatus,
     UserRole,
@@ -396,7 +395,10 @@ def turnover_posted(db: Session, turnover: Turnover, prop: Property) -> list[Not
     being told it is an empty rental.
     """
     recipients = cleaners_in_range(db, prop)
-    is_home = prop.property_type is PropertyType.RESIDENTIAL
+    # Read from the job, the same as the screens do: `turnover` is the rental
+    # scope and nothing else can be one. A property reclassified later must not
+    # retitle the email somebody already received.
+    is_home = turnover.service_type is not ServiceType.TURNOVER
     noun = "job" if is_home else "turnover"
 
     return queue(

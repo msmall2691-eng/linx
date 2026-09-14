@@ -12,8 +12,9 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 from decimal import Decimal
+from typing import ClassVar
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.models.enums import PropertyType
 
@@ -88,6 +89,41 @@ class PropertyUpdate(BaseModel):
     access_notes: str | None = None
     cleaning_notes: str | None = None
     is_active: bool | None = None
+
+    #: Columns the database will not accept a null in. Every field on a PATCH
+    #: shape is optional so that omitting it means "leave it alone" — but that
+    #: same `| None` makes an *explicit* null look like a valid value, and
+    #: `exclude_unset` keeps it, so the route assigns None and Postgres rejects
+    #: it as a 500. Omission and erasure are different requests and only one of
+    #: them is allowed here.
+    #:
+    #: `square_feet`, `lat`, `lng`, `address_line2`, `access_notes` and
+    #: `cleaning_notes` are deliberately absent: those columns *are* nullable,
+    #: so clearing them is a real thing an owner may want to do — an owner who
+    #: guessed wrong at the square footage can take it back out.
+    NEVER_NULL: ClassVar[tuple[str, ...]] = (
+        "nickname",
+        "address_line1",
+        "city",
+        "state",
+        "postal_code",
+        "property_type",
+        "bedrooms",
+        "bathrooms",
+        "is_active",
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_explicit_nulls(cls, data: object) -> object:
+        """A null on a non-nullable column is a 422, not a 500."""
+        if isinstance(data, dict):
+            for field in cls.NEVER_NULL:
+                if field in data and data[field] is None:
+                    raise ValueError(
+                        f"{field} cannot be null — leave it out to keep it unchanged"
+                    )
+        return data
 
     @field_validator("state")
     @classmethod

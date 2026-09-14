@@ -219,7 +219,6 @@ export default function TurnoverDetail() {
       <dl className="card mt-6 grid gap-4 sm:grid-cols-2">
         <JobSchedule
           job={turnover}
-          propertyType={turnover.property.property_type}
           timeZone={timeZone}
           formatDateTime={formatDateTime}
           formatTurnaround={formatTurnaround}

@@ -118,11 +118,21 @@ def create_turnover(
     db: Session = Depends(get_db),
     owner: User = Depends(require_role(UserRole.OWNER)),
 ) -> Turnover:
+    # **Locked, because what this job is allowed to be depends on it.** The
+    # scope and the checkin are validated against the property's type below,
+    # and reclassification refuses while live jobs exist — but two requests
+    # that both read the old type defeat both checks at once: the PATCH counts
+    # zero live jobs while this one commits a job for the type that is about
+    # to change. Neither is guardrail 1 (nothing indivisible is being handed
+    # out) but it is the same check-then-write shape, so it gets the same
+    # answer: read the row under a lock and hold it to the commit.
     prop = db.execute(
-        select(Property).where(
+        select(Property)
+        .where(
             Property.id == payload.property_id,
             Property.owner_id == owner.id,
         )
+        .with_for_update()
     ).scalar_one_or_none()
     if prop is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Property not found")

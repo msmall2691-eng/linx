@@ -24,9 +24,15 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.enums import PropertyType, ServiceType, TurnoverUrgency
+from app.models.enums import (
+    PropertyType,
+    ServiceType,
+    TurnoverStatus,
+    TurnoverUrgency,
+)
 from app.models.property import Property
 from app.models.turnover import Turnover
 from app.services import turnovers as turnover_rules
@@ -551,3 +557,212 @@ class TestTheEmailReadsRight:
         assert "Checkout:" in body
         assert "checkin" in body.lower()
         assert "turnover" in posted[0].subject.lower()
+
+
+class TestTheSecondReviewRound:
+    """Four more findings, on the fixes for the first three.
+
+    Worth recording as a pattern rather than a list: each round of fixes had
+    its own seams, and the bot found them in the same places a person does —
+    the path that was not guarded, the null that was not considered, the
+    history that changes meaning underneath somebody.
+    """
+
+    def test_an_explicit_null_is_a_422_not_a_500(
+        self, client: TestClient, make_user
+    ) -> None:
+        """**Omission and erasure are different requests.**
+
+        Every field on a PATCH shape is optional so that leaving it out means
+        "keep it" — but the same `| None` makes an *explicit* null look valid,
+        `exclude_unset` keeps it, and Postgres rejects it on a non-nullable
+        column as a 500. This predates the residential work on `bedrooms` and
+        the rest; `property_type` just joined them.
+        """
+        owner = make_user(role="owner")
+        created = _property(client, owner)
+
+        for field in ("property_type", "bedrooms", "nickname", "is_active"):
+            resp = client.patch(
+                f"/api/properties/{created['id']}",
+                json={field: None},
+                headers=owner["auth"],
+            )
+            assert resp.status_code == 422, f"{field} null returned {resp.status_code}"
+
+    def test_a_nullable_column_can_still_be_cleared(
+        self, client: TestClient, make_user
+    ) -> None:
+        """The guard must not become a blanket ban. `square_feet` *is*
+        nullable, so an owner who guessed wrong can take the number back out."""
+        owner = make_user(role="owner")
+        created = _property(client, owner, square_feet=1500)
+
+        resp = client.patch(
+            f"/api/properties/{created['id']}",
+            json={"square_feet": None},
+            headers=owner["auth"],
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["square_feet"] is None
+
+    def test_reclassification_and_job_creation_cannot_interleave(
+        self,
+        client: TestClient,
+        make_user,
+        db: Session,
+        own_session_per_request,
+    ) -> None:
+        """**Both requests could read the old type.**
+
+        The guard counted live jobs without a lock, so a PATCH could see zero
+        while a POST was committing a job for the type about to change —
+        producing exactly the incompatible live job the guard exists to
+        prevent. Not guardrail 1 (nothing indivisible is handed out) but the
+        same check-then-write shape, so it gets the same answer: both paths
+        lock the property row.
+
+        Racing them, either order is acceptable — what is not acceptable is
+        both succeeding.
+        """
+        import threading
+
+        from app.main import app
+
+        owner = make_user(role="owner")
+        rental = _property(client, owner)
+        db.commit()
+
+        start = threading.Barrier(2)
+        results: dict[str, int] = {}
+
+        def reclassify() -> None:
+            with TestClient(app) as racer:
+                start.wait(timeout=10)
+                results["patch"] = racer.patch(
+                    f"/api/properties/{rental['id']}",
+                    json={"property_type": "residential"},
+                    headers=owner["auth"],
+                ).status_code
+
+        def post_job() -> None:
+            with TestClient(app) as racer:
+                start.wait(timeout=10)
+                results["post"] = racer.post(
+                    "/api/turnovers",
+                    json={
+                        "property_id": rental["id"],
+                        "checkout_at": (
+                            datetime.now(timezone.utc) + timedelta(days=5)
+                        ).isoformat(),
+                    },
+                    headers=owner["auth"],
+                ).status_code
+
+        threads = [threading.Thread(target=reclassify), threading.Thread(target=post_job)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=30)
+            assert not thread.is_alive(), "a request never returned — deadlock?"
+
+        db.expire_all()
+        prop = db.get(Property, uuid.UUID(rental["id"]))
+        jobs = db.execute(
+            select(Turnover).where(Turnover.property_id == prop.id)
+        ).scalars().all()
+
+        # Whatever order they landed in, the property and its live jobs agree.
+        for job in jobs:
+            if job.status in (TurnoverStatus.DRAFT, TurnoverStatus.OPEN):
+                allowed = turnover_rules.SERVICE_TYPES_FOR[prop.property_type]
+                assert job.service_type in allowed, (
+                    f"a live {job.service_type.value} job is on a "
+                    f"{prop.property_type.value} property — the two requests "
+                    "interleaved and both read the old type"
+                )
+
+    def test_the_property_lock_is_real(
+        self,
+        client: TestClient,
+        make_user,
+        db: Session,
+        own_session_per_request,
+    ) -> None:
+        """**Evidence the lock is taken, not just that a race did not happen.**
+
+        The test above passes against an implementation with no locks at all on
+        most runs, because two threads rarely interleave inside the window that
+        matters. CLAUDE.md says exactly this about the award race and keeps a
+        second, deterministic test for it; this is that test for this path.
+
+        The competing connection holds **`FOR NO KEY UPDATE`** — precisely what
+        a plain `UPDATE properties SET property_type = ...` takes — rather than
+        the stronger `FOR UPDATE`. That distinction is the whole test, and the
+        first draft of it got it wrong:
+
+        Inserting a turnover takes `FOR KEY SHARE` on the property it
+        references, for the foreign key. `FOR UPDATE` conflicts with that, so a
+        holder taking `FOR UPDATE` blocks the insert whether or not the route
+        locks anything — the test passed against an implementation with no lock
+        at all, which is the same failure mode it was written to catch, one
+        level up.
+
+        `FOR NO KEY UPDATE` does not conflict with `FOR KEY SHARE`. So the
+        insert proceeds unless the route asks for the lock itself, and this
+        blocks only if the lock is real.
+        """
+        import threading
+
+        from app.db import SessionLocal
+        from app.main import app
+
+        owner = make_user(role="owner")
+        rental = _property(client, owner)
+        property_id = uuid.UUID(rental["id"])
+        auth = owner["auth"]
+        db.commit()
+
+        holder = SessionLocal()
+        finished = threading.Event()
+        outcome: dict[str, int] = {}
+
+        try:
+            holder.execute(
+                select(Property)
+                .where(Property.id == property_id)
+                # key_share=True renders FOR NO KEY UPDATE — see the docstring.
+                .with_for_update(key_share=True)
+            ).scalar_one()
+
+            def post_job() -> None:
+                with TestClient(app) as racer:
+                    outcome["status"] = racer.post(
+                        "/api/turnovers",
+                        json={
+                            "property_id": str(property_id),
+                            "checkout_at": (
+                                datetime.now(timezone.utc) + timedelta(days=5)
+                            ).isoformat(),
+                        },
+                        headers=auth,
+                    ).status_code
+                finished.set()
+
+            thread = threading.Thread(target=post_job)
+            thread.start()
+
+            assert not finished.wait(timeout=2.0), (
+                "the job was created while another connection held the "
+                "property's row lock — so its type was read without one, and "
+                "a reclassification running alongside would strand the job"
+            )
+
+            holder.rollback()  # releases the lock
+
+            assert finished.wait(timeout=30), "the request never returned after the lock lifted"
+            thread.join(timeout=5)
+            assert outcome["status"] == 201
+        finally:
+            holder.rollback()
+            holder.close()

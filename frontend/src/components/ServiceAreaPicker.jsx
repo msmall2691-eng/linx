@@ -30,6 +30,10 @@ export default function ServiceAreaPicker({ lat, lng, onChange, radiusMiles }) {
   // The town table is the server's — see `lib/places.js`. One copy, because the
   // same coordinates also decide where a property sits.
   const [places, setPlaces] = useState([])
+  // Distinct from "loaded and empty". Without this the picker sits blank
+  // forever when `/places` fails: no results, no explanation, and the "nothing
+  // matches" line suppressed because the list has no length to check against.
+  const [placesFailed, setPlacesFailed] = useState(false)
   const [query, setQuery] = useState('')
   // **Derived, not stored.** Storing the matches meant computing them at the
   // moment of the keystroke — and the town list arrives from the server, so
@@ -49,8 +53,10 @@ export default function ServiceAreaPicker({ lat, lng, onChange, radiusMiles }) {
     loadPlaces()
       .then((loaded) => !cancelled && setPlaces(loaded))
       .catch(() => {
-        // The picker needs the list; without it the search box finds nothing
-        // and says so, which is better than a blank dropdown with no reason.
+        // Say so. A search box that silently finds nothing reads as "your town
+        // is not covered", which is a different and much worse message than
+        // "we could not load the list".
+        if (!cancelled) setPlacesFailed(true)
       })
     return () => {
       cancelled = true
@@ -195,7 +201,14 @@ export default function ServiceAreaPicker({ lat, lng, onChange, radiusMiles }) {
           </ul>
         )}
 
-        {query.trim().length > 1 && results.length === 0 && places.length > 0 && (
+        {placesFailed && (
+          <p className="mt-2 text-sm text-amber-700" data-testid="places-failed">
+            We couldn&rsquo;t load the list of towns just now. Try again in a
+            moment, or use your current location above.
+          </p>
+        )}
+
+        {!placesFailed && query.trim().length > 1 && results.length === 0 && places.length > 0 && (
           <p className="mt-2 text-sm text-slate-600" data-testid="no-places">
             Nothing in {regionLabel} matches that. linx covers one region right
             now — if your town is missing and it should be here, tell us.

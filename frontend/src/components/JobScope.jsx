@@ -85,8 +85,15 @@ function Field({ label, children, className = '' }) {
   )
 }
 
-export function JobSchedule({ job, propertyType, timeZone, formatDateTime, formatTurnaround }) {
-  const isHome = propertyType === 'residential'
+export function JobSchedule({ job, timeZone, formatDateTime, formatTurnaround }) {
+  // **Read from the job, not from the property.** A property can be
+  // reclassified after its jobs are done, and deriving the wording from its
+  // *current* type would rewrite history: a finished rental turnover would
+  // start hiding its checkin and describing itself as a single house
+  // appointment. The job carries what it actually was — `turnover` is the
+  // rental scope and nothing else can be one — so it keeps its own meaning
+  // however the property is labelled later.
+  const isHome = job.service_type !== 'turnover'
 
   if (isHome) {
     // One field, because there is exactly one time that matters. No window to

@@ -51,7 +51,6 @@ function Job({ job, timeZone, onCancel, onStart, onComplete, busy }) {
       <dl className="mt-4 grid gap-4 sm:grid-cols-2">
         <JobSchedule
           job={job}
-          propertyType={property.property_type}
           timeZone={timeZone}
           formatDateTime={formatDateTime}
           formatTurnaround={formatTurnaround}

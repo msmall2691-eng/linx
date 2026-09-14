@@ -204,7 +204,6 @@ export default function Board() {
             <dl className="mt-4 grid gap-3 text-sm sm:grid-cols-2">
               <JobSchedule
                 job={turnover}
-                propertyType={turnover.property.property_type}
                 timeZone={timeZone}
                 formatDateTime={formatDateTime}
                 formatTurnaround={formatTurnaround}
