@@ -16,12 +16,21 @@ exists to prevent.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.config import settings
+from app.models.enums import TurnoverStatus
+from app.models.property import Property
 from app.models.turnover import Turnover
 from app.services.urgency import derive_urgency, is_same_day
+
+#: How far past checkout an unclaimed turnover keeps alarming. Without a floor,
+#: a first run against an old database would alert on every job the product
+#: never had, and the one that matters would be buried in them.
+UNCLAIMED_LOOKBACK = timedelta(days=1)
 
 
 def apply_derived_fields(turnover: Turnover, *, now: datetime | None = None) -> bool:
@@ -57,3 +66,37 @@ def refresh_urgency(
     """
     if any([apply_derived_fields(t, now=now) for t in turnovers]):
         db.commit()
+
+
+def unclaimed_alarming(
+    db: Session, *, now: datetime | None = None
+) -> list[tuple[Turnover, Property]]:
+    """Open turnovers close enough to checkout that nobody having taken them is
+    a problem. **One definition, two readers.**
+
+    The scheduled alarm (`app/tasks/scheduled.py`) and the admin console both
+    ask this. They must not each carry their own version of "close enough": an
+    admin screen that disagrees with the alert an admin was sent is worse than
+    either alone, because it makes both untrustworthy and there is no way to
+    tell which one is lying.
+
+    Deliberately **not** a rung on the urgency ladder. Urgency is a property of
+    the schedule and is what a cleaner sorts the board by; this is a question
+    about *staffing* that only matters because a date is approaching, and it has
+    its own cutoff and its own recipients (CLAUDE.md).
+    """
+    reference = now or datetime.now(timezone.utc)
+    window_end = reference + timedelta(hours=settings.unclaimed_alert_hours_before)
+
+    return list(
+        db.execute(
+            select(Turnover, Property)
+            .join(Property, Turnover.property_id == Property.id)
+            .where(
+                Turnover.status == TurnoverStatus.OPEN,
+                Turnover.checkout_at <= window_end,
+                Turnover.checkout_at >= reference - UNCLAIMED_LOOKBACK,
+            )
+            .order_by(Turnover.checkout_at)
+        ).all()
+    )

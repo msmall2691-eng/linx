@@ -506,10 +506,15 @@ class TestTheListItself:
     def test_every_event_in_claude_md_is_declared(self) -> None:
         """The list is fixed before the feature is built, so it is a closed set.
 
-        Thirteen now, not the original twelve. `job_completed` was added in
-        phase 6 with the transition it belongs to, and this test is how that
-        addition had to be a decision: it failed the moment the value appeared,
-        which is exactly the conversation a new event is supposed to start.
+        Fifteen now, not the original twelve, and each addition had to be an
+        argument rather than a commit. `job_completed` came in phase 6 with the
+        transition money hangs off; `dispute_raised` and `dispute_resolved` came
+        in phase 8 with the table that made raising one possible at all.
+
+        Every one of them failed here the moment the value appeared, which is
+        the whole point — a closed list is what turns adding an event into a
+        decision somebody makes out loud instead of a string that shows up in
+        one call site and nowhere else.
         """
         assert {event.value for event in NotificationEvent} == {
             "turnover_posted",
@@ -525,16 +530,19 @@ class TestTheListItself:
             "payment_receipt",
             "payout_notice",
             "review_received",
+            "dispute_raised",
+            "dispute_resolved",
         }
 
     def test_every_declared_event_now_has_a_sender(self) -> None:
-        """Phase 7 emptied this. Nothing is declared-and-unwired any more.
+        """Phase 7 emptied the declared-and-unwired half. Nothing is left.
 
         This test used to assert the opposite — that `review_received` had no
         sender — and that assertion coming out is how a phase gets finished
         rather than forgotten. What it guards now is the other direction: a
         *new* enum value with nothing behind it fails here, which is the
-        conversation adding one is supposed to start.
+        conversation adding one is supposed to start. Phase 8 added two and had
+        that conversation; both arrived with their sender in the same commit.
         """
         from app.services import notifications as n
 
@@ -552,6 +560,8 @@ class TestTheListItself:
             NotificationEvent.PAYMENT_RECEIPT: n.payment_receipt,
             NotificationEvent.PAYOUT_NOTICE: n.payout_notice,
             NotificationEvent.REVIEW_RECEIVED: n.review_received,
+            NotificationEvent.DISPUTE_RAISED: n.dispute_raised,
+            NotificationEvent.DISPUTE_RESOLVED: n.dispute_resolved,
         }
         assert set(senders) == set(NotificationEvent), (
             "an event is declared with nothing to fire it"
