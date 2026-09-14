@@ -25,8 +25,20 @@ expect = playwright_api.expect
 
 pytestmark = pytest.mark.e2e
 
+
+def _set_service_area(page) -> None:
+    """Pick a town the way a cleaner does now.
+
+    The form used to ask for latitude and longitude. It asks for a town, so
+    these tests type one — which is the point of a browser test: the selector
+    changing is the screen changing, and a test that still filled two hidden
+    coordinate fields would pass against a form nobody can complete.
+    """
+    page.fill("#service-area-search", "Portland")
+    page.get_by_test_id("place-portland").click()
+    expect(page.get_by_test_id("service-area-chosen")).to_be_visible()
+
 PASSWORD = "correct-horse-battery"
-PORTLAND = ("43.6591", "-70.2568")
 LOCKBOX_CODE = "4417"
 
 
@@ -108,9 +120,7 @@ def test_an_owner_hires_a_cleaner_and_the_cleaner_backs_out(
     cleaner_email = _signup(page, base_url, "cleaner", "Dana Rivers")
 
     page.goto(f"{base_url}/cleaner/profile")
-    page.fill("#service_lat", PORTLAND[0])
-    page.fill("#service_lng", PORTLAND[1])
-    page.fill("#service_radius_miles", "30")
+    _set_service_area(page)
     page.click("button[type=submit]")
     expect(page.get_by_role("heading", name="Not cleared to bid yet")).to_be_visible()
 
@@ -177,9 +187,7 @@ def test_an_owner_hires_a_cleaner_and_the_cleaner_backs_out(
     other_page.expected_errors.append("404 (Not Found)")
     other_email = _signup(other_page, base_url, "cleaner", "Sam Okafor")
     other_page.goto(f"{base_url}/cleaner/profile")
-    other_page.fill("#service_lat", PORTLAND[0])
-    other_page.fill("#service_lng", PORTLAND[1])
-    other_page.fill("#service_radius_miles", "30")
+    _set_service_area(other_page)
     other_page.click("button[type=submit]")
     # Wait for the save to land before reading the profile out of the database.
     # Without this the read races the request and finds no row — which is how

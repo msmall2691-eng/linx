@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { Link, Navigate, useSearchParams } from 'react-router-dom'
 
+import { CleanerPreview, OwnerPreview } from '../components/ProductPreview.jsx'
 import { useAuth } from '../lib/auth.jsx'
 
 const MIN_PASSWORD_LENGTH = 10
@@ -8,8 +9,30 @@ const MIN_PASSWORD_LENGTH = 10
 // Owner and cleaner only. Admins approve IDs and background checks, so that
 // account is created deliberately — the API refuses to make one from this form.
 const ROLES = [
-  { value: 'owner', label: 'I own a rental', hint: 'Post turnovers and pick a cleaner.' },
-  { value: 'cleaner', label: 'I clean', hint: 'Bid on turnovers near you.' },
+  {
+    value: 'owner',
+    label: 'I own a rental',
+    hint: 'Post turnovers and pick a cleaner.',
+    heading: 'What happens next',
+    points: [
+      'Add your property — nickname, address, and anything a cleaner needs to know.',
+      'Post a turnover with the checkout and the next checkin.',
+      'Cleaners near you bid. You see their price, their rating and whether their vetting is finished.',
+      'You pay when the job is marked done. Not when you book it.',
+    ],
+  },
+  {
+    value: 'cleaner',
+    label: 'I clean',
+    hint: 'Bid on turnovers near you.',
+    heading: 'What happens next',
+    points: [
+      'Tell us the town you work from and how far you travel — no coordinates, just a town.',
+      'Upload a photo ID and a reference. A person reviews them, usually in a day or two.',
+      'Once you are cleared, turnovers in range show up on your board and you name your price.',
+      'You are paid through Stripe when you mark a job complete.',
+    ],
+  },
 ]
 
 export default function Signup() {
@@ -52,11 +75,22 @@ export default function Signup() {
     }
   }
 
-  return (
-    <div className="mx-auto max-w-md px-4 py-16">
-      <h1 className="text-2xl font-bold tracking-tight">Create your account</h1>
+  const chosen = ROLES.find((r) => r.value === form.role) ?? ROLES[0]
 
-      <form onSubmit={handleSubmit} className="card mt-6 space-y-4">
+  return (
+    <div className="mx-auto grid max-w-4xl gap-10 px-4 py-16 lg:grid-cols-2">
+      <div>
+        <h1 className="text-2xl font-bold tracking-tight">Create your account</h1>
+
+        {/* What you are signing up for, beside the form rather than a page
+            back. A signup form on its own asks for five fields and gives
+            nothing until it is submitted; this is the same page still showing
+            the thing the fields are for. */}
+        <div className="mt-6 lg:hidden">
+          {form.role === 'owner' ? <OwnerPreview /> : <CleanerPreview />}
+        </div>
+
+        <form onSubmit={handleSubmit} className="card mt-6 space-y-4">
         {error && (
           <p role="alert" className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">
             {error}
@@ -155,14 +189,35 @@ export default function Signup() {
         <button type="submit" disabled={submitting} className="btn-primary w-full">
           {submitting ? 'Creating account…' : 'Create account'}
         </button>
-      </form>
+        </form>
 
-      <p className="mt-4 text-sm text-slate-600">
-        Already have an account?{' '}
-        <Link to="/login" className="font-medium text-brand-600 hover:underline">
-          Log in
-        </Link>
-      </p>
+        <p className="mt-4 text-sm text-slate-600">
+          Already have an account?{' '}
+          <Link to="/login" className="font-medium text-brand-600 hover:underline">
+            Log in
+          </Link>
+        </p>
+      </div>
+
+      <aside className="hidden lg:block">
+        <div className="sticky top-8 space-y-6">
+          {form.role === 'owner' ? <OwnerPreview /> : <CleanerPreview />}
+
+          <div className="card">
+            <h2 className="font-semibold">{chosen.heading}</h2>
+            <ol className="mt-3 space-y-2 text-sm text-slate-600">
+              {chosen.points.map((point, index) => (
+                <li key={point} className="flex gap-3">
+                  <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-brand-100 text-xs font-bold text-brand-700">
+                    {index + 1}
+                  </span>
+                  <span>{point}</span>
+                </li>
+              ))}
+            </ol>
+          </div>
+        </div>
+      </aside>
     </div>
   )
 }

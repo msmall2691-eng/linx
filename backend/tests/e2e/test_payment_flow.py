@@ -38,8 +38,20 @@ expect = playwright_api.expect
 
 pytestmark = pytest.mark.e2e
 
+
+def _set_service_area(page) -> None:
+    """Pick a town the way a cleaner does now.
+
+    The form used to ask for latitude and longitude. It asks for a town, so
+    these tests type one — which is the point of a browser test: the selector
+    changing is the screen changing, and a test that still filled two hidden
+    coordinate fields would pass against a form nobody can complete.
+    """
+    page.fill("#service-area-search", "Portland")
+    page.get_by_test_id("place-portland").click()
+    expect(page.get_by_test_id("service-area-chosen")).to_be_visible()
+
 PASSWORD = "correct-horse-battery"
-PORTLAND = ("43.6591", "-70.2568")
 
 
 def _signup(page, base_url: str, role: str, name: str) -> str:
@@ -113,9 +125,7 @@ def test_an_owner_pays_for_a_finished_job(make_page, live_server, db, fake_strip
     cleaner_email = _signup(page, base_url, "cleaner", "Robin Vale")
 
     page.goto(f"{base_url}/cleaner/profile")
-    page.fill("#service_lat", PORTLAND[0])
-    page.fill("#service_lng", PORTLAND[1])
-    page.fill("#service_radius_miles", "30")
+    _set_service_area(page)
     page.click("button[type=submit]")
     expect(page.get_by_role("heading", name="Not cleared to bid yet")).to_be_visible()
     _clear_for_work(db, cleaner_email)
