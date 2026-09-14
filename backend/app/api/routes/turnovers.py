@@ -42,6 +42,7 @@ from app.models.property import Property
 from app.models.turnover import Turnover
 from app.models.user import User
 from app.schemas.award import AwardCancel, BidderOut, TurnoverBidOut
+from app.schemas.review import ReputationOut
 from app.schemas.turnover import (
     TurnoverCancel,
     TurnoverCreate,
@@ -49,7 +50,7 @@ from app.schemas.turnover import (
     TurnoverOut,
     TurnoverUpdate,
 )
-from app.services import awards, notifications
+from app.services import awards, notifications, reviews
 from app.services.turnovers import apply_derived_fields, refresh_urgency
 
 router = APIRouter(prefix="/turnovers", tags=["turnovers"])
@@ -361,6 +362,11 @@ def list_turnover_bids(
         .order_by(Bid.price_cents)
     ).all()
 
+    # Every bidder's rating in one query rather than one each: a job with twenty
+    # bids on it must not become twenty-one round trips. `reviews.py` owns the
+    # definition — this asks it for several at once, it does not re-derive.
+    reputations = reviews.reputation_counts(db, [user.id for _, user, _ in rows])
+
     return [
         TurnoverBidOut(
             id=bid.id,
@@ -376,6 +382,10 @@ def list_turnover_bids(
                 # Straight from the column Postgres generates. Never re-derived.
                 can_take_jobs=bool(profile.can_take_jobs) if profile else False,
                 has_insurance_on_file=bool(profile.has_insurance_on_file) if profile else False,
+                reputation=ReputationOut(
+                    count=reputations[user.id].count,
+                    average=reputations[user.id].average,
+                ),
             ),
         )
         for bid, user, profile in rows

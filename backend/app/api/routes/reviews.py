@@ -49,6 +49,12 @@ def _answer(db: Session, turnover: Turnover, user: User) -> ReviewsOut:
         blocker = "You were not part of this turnover."
     elif mine is not None:
         blocker = "You have already reviewed this turnover."
+    elif reviews.too_late(reviews.all_on(db, turnover.id), reviews.role_for(people, user)):
+        # Their review is already out, so yours would be written having read it.
+        blocker = (
+            "Their review has already been published, so the window for yours "
+            "has closed."
+        )
     else:
         blocker = None
 

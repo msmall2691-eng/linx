@@ -16,6 +16,13 @@ So the rule is structural rather than a matter of etiquette:
 * If only one side ever writes, it is revealed anyway after
   `REVIEW_REVEAL_AFTER_DAYS` — silence must not be a veto, or the way to bury a
   bad review becomes refusing to answer it.
+* **And when that happens, the silent side's window has closed.** Otherwise
+  stalling beats reviewing honestly: wait out the timeout, read theirs, then
+  write yours knowing exactly what it must answer — with no reply possible,
+  since there are no edits. The rule the whole module protects is therefore the
+  stronger one: *no review is ever written by somebody who has seen the other
+  side's.* The delay is how that holds when both write; the closed window is how
+  it holds when only one does.
 
 `visible_at` is the only flag. There is deliberately no second boolean that
 could disagree with it, and no code path anywhere else sets it: everything that
@@ -114,6 +121,15 @@ def role_for(people: Participants, user: User) -> UserRole | None:
     return None
 
 
+def all_on(db: Session, turnover_id: uuid.UUID) -> list[Review]:
+    """Every review on a turnover, visible or not. **Service-internal.**
+
+    Callers outside this module use it only to ask `too_late`; nothing builds a
+    response from it, because it contains the hidden half.
+    """
+    return _existing(db, turnover_id)
+
+
 def _existing(db: Session, turnover_id: uuid.UUID) -> list[Review]:
     return list(
         db.execute(select(Review).where(Review.turnover_id == turnover_id))
@@ -129,6 +145,19 @@ def counterpart_of(people: Participants, role: UserRole) -> User:
 # --------------------------------------------------------------------------
 # Writing one
 # --------------------------------------------------------------------------
+
+
+def too_late(existing: list[Review], role: UserRole) -> bool:
+    """Whether this side missed their window because the other's is already out.
+
+    True only once the counterpart's review is *visible* — which, given both are
+    revealed together, can only have happened through the timeout sweep. Writing
+    after that would mean writing with sight of theirs.
+    """
+    return any(
+        review.author_role is not role and review.visible_at is not None
+        for review in existing
+    )
 
 
 def submit(
@@ -166,6 +195,24 @@ def submit(
         # is the behaviour the whole delay exists to prevent — and the unique
         # constraint on (turnover_id, author_role) is the backstop.
         raise ReviewRefused("You have already reviewed this turnover.")
+
+    if too_late(existing, role):
+        # **The window closing is what makes waiting a bad strategy.**
+        #
+        # Without this, stalling beats reviewing honestly: say nothing for
+        # fourteen days, let the sweep reveal theirs, read it, and then write
+        # yours knowing exactly what it has to answer — and they cannot reply,
+        # because there are no edits and one review per side. That is the same
+        # informed, unanswerable review the no-edits rule refuses, reached by
+        # writing rather than by rewriting.
+        #
+        # So the invariant is the stronger one it always meant to be: **no
+        # review is ever written by somebody who has seen the other side's.**
+        raise ReviewRefused(
+            "Their review has already been published, so the window for yours "
+            "has closed. Reviews are written without sight of each other — "
+            "that is what makes them worth reading."
+        )
 
     review = Review(
         turnover_id=turnover.id,
@@ -373,8 +420,15 @@ def reputation_of(db: Session, user_id: uuid.UUID) -> Reputation:
 def reputation_counts(db: Session, cleaner_ids: list[uuid.UUID]) -> dict[uuid.UUID, Reputation]:
     """Reputations for several cleaners at once, for a list screen.
 
-    The same definition as `reputation_of`, in one query rather than N — a board
-    of twenty jobs must not become twenty-one round trips.
+    The same definition as `reputation_of` — visible reviews only, written by
+    the owner about the cleaner on an uncancelled award — in one query rather
+    than N, because a job with twenty bids on it must not become twenty-one
+    round trips.
+
+    `reputation_of` also counts the reviews written *about somebody as an
+    owner*; this one does not, because every id it is given is a cleaner and
+    that half would be empty. A test asserts the two agree for cleaners, so the
+    optimisation cannot quietly become a second definition.
     """
     if not cleaner_ids:
         return {}

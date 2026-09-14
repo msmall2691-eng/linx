@@ -170,3 +170,15 @@ def test_neither_side_sees_the_other_until_both_have_written(
     expect(page.get_by_test_id("review")).to_have_count(2)
     assert "Fair enough, we left it late." in page.get_by_test_id("review-panel").inner_text()
     expect(page.get_by_test_id("review-held")).to_have_count(0)
+
+    # --- and only now does it count towards a rating ---
+    # A rating is a second way to read a review, so it waits behind the same
+    # line the text does: a count of one while the owner's was still held would
+    # have told the cleaner a review existed, and the average would have told
+    # them what it said. That the held-back case reads as unrated is asserted
+    # against the API in test_reviews.py; what this proves is the other half —
+    # that once revealed it actually reaches a screen, which is the whole claim
+    # behind "a rating is displayed".
+    page.goto(f"{base_url}/cleaner/profile")
+    expect(page.get_by_test_id("my-rating-average")).to_have_text("4.0")
+    expect(page.get_by_test_id("my-rating-count")).to_have_text("1 review")

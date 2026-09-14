@@ -5,9 +5,11 @@ until its row in the event list has both a sender and a test asserting it
 fires*. Not a test that the code path exists — a test that fails if the send is
 deleted. Deleting a send is silent in every other way.
 
-So every event with a live trigger gets one here, and the three that do not
-(payment receipt, payout notice, review received) are asserted to be declared
-and unwired, so that phases 6 and 7 inherit a list rather than a memory.
+So every event gets one here. Through phases 5 and 6 the list also carried
+entries that were declared with no sender yet, asserted to be exactly that, so
+the next phase inherited a list rather than a memory; phase 7 wired the last of
+them (`review_received`) and the assertion flipped to the stronger one — nothing
+is declared with nothing to fire it.
 
 The other half is duplicates, which are as bad as misses: an alert that arrives
 every fifteen minutes gets muted, and a muted channel sends nothing. That is

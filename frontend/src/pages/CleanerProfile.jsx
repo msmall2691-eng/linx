@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react'
 import Alert from '../components/Alert.jsx'
 import DocumentList from '../components/DocumentList.jsx'
 import PayoutPanel from '../components/PayoutPanel.jsx'
+import Rating from '../components/Rating.jsx'
 import VettingPanel from '../components/VettingPanel.jsx'
 import { apiFetch } from '../lib/api.js'
 import { useConfig } from '../lib/config.jsx'
@@ -111,6 +112,17 @@ export default function CleanerProfile() {
         <Alert>{error}</Alert>
 
         {profile.vetting && <VettingPanel vetting={profile.vetting} />}
+
+        {/* The same figure an owner reading your bid sees, from the same
+            function on the server. Reviews that are still held back are not in
+            it — for you either, because a number only you could reconcile
+            against the hidden half would hand you the half. */}
+        {!profile.isNew && (
+          <div className="card flex flex-wrap items-baseline justify-between gap-2">
+            <h2 className="font-semibold">How you&rsquo;re rated</h2>
+            <Rating reputation={profile.reputation} testId="my-rating" />
+          </div>
+        )}
         {/* Nothing to connect until there is a profile to connect it to —
             asking Stripe about an account that cannot exist yet just 409s. */}
         {!profile.isNew && <PayoutPanel />}

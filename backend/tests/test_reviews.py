@@ -214,6 +214,75 @@ class TestTheDelayedReveal:
         ).scalars().all()
         assert len(rows) == 1
 
+    def test_waiting_out_the_window_does_not_buy_an_informed_review(
+        self, client: TestClient, make_cleaner, make_open_turnover, db: Session
+    ) -> None:
+        """**The hole the timeout would otherwise open.**
+
+        Stalling must not beat reviewing honestly. Without this, the winning
+        move is to say nothing for fourteen days, let the sweep publish theirs,
+        read it, and then write yours knowing exactly what it has to answer —
+        with no reply possible, because there are no edits and one review per
+        side. That is the same informed, unanswerable review the no-edits rule
+        refuses, reached by writing instead of rewriting.
+
+        So the real invariant is the stronger one: **no review is ever written
+        by somebody who has seen the other side's.**
+        """
+        job = _finished_job(client, make_cleaner, make_open_turnover)
+        _write(client, job["owner"], job["turnover"]["id"], 2, "Missed the oven.")
+
+        later = datetime.now(timezone.utc) + reviews.reveal_window() + timedelta(hours=1)
+        assert reviews.reveal_overdue(db, now=later) == 1
+
+        # The cleaner can now read it — that is what the timeout is for.
+        seen = _read(client, job["cleaner"], job["turnover"]["id"])
+        assert len(seen["visible"]) == 1
+
+        # And that is exactly why they may no longer answer it.
+        assert seen["can_review"] is False
+        assert "window for yours has closed" in seen["blocker"]
+
+        late = _write(
+            client, job["cleaner"], job["turnover"]["id"], 1, "Well the owner was worse."
+        )
+        assert late.status_code == 409
+        assert "without sight of each other" in late.json()["detail"]
+
+        assert len(db.execute(select(Review)).scalars().all()) == 1
+
+    def test_the_window_is_still_open_while_theirs_is_hidden(
+        self, client: TestClient, make_cleaner, make_open_turnover
+    ) -> None:
+        """The close is triggered by *publication*, not by the clock alone.
+
+        A cleaner who has not read anything has lost nothing, so the ordinary
+        both-sides-write path must stay open right up to the reveal.
+        """
+        job = _finished_job(client, make_cleaner, make_open_turnover)
+        _write(client, job["owner"], job["turnover"]["id"], 2)
+
+        seen = _read(client, job["cleaner"], job["turnover"]["id"])
+        assert seen["can_review"] is True
+        assert seen["blocker"] is None
+        assert _write(client, job["cleaner"], job["turnover"]["id"], 4).status_code == 201
+
+    def test_the_side_who_did_write_is_unaffected_by_the_reveal(
+        self, client: TestClient, make_cleaner, make_open_turnover, db: Session
+    ) -> None:
+        """Closing the window must not read as "you already reviewed" to the
+        person who did — they get the ordinary message, and their review stands."""
+        job = _finished_job(client, make_cleaner, make_open_turnover)
+        _write(client, job["owner"], job["turnover"]["id"], 2, "Missed the oven.")
+
+        later = datetime.now(timezone.utc) + reviews.reveal_window() + timedelta(hours=1)
+        reviews.reveal_overdue(db, now=later)
+
+        seen = _read(client, job["owner"], job["turnover"]["id"])
+        assert seen["mine"]["text"] == "Missed the oven."
+        assert seen["mine"]["visible_at"] is not None
+        assert "already reviewed" in seen["blocker"]
+
     def test_visible_at_has_exactly_one_author(self) -> None:
         """Grep-level, and deliberately so.
 
@@ -222,15 +291,22 @@ class TestTheDelayedReveal:
         until it disagreed in production.
         """
         import pathlib
+        import re
 
+        # Every shape a write can take: plain assignment, a keyword argument on
+        # a Review(...), and setattr. Matching only `visible_at =` would miss
+        # the other two, and the point of this test is that a rival writer
+        # fails *here* rather than in production.
+        writes = re.compile(
+            r"visible_at\s*=(?!=)"  # assignment or kwarg
+            r"|setattr\([^,]+,\s*[\"']visible_at[\"']"
+        )
         root = pathlib.Path(__file__).resolve().parents[1] / "app"
-        writers = [
-            path
-            for path in root.rglob("*.py")
-            if "visible_at =" in path.read_text()
-        ]
-        assert [p.name for p in writers] == ["reviews.py"], (
-            f"visible_at is written outside the service: {[str(p) for p in writers]}"
+        writers = sorted(
+            path.name for path in root.rglob("*.py") if writes.search(path.read_text())
+        )
+        assert writers == ["reviews.py"], (
+            f"visible_at is written outside the service: {writers}"
         )
 
 
@@ -548,6 +624,122 @@ class TestReputation:
             count=3, average=4.7
         )
 
+
+class TestWhereTheRatingIsShown:
+    """The claim "a rating is displayed" is only true if a screen loads one.
+
+    A reputation function nothing calls is a rating nobody sees, and that is the
+    shape this class exists to keep honest: both surfaces are asserted on the
+    response body the screen actually renders, so deleting either one fails
+    here rather than in somebody's browser.
+    """
+
+    def test_the_owners_bid_list_carries_each_bidders_rating(
+        self, client: TestClient, make_cleaner, make_open_turnover, make_user
+    ) -> None:
+        """The one screen where an owner is choosing who gets a key."""
+        job = _finished_job(client, make_cleaner, make_open_turnover)
+        _write(client, job["owner"], job["turnover"]["id"], 4)
+        _write(client, job["cleaner"], job["turnover"]["id"], 5)
+
+        # A second job, bid on by the same now-rated cleaner.
+        owner = make_user(role="owner")
+        second = make_open_turnover(owner=owner)
+        _bid(client, job["cleaner"], second["turnover"]["id"])
+
+        resp = client.get(
+            f"/api/turnovers/{second['turnover']['id']}/bids", headers=owner["auth"]
+        )
+        assert resp.status_code == 200, resp.text
+        (bid,) = resp.json()
+        assert bid["cleaner"]["reputation"] == {"count": 1, "average": 4.0}
+
+    def test_an_unrated_bidder_is_unrated_rather_than_zero(
+        self, client: TestClient, make_cleaner, make_open_turnover
+    ) -> None:
+        """Null, so the screen can say "no reviews yet" rather than "0.0"."""
+        job = make_open_turnover()
+        cleaner = make_cleaner(cleared=True)
+        _bid(client, cleaner, job["turnover"]["id"])
+
+        resp = client.get(
+            f"/api/turnovers/{job['turnover']['id']}/bids", headers=job["owner"]["auth"]
+        )
+        (bid,) = resp.json()
+        assert bid["cleaner"]["reputation"] == {"count": 0, "average": None}
+
+    def test_a_held_back_review_does_not_reach_the_bid_list(
+        self, client: TestClient, make_cleaner, make_open_turnover, make_user
+    ) -> None:
+        """**The rating is a second way to read an unrevealed review.**
+
+        One held-back one-star, arriving as a count of 1 and an average of 1.0,
+        tells the owner everything the delay withholds — and tells the cleaner,
+        reading their own profile, that the review exists and what it says. The
+        rating has to stay behind the same line the text does.
+        """
+        job = _finished_job(client, make_cleaner, make_open_turnover)
+        _write(client, job["owner"], job["turnover"]["id"], 1, "Never again.")
+
+        owner = make_user(role="owner")
+        second = make_open_turnover(owner=owner)
+        _bid(client, job["cleaner"], second["turnover"]["id"])
+
+        resp = client.get(
+            f"/api/turnovers/{second['turnover']['id']}/bids", headers=owner["auth"]
+        )
+        (bid,) = resp.json()
+        assert bid["cleaner"]["reputation"] == {"count": 0, "average": None}, (
+            "a review that is still held back showed up as a rating"
+        )
+        assert "Never again" not in resp.text
+
+    def test_a_cleaner_sees_their_own_rating_on_their_profile(
+        self, client: TestClient, make_cleaner, make_open_turnover
+    ) -> None:
+        """The same number their customers see, from the same function.
+
+        A cleaner shown a different figure than the owners reading their bids
+        has no way to tell which of the two is real.
+        """
+        job = _finished_job(client, make_cleaner, make_open_turnover)
+        _write(client, job["owner"], job["turnover"]["id"], 3)
+
+        # Still one-sided: held back, so it is not yet anybody's rating.
+        resp = client.get("/api/cleaner/profile", headers=job["cleaner"]["auth"])
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["reputation"] == {"count": 0, "average": None}
+
+        _write(client, job["cleaner"], job["turnover"]["id"], 5)
+
+        resp = client.get("/api/cleaner/profile", headers=job["cleaner"]["auth"])
+        assert resp.json()["reputation"] == {"count": 1, "average": 3.0}
+
+    def test_the_bid_list_is_still_cheapest_first(
+        self, client: TestClient, make_cleaner, make_open_turnover, make_user
+    ) -> None:
+        """Shown, never ranked. A well-reviewed cleaner does not float up.
+
+        Rating-weighted ranking is out of scope for v1 (CLAUDE.md) for a reason
+        that bites hardest at launch: a marketplace short of supply cannot
+        afford to bury the cleaners who have not been reviewed yet.
+        """
+        rated = _finished_job(client, make_cleaner, make_open_turnover)
+        _write(client, rated["owner"], rated["turnover"]["id"], 5)
+        _write(client, rated["cleaner"], rated["turnover"]["id"], 5)
+
+        owner = make_user(role="owner")
+        job = make_open_turnover(owner=owner)
+        unrated = make_cleaner(cleared=True)
+        _bid(client, rated["cleaner"], job["turnover"]["id"], cents=20_000)
+        _bid(client, unrated, job["turnover"]["id"], cents=9_000)
+
+        resp = client.get(
+            f"/api/turnovers/{job['turnover']['id']}/bids", headers=owner["auth"]
+        )
+        prices = [bid["price_cents"] for bid in resp.json()]
+        assert prices == sorted(prices), "the bid list started sorting by rating"
+        assert resp.json()[0]["cleaner"]["reputation"]["count"] == 0
 
 # --------------------------------------------------------------------------
 # The window itself

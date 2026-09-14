@@ -325,7 +325,14 @@ relying on it.
   - **`review_received` fires on reveal, never on write** — telling somebody a
     review has landed hands them what the delay withholds. The recipient is the
     person reviewed, not the author.
-  - **Ratings are shown, never ranked** — see the v1 scope list below.
+  - **Ratings are shown, never ranked.** `reviews.reputation_of` is the one
+    definition — visible reviews only, so a rating cannot leak the hidden half
+    by arithmetic — with `reputation_counts` its batch form for a list screen,
+    and a test asserting the two agree. It reaches an owner on the bid list and
+    a cleaner on their own profile, and nothing sorts by it (see the v1 scope
+    list below). `GET /cleaners/{id}/reputation` is readable by any signed-in
+    user because a rating is the thing a marketplace makes public; there is
+    deliberately no public, unauthenticated cleaner directory at v1.
 - **Disputes go to a human inbox, not a bot, at v1.**
 - **No-show / cancellation policy is defined before launch.** Built in phase 4
   (`app/services/awards.py`), and the definition is:
@@ -413,13 +420,17 @@ Phase 4's `app/services/alerts.py` is gone, replaced by it.
   unknown outcome may not be assumed failed any more than successful, and
   assuming failure is how somebody gets the same message twice.
 
-Two events hang off the clock rather than off something a person did: the day-of
-reminder and the unclaimed alarm. `app/tasks/scheduled.py` is their entry point
-(`python -m app.tasks.scheduled`), runs safely as often as you like because of
-the dedupe key, and drains the outbox on the way past. Their two windows
-(`REMINDER_HOURS_BEFORE`, `UNCLAIMED_ALERT_HOURS_BEFORE`) are separate settings
-on purpose — one is a courtesy, the other an operational alarm, and the alarm is
-still deliberately **not** a rung on the urgency ladder.
+Three things hang off the clock rather than off something a person did: the
+day-of reminder, the unclaimed alarm, and — from phase 7 — the review reveal.
+`app/tasks/scheduled.py` is their entry point (`python -m app.tasks.scheduled`),
+runs safely as often as you like because of the dedupe key, and drains the
+outbox on the way past. Their three windows (`REMINDER_HOURS_BEFORE`,
+`UNCLAIMED_ALERT_HOURS_BEFORE`, `REVIEW_REVEAL_AFTER_DAYS`) are separate
+settings on purpose — one is a courtesy, one is an operational alarm still
+deliberately **not** a rung on the urgency ladder, and one is how long a review
+waits for an answer that may never come. The reveal is the only one of the three
+that is load-bearing rather than a courtesy: if the job stops running, silence
+becomes a veto and refusing to answer becomes the way to bury a bad review.
 
 ---
 
@@ -429,7 +440,7 @@ Do not build toward these:
 
 - Non-STR recurring residential cleaning
 - Automated dispute resolution
-- Rating-weighted search ranking — phase 7 computes and displays a rating, and the bench board still sorts by urgency; a cleaner with no reviews must not be buried in a marketplace short of supply
+- Rating-weighted search ranking — phase 7 shows a rating on the owner's bid list and on a cleaner's own profile, but nothing orders by it: the bid list stays cheapest-first and the bench board urgency-first, so a cleaner with no reviews is not buried in a marketplace short of supply
 - Multi-region logic — one region is hardcoded
 - Native mobile apps — responsive web only
 - In-app messaging — email/SMS notifications are enough at this size

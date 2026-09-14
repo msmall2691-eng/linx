@@ -3,6 +3,7 @@ import { Link, useParams } from 'react-router-dom'
 
 import Alert from '../components/Alert.jsx'
 import PaymentPanel from '../components/PaymentPanel.jsx'
+import Rating from '../components/Rating.jsx'
 import ReviewPanel from '../components/ReviewPanel.jsx'
 import StatusBadge from '../components/StatusBadge.jsx'
 import UrgencyBadge from '../components/UrgencyBadge.jsx'
@@ -55,7 +56,10 @@ function Bids({ bids, awarded, onAccept, onDecline, busyBidId }) {
         >
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
-              <p className="font-medium">{bid.cleaner.full_name}</p>
+              <div className="flex flex-wrap items-baseline gap-2">
+                <p className="font-medium">{bid.cleaner.full_name}</p>
+                <Rating reputation={bid.cleaner.reputation} testId="bid-rating" />
+              </div>
               <p className="text-sm text-slate-600">
                 <strong data-testid="bid-price">{formatCents(bid.price_cents)}</strong> ·{' '}
                 <span data-testid="bid-status">{bid.status}</span>

@@ -97,9 +97,11 @@ class NotificationEvent(str, Enum):
     which is exactly the question this list exists to force somebody to answer
     out loud. Adding it was a migration, on purpose.
 
-    Only `REVIEW_RECEIVED` is still declared without a sender; reviews land in
-    phase 7. Declared-and-unwired is tested as such, so a phase cannot quietly
-    skip one.
+    As of phase 7 every one of the thirteen has a sender. The list spent phases
+    5 and 6 with declared-and-unwired entries, tested as such so that a phase
+    could not quietly skip one; `REVIEW_RECEIVED` was the last of them, and it
+    fires on reveal rather than on write. `test_notifications.py` now asserts
+    the stronger thing — that nothing is declared with nothing to fire it.
     """
 
     TURNOVER_POSTED = "turnover_posted"

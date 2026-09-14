@@ -39,10 +39,10 @@ What works today:
 - **Cancellations and no-shows** — an award is cancelled, never deleted; the job
   goes back on the bench; and the owner, the cleaner and an admin are told every
   time, never conditional on the cancellation being late.
-- **Notifications** — twelve of the thirteen events in the fixed list, recorded
-  in the same transaction as the state change and delivered after it, with a
-  unique `dedupe_key` so a retry cannot send twice. Only the review notice waits
-  for its phase.
+- **Notifications** — all thirteen events in the fixed list, recorded in the
+  same transaction as the state change and delivered after it, with a unique
+  `dedupe_key` so a retry cannot send twice. The last of them, the review
+  notice, was wired in phase 7 and fires on reveal rather than on write.
 - **Payments** — the cleaner marks a job done, the owner pays on Stripe's own
   hosted page, and one **destination charge** settles both halves at once: the
   cleaner's share transfers to their Express account and the platform fee comes
@@ -54,8 +54,10 @@ What works today:
 - A single-container deploy: the backend serves the built frontend.
 - **Reviews** — mutual and delayed. Neither side sees the other's until both
   have written or two weeks pass, and the screen gives away no more than the API
-  does: not even the fact that a review exists.
-- 360 tests against real PostgreSQL, plus 9 browser click-throughs — including
+  does: not even the fact that a review exists. Once a review is visible it
+  counts towards a rating, shown on the owner's bid list and on a cleaner's own
+  profile — shown, never ranked: the bid list still sorts cheapest-first.
+- 368 tests against real PostgreSQL, plus 9 browser click-throughs — including
   bid → award → job done → paid against a Stripe that answers over real HTTP,
   and a two-browser check that one side's page does not change when the other
   reviews them.
@@ -263,7 +265,7 @@ backend/
     services/awards.py   guardrail 1 — the row lock, and the cancellation policy
     services/notifications.py  the one place that decides who hears about what
     services/delivery.py   the sender — SMTP, or the log when none is configured
-    tasks/scheduled.py   the two events a clock fires, and the outbox drain
+    tasks/scheduled.py   the three things a clock fires, and the outbox drain
   alembic/versions/    migrations — one head, always
   tests/               pytest suite, real Postgres
   tests/e2e/           browser click-throughs, opt-in

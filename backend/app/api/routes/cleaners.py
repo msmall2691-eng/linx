@@ -27,7 +27,8 @@ from app.schemas.cleaner import (
     DocumentOut,
     VettingStateOut,
 )
-from app.services import vetting
+from app.schemas.review import ReputationOut
+from app.services import reviews, vetting
 from app.services.background_check import BackgroundCheckError, get_provider
 from app.services.storage import (
     DocumentStorage,
@@ -68,11 +69,12 @@ def _fresh_detail(db: Session, profile: CleanerProfile) -> CleanerProfileDetailO
     states for row locks: never trust an in-memory copy across a commit.
     """
     db.expire(profile)
-    return _detail(profile)
+    return _detail(db, profile)
 
 
-def _detail(profile: CleanerProfile) -> CleanerProfileDetailOut:
+def _detail(db: Session, profile: CleanerProfile) -> CleanerProfileDetailOut:
     state = vetting.evaluate(profile)
+    reputation = reviews.reputation_of(db, profile.user_id)
     return CleanerProfileDetailOut(
         **CleanerProfileOut.model_validate(profile).model_dump(),
         vetting=VettingStateOut(
@@ -85,6 +87,10 @@ def _detail(profile: CleanerProfile) -> CleanerProfileDetailOut:
             DocumentOut.model_validate(document)
             for document in sorted(profile.documents, key=lambda d: d.created_at, reverse=True)
         ],
+        # The same number an owner reading their bid sees, from the same
+        # function. A cleaner told a different figure than the one their
+        # customers see has no way to tell which is the real one.
+        reputation=ReputationOut(count=reputation.count, average=reputation.average),
     )
 
 
@@ -93,7 +99,7 @@ def read_my_profile(
     db: Session = Depends(get_db),
     user: User = Depends(require_role(UserRole.CLEANER)),
 ) -> CleanerProfileDetailOut:
-    return _detail(_require_profile(db, user))
+    return _detail(db, _require_profile(db, user))
 
 
 @router.put("/profile", response_model=CleanerProfileDetailOut)
@@ -252,11 +258,11 @@ def request_background_check(
     profile = _require_profile(db, user)
 
     if profile.background_check_status is VerificationStatus.APPROVED:
-        return _detail(profile)
+        return _detail(db, profile)
     if profile.background_check_status is VerificationStatus.PENDING:
         # Ordering a second check while one is outstanding bills twice and
         # confuses the queue.
-        return _detail(profile)
+        return _detail(db, profile)
 
     try:
         outcome = provider.request(user=user, profile=profile)
