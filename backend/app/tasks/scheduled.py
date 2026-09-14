@@ -35,7 +35,7 @@ from app.models.award import Award
 from app.models.enums import TurnoverStatus
 from app.models.property import Property
 from app.models.turnover import Turnover
-from app.services import notifications
+from app.services import awards, notifications
 
 logger = logging.getLogger("linx.scheduled")
 
@@ -59,7 +59,9 @@ def send_reminders(db: Session, *, now: datetime | None = None) -> int:
         .join(Property, Turnover.property_id == Property.id)
         .join(Award, Award.turnover_id == Turnover.id)
         .where(
-            Turnover.status == TurnoverStatus.AWARDED,
+            # Both live-booking statuses: a cleaner who marked themselves on
+            # site early must not silently switch off the owner's reminder.
+            Turnover.status.in_(awards.LIVE_BOOKING_STATUSES),
             Award.cancelled_at.is_(None),
             Turnover.checkout_at <= window_end,
             Turnover.checkout_at >= reference,

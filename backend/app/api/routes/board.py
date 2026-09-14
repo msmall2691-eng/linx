@@ -183,6 +183,8 @@ def _serialize_job(award: Award, turnover: Turnover, prop: Property) -> AwardedJ
         notes=turnover.notes,
         agreed_price_cents=award.agreed_price_cents,
         awarded_at=award.awarded_at,
+        started_at=award.started_at,
+        completed_at=award.completed_at,
         cancelled_at=award.cancelled_at,
         cancellation_reason=award.cancellation_reason,
         was_no_show=award.was_no_show,
@@ -282,7 +284,11 @@ def cancel_my_job(
     if award is None or award.cleaner_id != user.id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
 
-    if turnover.status is not TurnoverStatus.AWARDED:
+    # Both live-booking statuses, not just AWARDED. A cleaner who tapped "I'm
+    # on site" and then hit a problem must still be able to say so — "always
+    # allowed" above is the whole policy, and a cleaner who cannot back out says
+    # nothing instead, which is how the owner finds out by arriving.
+    if turnover.status not in awards.LIVE_BOOKING_STATUSES:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=(
@@ -306,6 +312,78 @@ def cancel_my_job(
         select(Property).where(Property.id == turnover.property_id)
     ).scalar_one()
     return _serialize_job(award, turnover, prop)
+
+
+@router.post("/jobs/{turnover_id}/start", response_model=AwardedJobOut)
+def start_my_job(
+    turnover_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_role(UserRole.CLEANER)),
+) -> AwardedJobOut:
+    """Say you are on site.
+
+    Nothing but the owner's screen hangs off this, which is the point: "did
+    anybody actually turn up" is a different question from "was it finished",
+    and a single flag cannot answer both.
+    """
+    turnover, award = _lock_my_job(db, turnover_id, user)
+    try:
+        awards.start_job(db, turnover=turnover, award=award)
+    except awards.AwardConflict as conflict:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=conflict.detail
+        ) from None
+
+    return _serialize_job(award, turnover, _property_of(db, turnover))
+
+
+@router.post("/jobs/{turnover_id}/complete", response_model=AwardedJobOut)
+def complete_my_job(
+    turnover_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_role(UserRole.CLEANER)),
+) -> AwardedJobOut:
+    """Say the job is done. **This is what makes it payable.**
+
+    Deliberately the cleaner's act rather than a clock rolling past checkout: a
+    checkout time that has passed is not evidence that anybody cleaned anything,
+    and money should not move on an assumption. It charges nobody — it tells the
+    owner, who then pays through Stripe's own page.
+    """
+    turnover, award = _lock_my_job(db, turnover_id, user)
+    try:
+        awards.complete_job(db, turnover=turnover, award=award)
+    except awards.AwardConflict as conflict:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=conflict.detail
+        ) from None
+
+    return _serialize_job(award, turnover, _property_of(db, turnover))
+
+
+def _lock_my_job(
+    db: Session, turnover_id: uuid.UUID, user: User
+) -> tuple[Turnover, Award]:
+    """Lock the turnover, then check it is this cleaner's live job.
+
+    Lock first, check second — the same order as every other action on this row,
+    so no two of them can interleave on a stale read. Somebody else's job
+    answers 404 rather than 403: a 403 would confirm the id exists.
+    """
+    turnover = awards.lock_turnover(db, turnover_id)
+    if turnover is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+
+    award = awards.live_award(db, turnover.id)
+    if award is None or award.cleaner_id != user.id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+    return turnover, award
+
+
+def _property_of(db: Session, turnover: Turnover) -> Property:
+    return db.execute(
+        select(Property).where(Property.id == turnover.property_id)
+    ).scalar_one()
 
 
 @router.get("/{turnover_id}", response_model=BoardTurnoverOut)

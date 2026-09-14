@@ -23,10 +23,11 @@ from a clock or a random value. The unique constraint makes "fires once per
 transition" a property of the database. It is what lets the reminder job run
 every fifteen minutes without sending fifteen-minute reminders.
 
-The three events at the bottom of the fixed list — payment receipt, payout
-notice, review received — have no state transition to fire them yet. They are
-declared in `NotificationEvent` and wired in phases 6 and 7. Nothing here
-pretends otherwise.
+The last event on the fixed list — review received — has no state transition to
+fire it yet. It is declared in `NotificationEvent` and wired in phase 7. Nothing
+here pretends otherwise. Payment receipt and payout notice were the other two
+until phase 6; both are queued from the webhook that confirms the money actually
+moved, never from the request that started a checkout.
 """
 
 from __future__ import annotations
@@ -49,6 +50,7 @@ from app.models.enums import (
     UserRole,
 )
 from app.models.notification import Notification
+from app.models.payment import PaymentIn, Payout
 from app.models.property import Property
 from app.models.turnover import Turnover
 from app.models.user import User
@@ -622,5 +624,96 @@ def turnover_unclaimed(
             + "\nRaising the budget is usually what moves it."
         ),
         dedupe_scope=str(turnover.id),
+        turnover_id=turnover.id,
+    )
+
+
+def job_completed(
+    db: Session, turnover: Turnover, prop: Property, award: Award
+) -> list[Notification]:
+    """The cleaner says the job is done — which is the owner's cue to pay.
+
+    The thirteenth event, added in phase 6 with the transition it belongs to.
+    Before money hung off completion this was nobody's business; now an owner
+    who is never told is an owner who never pays, and a cleaner who did the work
+    and hears nothing. That is the question the fixed list exists to force.
+    """
+    owner = owner_of(db, turnover)
+    if owner is None:
+        return []
+
+    return queue(
+        db,
+        NotificationEvent.JOB_COMPLETED,
+        recipients=[owner],
+        subject=f"Cleaning finished: {_where(prop)}",
+        body=(
+            f"{award.cleaner_name} has marked this turnover complete.\n\n"
+            f"Where: {_where(prop)}\n"
+            f"Checkout: {_when(turnover.checkout_at)}\n"
+            f"Agreed price: {_money(award.agreed_price_cents)}\n\n"
+            "Open the turnover to pay. Your cleaner is paid out of the same "
+            "charge, so paying is what closes this out for both of you."
+        ),
+        dedupe_scope=str(award.id),
+        turnover_id=turnover.id,
+    )
+
+
+def payment_receipt(
+    db: Session, turnover: Turnover, prop: Property, payment: PaymentIn
+) -> list[Notification]:
+    """The owner's receipt, once the charge actually settled.
+
+    Queued from the webhook that confirms the money moved — never from the
+    request that *started* the checkout. A receipt for a payment that then
+    failed is worse than no receipt, because it is believed.
+    """
+    owner = owner_of(db, turnover)
+    if owner is None:
+        return []
+
+    cleaner_cents = payment.amount_cents - payment.platform_fee_cents
+    return queue(
+        db,
+        NotificationEvent.PAYMENT_RECEIPT,
+        recipients=[owner],
+        subject=f"Receipt: {_where(prop)}",
+        body=(
+            "Your payment went through. Thank you.\n\n"
+            f"Where: {_where(prop)}\n"
+            f"Checkout: {_when(turnover.checkout_at)}\n"
+            f"Total charged: {_money(payment.amount_cents)}\n"
+            f"To your cleaner: {_money(cleaner_cents)}\n"
+            f"Platform fee: {_money(payment.platform_fee_cents)}\n"
+        ),
+        dedupe_scope=str(payment.id),
+        turnover_id=turnover.id,
+    )
+
+
+def payout_notice(
+    db: Session, turnover: Turnover, prop: Property, payout: Payout
+) -> list[Notification]:
+    """The cleaner's side of the same settlement."""
+    cleaner = db.get(User, payout.cleaner_id)
+    if cleaner is None:
+        return []
+
+    return queue(
+        db,
+        NotificationEvent.PAYOUT_NOTICE,
+        recipients=[cleaner],
+        subject=f"You've been paid: {_where(prop)}",
+        body=(
+            "The owner paid for this job and your share is on its way to your "
+            "Stripe account.\n\n"
+            f"Where: {_where(prop)}\n"
+            f"Checkout: {_when(turnover.checkout_at)}\n"
+            f"Your payout: {_money(payout.amount_cents)}\n\n"
+            "Stripe decides when it lands in your bank — check your Express "
+            "dashboard for the schedule."
+        ),
+        dedupe_scope=str(payout.id),
         turnover_id=turnover.id,
     )

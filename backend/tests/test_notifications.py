@@ -503,7 +503,13 @@ class TestTheOutbox:
 
 class TestTheListItself:
     def test_every_event_in_claude_md_is_declared(self) -> None:
-        """The list is fixed before the feature is built, so it is a closed set."""
+        """The list is fixed before the feature is built, so it is a closed set.
+
+        Thirteen now, not the original twelve. `job_completed` was added in
+        phase 6 with the transition it belongs to, and this test is how that
+        addition had to be a decision: it failed the moment the value appeared,
+        which is exactly the conversation a new event is supposed to start.
+        """
         assert {event.value for event in NotificationEvent} == {
             "turnover_posted",
             "bid_received",
@@ -514,26 +520,20 @@ class TestTheListItself:
             "cleaner_no_show",
             "owner_cancelled_awarded",
             "turnover_unclaimed",
+            "job_completed",
             "payment_receipt",
             "payout_notice",
             "review_received",
         }
 
-    @pytest.mark.parametrize(
-        "event",
-        [
-            NotificationEvent.PAYMENT_RECEIPT,
-            NotificationEvent.PAYOUT_NOTICE,
-            NotificationEvent.REVIEW_RECEIVED,
-        ],
-    )
+    @pytest.mark.parametrize("event", [NotificationEvent.REVIEW_RECEIVED])
     def test_the_unbuilt_events_are_declared_and_unwired(self, event) -> None:
-        """Phases 6 and 7 inherit a list rather than somebody's memory.
+        """Phase 7 inherits a list rather than somebody's memory.
 
         Declared in the enum, with no sender yet — and this test is what makes
-        that a stated fact rather than an oversight. When phase 6 wires the
-        payment receipt, this parametrize entry comes out and a real test of the
-        send goes in.
+        that a stated fact rather than an oversight. Phase 6 took two entries
+        out of this list (payment receipt, payout notice) and replaced them with
+        real tests of the send; reviews are what is left.
         """
         senders = {
             NotificationEvent.TURNOVER_POSTED: notifications.turnover_posted,
@@ -542,6 +542,9 @@ class TestTheListItself:
             NotificationEvent.BID_DECLINED: notifications.bids_declined,
             NotificationEvent.TURNOVER_REMINDER: notifications.turnover_reminder,
             NotificationEvent.TURNOVER_UNCLAIMED: notifications.turnover_unclaimed,
+            NotificationEvent.JOB_COMPLETED: notifications.job_completed,
+            NotificationEvent.PAYMENT_RECEIPT: notifications.payment_receipt,
+            NotificationEvent.PAYOUT_NOTICE: notifications.payout_notice,
         }
         assert event not in senders
 

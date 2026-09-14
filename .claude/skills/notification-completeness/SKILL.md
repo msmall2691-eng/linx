@@ -24,6 +24,7 @@ is structural rather than a matter of remembering.
 | Turnover reminder, day-of | both sides |
 | Cleaner cancels close to checkout → urgent re-post | owner **and** admin |
 | Turnover unclaimed past the cutoff | owner **and** admin |
+| Job marked complete by the cleaner | owner |
 | Payment receipt | owner |
 | Payout notice | cleaner |
 | Review received, once visible | both directions |
@@ -35,42 +36,49 @@ the only thing that makes it loud.
 
 ## Where this stands today
 
-Phase 5 built it. `app/services/notifications.py` is the only place that decides
-who hears about anything, and nine of the twelve events in `NotificationEvent`
-have a sender and a test. The three that do not — payment receipt, payout notice,
-review received — have no state transition to fire them until phases 6 and 7, and
-`tests/test_notifications.py` asserts exactly that: declared, unwired, and the
-list closed at twelve. That test is what makes "we forgot one" loud.
+Twelve of the thirteen events have a sender and a test. Only `review_received`
+is still declared without one; reviews land in phase 7, and
+`tests/test_notifications.py` asserts that it is declared-and-unwired so the
+phase inherits a list rather than somebody's memory.
 
-The mechanics, each one load-bearing:
+**The list grew by one in phase 6, and that is how this is supposed to work.**
+`job_completed` was added with the transition it belongs to: once the owner is
+charged for a finished job rather than a booked one, "the cleaner says it is
+done" stopped being nobody's business and became the moment the owner has to
+act. Nobody hearing it means nobody pays and the cleaner is never paid. Adding
+it took a migration *and* broke the closed-list test — which is the point. The
+list being closed is what turns a new event into a decision somebody makes out
+loud instead of a string that appears in one call site.
 
-- **`queue()` does not commit.** It writes rows into the caller's open
-  transaction, so a notification cannot survive a rollback of the thing it
-  describes. `deliver_pending()` is called after the commit.
+The mechanics underneath, each load-bearing:
+
+- **`queue()` does not commit.** Rows join the caller's open transaction, so a
+  notification cannot survive a rollback of the thing it describes.
+  `deliver_pending()` runs after the commit.
 - **`dedupe_key` is a unique constraint** built from the event plus a stable
-  database id — a turnover, a bid, a recipient. Never a clock, never a random
-  value. It is why `python -m app.tasks.scheduled` can run every five minutes and
-  send one reminder rather than twelve, and why a retried request cannot double
-  up. A duplicate insert is caught on a savepoint so it cannot poison the
-  caller's transaction.
-- **A row is `pending` until a sender says otherwise.** Failures write `failed`
-  with the reason. With no `SMTP_HOST` the logging sender runs and reports
-  `delivers=False`, so rows stay `pending` — the log is not a delivery.
-- **The outbox is drained twice over**: by the request that queued the rows, and
-  by the scheduled pass, so a process that died between commit and send does not
-  lose the notification.
+  database id — never a clock, never a random value. It is why the scheduled job
+  can run every five minutes and send one reminder.
+- **A row is `pending` until a sender says otherwise.** With no `SMTP_HOST` the
+  logging sender reports `delivers=False`, so rows stay pending — the log is not
+  a delivery.
 - **A drain claims its rows before sending them** — one `UPDATE ... FOR UPDATE
   SKIP LOCKED`, committed before the network call. The dedupe key makes the row
   unique per transition; it does nothing about two overlapping drains both
-  sending it, and since every request drains, overlapping is the ordinary case.
-  A row attempted with no outcome is not retried: assuming failure is how
-  somebody gets the same message twice.
+  sending it.
+- **Money notifications are queued from the webhook**, never from the request
+  that starts a checkout. A receipt for a payment that then failed is worse than
+  no receipt, because it is believed.
 
-`app/services/alerts.py` is gone. Its two callers in `app/services/awards.py` now
-call `notifications.award_cancelled`, and `tests/test_cancellation.py` asserts on
-notification rows rather than log records — still checking that the owner, the
-cleaner and an admin are all told on every cancellation of a live award, never
-conditional on it being late.
+**The phase-4 rule this replaced is still the rule.** `app/services/alerts.py`
+is gone, but what it guaranteed is not: on *every* cancellation of a live award
+— the cleaner backs out, the owner calls it off, the cleaner never turns up —
+the owner, the cleaner and an admin are all told, and it is **never conditional
+on the cancellation being late**. `tests/test_cancellation.py` asserts it on
+notification rows. Phase 6 nearly broke it sideways by making `in_progress`
+reachable, which is why `awards.LIVE_BOOKING_STATUSES` exists and why
+`tests/test_payments.py::TestStartingWorkDoesNotSwitchOffThePolicy` guards it:
+a state transition can switch off a notification without anybody touching the
+notification.
 
 ## The rules these were built to, still binding
 

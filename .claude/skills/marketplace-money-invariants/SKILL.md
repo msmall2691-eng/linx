@@ -76,10 +76,13 @@ When you change this path, verify the way it was verified originally: delete
 
 ---
 
-## 2. Stripe — idempotency is not optional (phase 6)
+## 2. Stripe — idempotency is not optional
 
-Nothing in this repo calls Stripe yet. The rules are written now because the
-first call is exactly when they get skipped.
+Built in phase 6. These rules were written before the first call, because the
+first call is exactly when they get skipped — and they now describe code rather
+than intentions. `app/services/stripe_client.py` is the only door; a mutating
+call through it must carry a derived key or an explicit `non_idempotent_reason`,
+so there is no quiet way past this section.
 
 - **The key is derived, never generated.** `f"charge:award:{award.id}"`, built
   from an id that is already in the database. **Never `uuid4()` per attempt** —
@@ -125,3 +128,30 @@ first call is exactly when they get skipped.
 - Run `money-path-reviewer` (`.claude/agents/money-path-reviewer.md`) on the
   diff before asking for review. A rule nobody checks is a rule that gets missed
   the week somebody is in a hurry.
+
+## 4. Where this stands today
+
+All three carry-over money rows are built and tested, each written to fail
+against the wrong implementation rather than merely pass against the right one:
+
+- **Idempotency** — `tests/test_payments.py::TestIdempotency` asserts the *same
+  derived key* on a replayed attempt. A `uuid4()` per attempt satisfies "a key
+  was sent" and still bills twice, so the weaker assertion would have been
+  worthless. Verified by swapping in a generated key and watching it fail.
+- **Reconciliation** — `payments.reconcile()` returns `drift_cents`, asserted at
+  zero across a range of prices and again after a refund. Collected equals
+  payout plus fee by construction, because the two legs are one destination
+  charge rather than two ledgers squared up later.
+- **Refunds** — asserted on the wire: `refund_application_fee` and
+  `reverse_transfer` both present. Removing either one leaves money stranded
+  with nothing erroring, which is why the test reads the request rather than the
+  result.
+
+Two boundaries worth keeping straight when changing any of it:
+
+- **Payout readiness is not the trust gate.** `stripe_payouts_enabled` lives on
+  the profile beside `can_take_jobs` but is deliberately outside it. See
+  `trust-gate-single-source`.
+- **A payment is true when Stripe says so**, not when the checkout starts.
+  Receipts are queued from the webhook. Anything that moves them earlier is
+  wrong even if the tests pass.

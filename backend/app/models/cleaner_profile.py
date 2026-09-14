@@ -112,6 +112,29 @@ class CleanerProfile(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         Boolean, nullable=False, default=False, server_default="false"
     )
 
+    # Stripe Connect (phase 6). Deliberately **not** part of can_take_jobs.
+    #
+    # Being trusted in a stranger's house and being able to receive money are
+    # different questions with different failure modes, and the trust gate has
+    # exactly one author. Folding Stripe readiness into the generated column
+    # would mean a verification delay on Stripe's side silently stops a vetted
+    # cleaner from bidding, with the badge and the gate disagreeing about why.
+    # Instead the payment step refuses out loud and says what is missing.
+    stripe_account_id: Mapped[str | None] = mapped_column(
+        String(255), nullable=True, unique=True
+    )
+    #: Stripe's answer, never ours: true only once Stripe says this account can
+    #: receive transfers. Refreshed from the account, not assumed after
+    #: onboarding — finishing the form is not the same as passing verification.
+    stripe_payouts_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    #: The cleaner has been through the Express onboarding form. Useful for
+    #: telling "never started" apart from "started, still under review".
+    stripe_details_submitted: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+
     #: Read-only. Computed by Postgres; assigning to it raises on flush.
     can_take_jobs: Mapped[bool] = mapped_column(
         Boolean,

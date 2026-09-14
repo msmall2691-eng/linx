@@ -14,7 +14,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.api.routes import admin, auth, board, cleaners, health, properties, turnovers
+from app.api.routes import (
+    admin,
+    auth,
+    board,
+    cleaners,
+    health,
+    payments,
+    properties,
+    turnovers,
+)
 from app.config import settings
 
 API_PREFIX = "/api"
@@ -41,6 +50,7 @@ api_router.include_router(turnovers.router)
 api_router.include_router(cleaners.router)
 api_router.include_router(board.router)
 api_router.include_router(admin.router)
+api_router.include_router(payments.router)
 app.include_router(api_router)
 
 

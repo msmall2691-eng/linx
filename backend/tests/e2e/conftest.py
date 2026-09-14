@@ -24,8 +24,12 @@ import sys
 import time
 from collections.abc import Iterator
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
+
+if TYPE_CHECKING:
+    from tests.e2e.fake_stripe import FakeStripeServer
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
 FRONTEND_BUILD = BACKEND_DIR / "static" / "index.html"
@@ -49,19 +53,53 @@ def _skip_reason() -> str | None:
     return None
 
 
+E2E_WEBHOOK_SECRET = "whsec_e2e_browser_tests"
+
+
 @pytest.fixture(scope="session")
-def live_server(migrated_database) -> Iterator[str]:
+def fake_stripe() -> Iterator["FakeStripeServer"]:
+    """A Stripe that answers over real HTTP, on its own port.
+
+    Not a patched function: the app's own client, form encoding, redirect and
+    webhook signature all run for real against it, which is most of what can be
+    wrong between a button and a charge. See `fake_stripe.py`.
+    """
+    reason = _skip_reason()
+    if reason:
+        pytest.skip(reason)
+
+    from tests.e2e.fake_stripe import FakeStripeServer
+
+    server = FakeStripeServer(webhook_secret=E2E_WEBHOOK_SECRET)
+    server.start()
+    try:
+        yield server
+    finally:
+        server.stop()
+
+
+@pytest.fixture(scope="session")
+def live_server(migrated_database, fake_stripe) -> Iterator[str]:
     """Run the real app against the test database and yield its base URL."""
     reason = _skip_reason()
     if reason:
         pytest.skip(reason)
 
     port = _free_port()
+    base_url = f"http://127.0.0.1:{port}"
+    # The app has to know where to send the owner back to, and the fake has to
+    # know where to post the webhook. Both ports are picked before either
+    # process starts, so neither has to guess.
+    fake_stripe.app_base_url = base_url
     env = {
         **os.environ,
         "DATABASE_URL": os.environ["DATABASE_URL"],
         "ENVIRONMENT": "test",
         "SECRET_KEY": os.environ.get("SECRET_KEY", "test-only-secret-key"),
+        "STRIPE_SECRET_KEY": "sk_test_e2e_fake",
+        "STRIPE_API_BASE": fake_stripe.api_base,
+        "STRIPE_WEBHOOK_SECRET": E2E_WEBHOOK_SECRET,
+        "PUBLIC_BASE_URL": base_url,
     }
     process = subprocess.Popen(
         [
@@ -82,7 +120,6 @@ def live_server(migrated_database) -> Iterator[str]:
         stderr=subprocess.STDOUT,
     )
 
-    base_url = f"http://127.0.0.1:{port}"
     deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
         if process.poll() is not None:

@@ -65,6 +65,12 @@ class PaymentIn(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     stripe_payment_intent_id: Mapped[str | None] = mapped_column(
         String(255), nullable=True, unique=True
     )
+    #: Hosted Checkout: the owner enters card details on Stripe's page, never
+    #: on ours. Same reasoning as Checkr holding the SSN and Express holding the
+    #: 1099 — card data we never receive is card data we cannot lose.
+    stripe_checkout_session_id: Mapped[str | None] = mapped_column(
+        String(255), nullable=True, unique=True
+    )
 
     #: Integer cents throughout.
     amount_cents: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -102,7 +108,13 @@ class Payout(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     """Money that reached the cleaner's connected account."""
 
     __tablename__ = "payouts"
-    __table_args__ = (CheckConstraint("amount_cents > 0", name="amount_positive"),)
+    __table_args__ = (
+        CheckConstraint("amount_cents > 0", name="amount_positive"),
+        CheckConstraint(
+            "reversed_amount_cents >= 0 AND reversed_amount_cents <= amount_cents",
+            name="reversal_within_amount",
+        ),
+    )
 
     cleaner_id: Mapped[uuid.UUID] = mapped_column(
         PGUUID(as_uuid=True),
@@ -125,8 +137,17 @@ class Payout(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         nullable=True,
     )
 
+    #: Created by Stripe as part of the destination charge, not by a second
+    #: call from here. Read back off the charge, which is why a payout cannot
+    #: exist without the payment it came from.
     stripe_transfer_id: Mapped[str | None] = mapped_column(
         String(255), nullable=True, unique=True
+    )
+    #: Set when a refund reverses this transfer. The row is kept — what was
+    #: paid and then clawed back is the history a dispute is argued from, the
+    #: same reason a cancelled award is cancelled rather than deleted.
+    reversed_amount_cents: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
     )
 
     amount_cents: Mapped[int] = mapped_column(Integer, nullable=False)

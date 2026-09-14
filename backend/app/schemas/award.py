@@ -54,6 +54,11 @@ class AwardOut(BaseModel):
     bid_id: uuid.UUID | None
     agreed_price_cents: int
     awarded_at: datetime
+    #: The cleaner said they were on site, and that it was done. The second is
+    #: what makes the turnover payable, so the owner's screen reads it here
+    #: rather than inferring it from the status.
+    started_at: datetime | None
+    completed_at: datetime | None
     cancelled_at: datetime | None
     cancellation_reason: str | None
     was_no_show: bool
