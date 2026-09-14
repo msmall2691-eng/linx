@@ -27,7 +27,7 @@ from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
-from app.models.enums import TurnoverStatus, TurnoverUrgency
+from app.models.enums import ServiceType, TurnoverStatus, TurnoverUrgency
 
 if TYPE_CHECKING:
     from app.models.award import Award
@@ -89,6 +89,20 @@ class Turnover(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         default=TurnoverUrgency.STANDARD,
         server_default=TurnoverUrgency.STANDARD.value,
         index=True,
+    )
+
+    #: What kind of clean this is. A turnover and a move-out are both "a
+    #: clean" and are not the same job; a cleaner who cannot tell them apart
+    #: before bidding prices one of them wrong.
+    service_type: Mapped[ServiceType] = mapped_column(
+        Enum(
+            ServiceType,
+            name="service_type",
+            values_callable=lambda e: [m.value for m in e],
+        ),
+        nullable=False,
+        default=ServiceType.TURNOVER,
+        server_default=ServiceType.TURNOVER.value,
     )
 
     #: Integer cents. Optional guide price the owner posts with the job.

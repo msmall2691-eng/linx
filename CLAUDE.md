@@ -226,9 +226,57 @@ Two fields carry more weight than they look like they do:
   the one function, not a second author: nothing outside `urgency.py` decides a
   rung, and `reopened_at` can only raise one.
 
+  A residential job has no checkin and so is always read on the second measure
+  — time until the job — which is the right meaning rather than a workaround,
+  and is why residential needed no second ladder. `same_day` is unreachable for
+  one, because it describes a guest arriving the day another leaves.
+
   The "nobody has claimed this and checkout is tomorrow" alarm is deliberately
   **not** urgency. That is an operational alert with its own cutoff and its own
   recipients, and it belongs to the unclaimed-turnover path in phase 5.
+
+### Two kinds of property
+
+**Residential was out of scope and was deliberately reopened.** The original
+list said "non-STR recurring residential cleaning", and the reasoning was real:
+a short-term rental's clean is defined by the gap between one guest leaving and
+the next arriving, and that window is what the whole urgency ladder measures. A
+home has no such window.
+
+What made it cheap rather than a rewrite is that the model already had the
+shape. A turnover with `checkin_at IS NULL` is a standing vacancy, and its
+urgency is already measured as *time until the job* rather than the length of a
+window — which is exactly what a scheduled house clean is. So residential rides
+the existing table and the existing ladder rather than forking either.
+
+| | Short-term rental | Residential |
+|---|---|---|
+| `properties.property_type` | `short_term_rental` | `residential` |
+| `turnovers.checkin_at` | the next guest, or null | **always null** |
+| `turnovers.service_type` | `turnover` | `standard` / `deep` / `move_out` |
+| Urgency read as | the window between guests | how soon the job is |
+| `same_day` reachable | yes | **no** — there is no next guest |
+
+Three rules hold it together:
+
+- **`app/services/turnovers.py` decides what fits what**, in one place
+  (`service_type_for`, `checkin_for`). The route asks; it does not carry a copy.
+  A form that offers an option the API refuses is a form that lies.
+- **A mismatch is refused, never corrected.** An owner who asked for a move-out
+  clean and silently got a turnover finds out from the cleaner who turned up
+  expecting two hours' work.
+- **A checkin on a home is a category error**, not a slightly wrong value — it
+  would put the job on a rung that measures something a home does not have. The
+  API refuses it rather than dropping it, because an owner who typed a time into
+  a field deserves to know it was ignored.
+
+`properties.square_feet` is **optional on purpose**. Plenty of owners genuinely
+do not know it, and a required field somebody has to guess at produces a number
+worse than no number. When it is there it is the single most useful thing a
+cleaner has for pricing, so it is asked for and shown on the board.
+
+The privacy boundary below does not soften for a home — it matters more.
+Somebody lives there.
 
 ---
 
@@ -239,7 +287,8 @@ own response shapes (`app/schemas/board.py`) rather than filtering the owner's:
 
 | Shown | Withheld until award |
 |---|---|
-| city, state, ZIP, beds/baths | street address |
+| city, state, ZIP, beds/baths/sq ft | street address |
+| property type and scope of work | whether anybody is home right now |
 | cleaning notes, timing, urgency | **`access_notes`** — gate codes, lockbox locations |
 | owner's budget, distance in miles | the owner's identity and contact details |
 | the cleaner's **own** bid | any other cleaner's bid or price |
@@ -438,7 +487,11 @@ becomes a veto and refusing to answer becomes the way to bury a bad review.
 
 Do not build toward these:
 
-- Non-STR recurring residential cleaning
+- **Recurring schedules.** Residential jobs are one-off at v1: a home can be
+  posted as often as its owner likes, but nothing repeats on its own yet.
+  Repeating means materialising future jobs, which needs its own rules about
+  what happens when one is cancelled or the schedule changes — a decision, not
+  a checkbox.
 - Automated dispute resolution
 - Rating-weighted search ranking — phase 7 shows a rating on the owner's bid list and on a cleaner's own profile, but nothing orders by it: the bid list stays cheapest-first and the bench board urgency-first, so a cleaner with no reviews is not buried in a marketplace short of supply
 - Multi-region logic — one region is hardcoded

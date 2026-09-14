@@ -15,6 +15,8 @@ from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.models.enums import PropertyType
+
 
 class PropertyBase(BaseModel):
     nickname: str = Field(min_length=1, max_length=120)
@@ -27,8 +29,16 @@ class PropertyBase(BaseModel):
     lat: Decimal | None = Field(default=None, ge=-90, le=90)
     lng: Decimal | None = Field(default=None, ge=-180, le=180)
 
+    #: A short-term rental or a home. Defaults to a rental, which is what the
+    #: product was built for and what every property created before this
+    #: existed actually is.
+    property_type: PropertyType = PropertyType.SHORT_TERM_RENTAL
+
     bedrooms: int = Field(default=1, ge=0, le=50)
     bathrooms: Decimal = Field(default=Decimal("1.0"), ge=0, le=50)
+    #: Optional, because plenty of owners do not know it — and a required field
+    #: somebody has to guess at produces a number worse than no number.
+    square_feet: int | None = Field(default=None, gt=0, le=100_000)
 
     access_notes: str | None = None
     cleaning_notes: str | None = None

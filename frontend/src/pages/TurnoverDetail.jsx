@@ -4,6 +4,7 @@ import { Link, useParams } from 'react-router-dom'
 import Alert from '../components/Alert.jsx'
 import PaymentPanel from '../components/PaymentPanel.jsx'
 import Rating from '../components/Rating.jsx'
+import { ScopeBadge } from '../components/JobScope.jsx'
 import ReviewPanel from '../components/ReviewPanel.jsx'
 import StatusBadge from '../components/StatusBadge.jsx'
 import UrgencyBadge from '../components/UrgencyBadge.jsx'
@@ -206,6 +207,7 @@ export default function TurnoverDetail() {
         </div>
         <div className="flex gap-2">
           {showsUrgency(turnover.status) && <UrgencyBadge urgency={turnover.urgency} />}
+          <ScopeBadge serviceType={turnover.service_type} />
           <StatusBadge status={turnover.status} />
         </div>
       </div>

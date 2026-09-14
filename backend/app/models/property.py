@@ -5,11 +5,21 @@ from __future__ import annotations
 import uuid
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Boolean, CheckConstraint, ForeignKey, Integer, Numeric, String, Text
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    Enum,
+    ForeignKey,
+    Integer,
+    Numeric,
+    String,
+    Text,
+)
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
+from app.models.enums import PropertyType
 
 if TYPE_CHECKING:
     from app.models.turnover import Turnover
@@ -21,6 +31,9 @@ class Property(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __table_args__ = (
         CheckConstraint("bedrooms >= 0", name="bedrooms_non_negative"),
         CheckConstraint("bathrooms >= 0", name="bathrooms_non_negative"),
+        CheckConstraint(
+            "square_feet IS NULL OR square_feet > 0", name="square_feet_positive"
+        ),
     )
 
     owner_id: Mapped[uuid.UUID] = mapped_column(
@@ -41,9 +54,29 @@ class Property(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     lat: Mapped[float | None] = mapped_column(Numeric(9, 6), nullable=True)
     lng: Mapped[float | None] = mapped_column(Numeric(9, 6), nullable=True)
 
+    #: A short-term rental or a home. Decides how its jobs are scheduled —
+    #: a rental's clean is defined by the gap between guests, a home's by the
+    #: date somebody picked — and therefore which fields the posting form even
+    #: asks about.
+    property_type: Mapped[PropertyType] = mapped_column(
+        Enum(
+            PropertyType,
+            name="property_type",
+            values_callable=lambda e: [m.value for m in e],
+        ),
+        nullable=False,
+        default=PropertyType.SHORT_TERM_RENTAL,
+        server_default=PropertyType.SHORT_TERM_RENTAL.value,
+        index=True,
+    )
+
     bedrooms: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     # Half-baths are real, so this is not an integer.
     bathrooms: Mapped[float] = mapped_column(Numeric(3, 1), nullable=False, default=1)
+    #: Optional, because plenty of owners genuinely do not know it — and a
+    #: required field somebody has to guess at produces a number worse than no
+    #: number. Cleaners price on it when it is there, so it is asked for.
+    square_feet: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     #: Gate codes, lockbox locations, parking notes. Sensitive: only the owner,
     #: an admin, and the awarded cleaner should ever see this field. The access

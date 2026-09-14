@@ -7,6 +7,15 @@ import { apiFetch } from '../lib/api.js'
 import { useConfig, useTimeZone } from '../lib/config.jsx'
 import { dollarsToCents, formatTurnaround, zonedInputToISO } from '../lib/datetime.js'
 
+// What a home's clean can be. A rental's is always a turnover, so it is not
+// offered — the server refuses a mismatch rather than correcting it, and a form
+// that offers an option the API rejects is a form that lies.
+const HOME_SCOPES = [
+  { value: 'standard', label: 'Standard clean', hint: 'The regular going-over.' },
+  { value: 'deep', label: 'Deep clean', hint: 'Inside the oven, behind things, the works.' },
+  { value: 'move_out', label: 'Move-out clean', hint: 'Empty, and being handed back.' },
+]
+
 /**
  * A local preview of the urgency ladder, so the owner sees what posting these
  * dates means before they commit.
@@ -49,6 +58,7 @@ export default function TurnoverNew() {
     property_id: searchParams.get('property') ?? '',
     checkout_at: '',
     checkin_at: '',
+    service_type: '',
     budget: '',
     notes: '',
     publish: true,
@@ -77,8 +87,14 @@ export default function TurnoverNew() {
       }))
   }
 
+  // Which property this is for decides what the form even asks. A home has no
+  // next guest, so there is no checkin field to leave blank and nothing to
+  // measure a window against.
+  const property = properties.find((p) => p.id === form.property_id)
+  const isHome = property?.property_type === 'residential'
+
   const checkoutISO = zonedInputToISO(form.checkout_at, timeZone)
-  const checkinISO = zonedInputToISO(form.checkin_at, timeZone)
+  const checkinISO = isHome ? null : zonedInputToISO(form.checkin_at, timeZone)
   const preview = previewUrgency(checkoutISO, checkinISO, timeZone)
 
   async function handleSubmit(event) {
@@ -99,6 +115,9 @@ export default function TurnoverNew() {
           property_id: form.property_id,
           checkout_at: checkoutISO,
           checkin_at: checkinISO,
+          // Omitted on a rental, where there is exactly one right answer and
+          // the server supplies it.
+          service_type: isHome ? form.service_type || 'standard' : undefined,
           owner_budget_cents: budgetCents,
           notes: form.notes || null,
           publish: form.publish,
@@ -117,7 +136,7 @@ export default function TurnoverNew() {
       <div className="mx-auto max-w-2xl px-4 py-10">
         <h1 className="text-2xl font-bold tracking-tight">Post a turnover</h1>
         <p className="mt-3 text-slate-600">
-          Add a property first — a turnover is a cleaning at one of your rentals.
+          Add a property first — a job is a cleaning at one of your places.
         </p>
         <Link to="/properties/new" className="btn-primary mt-6">
           Add a property
@@ -131,7 +150,9 @@ export default function TurnoverNew() {
       <Link to="/turnovers" className="text-sm text-brand-600 hover:underline">
         ← Turnovers
       </Link>
-      <h1 className="mt-2 text-2xl font-bold tracking-tight">Post a turnover</h1>
+      <h1 className="mt-2 text-2xl font-bold tracking-tight">
+        {isHome ? 'Post a clean' : 'Post a turnover'}
+      </h1>
       <p className="mt-1 text-sm text-slate-600">
         Times are {regionName} local.
       </p>
@@ -153,14 +174,46 @@ export default function TurnoverNew() {
             {properties.map((property) => (
               <option key={property.id} value={property.id}>
                 {property.nickname}
+                {property.property_type === 'residential' ? ' (home)' : ''}
               </option>
             ))}
           </select>
         </div>
 
+        {isHome && (
+          <fieldset>
+            <legend className="field-label">What kind of clean?</legend>
+            <div className="mt-2 space-y-2">
+              {HOME_SCOPES.map((scope) => (
+                <label
+                  key={scope.value}
+                  className={`flex cursor-pointer gap-3 rounded-lg border p-3 text-sm transition ${
+                    (form.service_type || 'standard') === scope.value
+                      ? 'border-brand-500 bg-brand-50 ring-1 ring-brand-500'
+                      : 'border-slate-300 hover:bg-slate-50'
+                  }`}
+                >
+                  <input
+                    type="radio"
+                    name="service_type"
+                    value={scope.value}
+                    checked={(form.service_type || 'standard') === scope.value}
+                    onChange={update('service_type')}
+                    className="sr-only"
+                  />
+                  <span>
+                    <span className="block font-medium">{scope.label}</span>
+                    <span className="mt-0.5 block text-xs text-slate-500">{scope.hint}</span>
+                  </span>
+                </label>
+              ))}
+            </div>
+          </fieldset>
+        )}
+
         <div>
           <label htmlFor="checkout_at" className="field-label">
-            Guest checks out
+            {isHome ? 'When should it be cleaned?' : 'Guest checks out'}
           </label>
           <input
             id="checkout_at"
@@ -172,20 +225,25 @@ export default function TurnoverNew() {
           />
         </div>
 
-        <div>
-          <label htmlFor="checkin_at" className="field-label">
-            Next guest checks in{' '}
-            <span className="font-normal text-slate-400">(leave blank if none booked)</span>
-          </label>
-          <input
-            id="checkin_at"
-            type="datetime-local"
-            min={form.checkout_at || undefined}
-            value={form.checkin_at}
-            onChange={update('checkin_at')}
-            className="field-input"
-          />
-        </div>
+        {/* A home has no next guest. The field is not disabled or ignored —
+            it is absent, because a checkin on a home is a category error and
+            the server refuses one rather than dropping it. */}
+        {!isHome && (
+          <div>
+            <label htmlFor="checkin_at" className="field-label">
+              Next guest checks in{' '}
+              <span className="font-normal text-slate-400">(leave blank if none booked)</span>
+            </label>
+            <input
+              id="checkin_at"
+              type="datetime-local"
+              min={form.checkout_at || undefined}
+              value={form.checkin_at}
+              onChange={update('checkin_at')}
+              className="field-input"
+            />
+          </div>
+        )}
 
         {preview && (
           <div className="flex items-center gap-3 rounded-lg bg-slate-50 px-3 py-2.5">

@@ -20,6 +20,8 @@ from datetime import datetime
 
 from sqlalchemy.orm import Session
 
+from app.models.enums import PropertyType, ServiceType
+from app.models.property import Property
 from app.models.turnover import Turnover
 from app.services.urgency import derive_urgency, is_same_day
 
@@ -57,3 +59,75 @@ def refresh_urgency(
     """
     if any([apply_derived_fields(t, now=now) for t in turnovers]):
         db.commit()
+
+
+# --------------------------------------------------------------------------
+# What kind of job fits what kind of property
+# --------------------------------------------------------------------------
+
+
+class JobRefused(Exception):
+    """This job does not fit this property, and the reason is sayable."""
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(detail)
+        self.detail = detail
+
+
+#: The scopes that belong to each kind of property. A rental's clean is the
+#: turnaround between guests; a home's is a described piece of work.
+SERVICE_TYPES_FOR = {
+    PropertyType.SHORT_TERM_RENTAL: (ServiceType.TURNOVER,),
+    PropertyType.RESIDENTIAL: (
+        ServiceType.STANDARD,
+        ServiceType.DEEP,
+        ServiceType.MOVE_OUT,
+    ),
+}
+
+#: What to assume when the owner does not say. Each property type has exactly
+#: one obvious answer, which is why asking is optional.
+DEFAULT_SERVICE_TYPE = {
+    PropertyType.SHORT_TERM_RENTAL: ServiceType.TURNOVER,
+    PropertyType.RESIDENTIAL: ServiceType.STANDARD,
+}
+
+
+def service_type_for(
+    prop: Property, requested: ServiceType | None
+) -> ServiceType:
+    """The scope of work for a job at this property. **One author.**
+
+    Refuses a mismatch rather than quietly correcting it: an owner who asked
+    for a move-out clean and silently got a turnover would find out from the
+    cleaner who turned up expecting two hours' work.
+    """
+    allowed = SERVICE_TYPES_FOR[prop.property_type]
+    if requested is None:
+        return DEFAULT_SERVICE_TYPE[prop.property_type]
+    if requested not in allowed:
+        names = ", ".join(option.value for option in allowed)
+        raise JobRefused(
+            f"A {prop.property_type.value.replace('_', ' ')} takes {names}, "
+            f"not {requested.value}."
+        )
+    return requested
+
+
+def checkin_for(prop: Property, checkin_at: datetime | None) -> datetime | None:
+    """The next checkin, if this property has such a thing.
+
+    **A home has no next guest**, so a checkin on one is not a slightly wrong
+    value — it is a category error, and letting it through would put the job on
+    the `same_day` rung of a ladder that measures the gap between bookings.
+    Refused out loud rather than dropped, because an owner who typed a time
+    into a field deserves to know it was ignored.
+    """
+    if checkin_at is None:
+        return None
+    if prop.property_type is PropertyType.RESIDENTIAL:
+        raise JobRefused(
+            "A home does not have a next guest checking in. Give the date and "
+            "time the clean is due instead."
+        )
+    return checkin_at

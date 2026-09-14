@@ -10,8 +10,10 @@ const BLANK = {
   city: '',
   state: '',
   postal_code: '',
+  property_type: 'short_term_rental',
   bedrooms: 1,
   bathrooms: '1',
+  square_feet: '',
   access_notes: '',
   cleaning_notes: '',
 }
@@ -42,6 +44,10 @@ export default function PropertyForm({ initial, onSubmit, submitLabel, error }) 
         ...form,
         bedrooms: Number(form.bedrooms),
         bathrooms: String(form.bathrooms),
+        // Blank means "I don't know", which is a real answer here — a number
+        // somebody guessed at is worse than no number, and cleaners price on
+        // this when it is there.
+        square_feet: form.square_feet === '' ? null : Number(form.square_feet),
         address_line2: form.address_line2 || null,
         // Only sent when autocomplete provided them. Absent, the server places
         // the property from its ZIP — never nothing, because a property with no
@@ -59,6 +65,47 @@ export default function PropertyForm({ initial, onSubmit, submitLabel, error }) 
   return (
     <form onSubmit={handleSubmit} className="card mt-6 space-y-4">
       <Alert>{error}</Alert>
+
+      {/* What kind of place this is decides how its jobs are scheduled: a
+          rental's clean is the gap between guests, a home's is a date somebody
+          picked. The posting form reads this and asks different questions. */}
+      <fieldset>
+        <legend className="field-label">What kind of place is it?</legend>
+        <div className="mt-2 grid gap-2 sm:grid-cols-2">
+          {[
+            {
+              value: 'short_term_rental',
+              label: 'Short-term rental',
+              hint: 'Airbnb, VRBO — cleaned between guests.',
+            },
+            {
+              value: 'residential',
+              label: 'A home',
+              hint: 'Somebody lives there. Cleaned on a date you choose.',
+            },
+          ].map((option) => (
+            <label
+              key={option.value}
+              className={`cursor-pointer rounded-lg border p-3 text-sm transition ${
+                form.property_type === option.value
+                  ? 'border-brand-500 bg-brand-50 ring-1 ring-brand-500'
+                  : 'border-slate-300 hover:bg-slate-50'
+              }`}
+            >
+              <input
+                type="radio"
+                name="property_type"
+                value={option.value}
+                checked={form.property_type === option.value}
+                onChange={update('property_type')}
+                className="sr-only"
+              />
+              <span className="block font-medium">{option.label}</span>
+              <span className="mt-0.5 block text-xs text-slate-500">{option.hint}</span>
+            </label>
+          ))}
+        </div>
+      </fieldset>
 
       <div>
         <label htmlFor="nickname" className="field-label">
@@ -108,6 +155,27 @@ export default function PropertyForm({ initial, onSubmit, submitLabel, error }) 
             onChange={update('bathrooms')}
             className="field-input"
           />
+        </div>
+        <div>
+          <label htmlFor="square_feet" className="field-label">
+            Square feet <span className="font-normal text-slate-400">(optional)</span>
+          </label>
+          <input
+            id="square_feet"
+            type="number"
+            min={1}
+            max={100000}
+            value={form.square_feet ?? ''}
+            onChange={update('square_feet')}
+            placeholder="1800"
+            className="field-input"
+          />
+          {/* Optional on purpose: plenty of owners genuinely do not know, and a
+              guessed number is worse than none. When it is there it is the
+              single most useful thing a cleaner has for pricing. */}
+          <p className="mt-1 text-xs text-slate-500">
+            Helps cleaners price it. Leave blank if you&rsquo;re not sure.
+          </p>
         </div>
       </div>
 

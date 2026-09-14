@@ -51,6 +51,7 @@ from app.schemas.turnover import (
     TurnoverUpdate,
 )
 from app.services import awards, notifications, reviews
+from app.services import turnovers as turnover_rules
 from app.services.turnovers import apply_derived_fields, refresh_urgency
 
 router = APIRouter(prefix="/turnovers", tags=["turnovers"])
@@ -131,10 +132,24 @@ def create_turnover(
             detail="This property is archived. Restore it before posting a turnover.",
         )
 
+    # What kind of job this is follows from what kind of property it is, and
+    # `app/services/turnovers.py` is the only thing that decides. A mismatch is
+    # refused rather than quietly corrected: an owner who asked for a move-out
+    # clean and silently got a turnover finds out from the cleaner who turned
+    # up expecting two hours' work.
+    try:
+        service_type = turnover_rules.service_type_for(prop, payload.service_type)
+        checkin_at = turnover_rules.checkin_for(prop, payload.checkin_at)
+    except turnover_rules.JobRefused as refused:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=refused.detail
+        ) from None
+
     turnover = Turnover(
         property_id=prop.id,
         checkout_at=payload.checkout_at,
-        checkin_at=payload.checkin_at,
+        checkin_at=checkin_at,
+        service_type=service_type,
         owner_budget_cents=payload.owner_budget_cents,
         notes=payload.notes,
         status=TurnoverStatus.OPEN if payload.publish else TurnoverStatus.DRAFT,
