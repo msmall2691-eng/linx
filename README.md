@@ -12,7 +12,7 @@ reference to any other codebase.
 
 ---
 
-## Status: phase 6 — payments
+## Status: phase 7 — reviews
 
 What works today:
 
@@ -52,11 +52,17 @@ What works today:
 - The full v1 database schema — eleven tables — built by Alembic migrations.
   Tables belonging to later phases exist and are empty on purpose.
 - A single-container deploy: the backend serves the built frontend.
-- 329 tests against real PostgreSQL, plus 8 browser click-throughs — including bid → award → job done → paid, against a Stripe that answers over real HTTP.
+- **Reviews** — mutual and delayed. Neither side sees the other's until both
+  have written or two weeks pass, and the screen gives away no more than the API
+  does: not even the fact that a review exists.
+- 360 tests against real PostgreSQL, plus 9 browser click-throughs — including
+  bid → award → job done → paid against a Stripe that answers over real HTTP,
+  and a two-browser check that one side's page does not change when the other
+  reviews them.
 
-Reviews are **not** built yet, and neither is the admin console. Each is its own
-phase, reviewed before the next begins — see the phase table in
-[`CLAUDE.md`](CLAUDE.md).
+The admin console is **not** built yet — vetting review, the dispute inbox and
+the ledger each have working endpoints but no dedicated screen. That is phase 8;
+see the phase table in [`CLAUDE.md`](CLAUDE.md).
 
 **All Stripe work is test mode.** Going live means a new, separate Connect
 platform account under the new entity — never a migrated one, and never real
@@ -196,7 +202,10 @@ One Railway service, one Postgres, nothing shared with any other project.
    and that pass also drains any notification a crashed request left queued.
    Every fifteen minutes is a reasonable schedule; running it more often is safe
    by design, because both events key their `dedupe_key` off the turnover and
-   the unique constraint refuses the second copy.
+   the unique constraint refuses the second copy. The same pass also reveals
+   one-sided reviews once their window is up — that one is **load-bearing**, not
+   a courtesy: without it, refusing to write a review becomes the way to bury a
+   bad one.
 
 5. Set `SMTP_HOST` and its credentials when you have a mail provider. Without
    them the logging sender runs: notifications are still recorded as rows and
@@ -250,6 +259,7 @@ backend/
     services/background_check.py  Checkr, or manual when no key is set
     services/stripe_client.py  the ONLY door to Stripe; keys are not optional
     services/payments.py   the destination charge, the split, and refunds
+    services/reviews.py    the ONLY author of a review's visibility
     services/awards.py   guardrail 1 — the row lock, and the cancellation policy
     services/notifications.py  the one place that decides who hears about what
     services/delivery.py   the sender — SMTP, or the log when none is configured

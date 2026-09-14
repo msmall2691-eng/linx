@@ -19,7 +19,6 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timedelta, timezone
 
-import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -526,27 +525,35 @@ class TestTheListItself:
             "review_received",
         }
 
-    @pytest.mark.parametrize("event", [NotificationEvent.REVIEW_RECEIVED])
-    def test_the_unbuilt_events_are_declared_and_unwired(self, event) -> None:
-        """Phase 7 inherits a list rather than somebody's memory.
+    def test_every_declared_event_now_has_a_sender(self) -> None:
+        """Phase 7 emptied this. Nothing is declared-and-unwired any more.
 
-        Declared in the enum, with no sender yet — and this test is what makes
-        that a stated fact rather than an oversight. Phase 6 took two entries
-        out of this list (payment receipt, payout notice) and replaced them with
-        real tests of the send; reviews are what is left.
+        This test used to assert the opposite — that `review_received` had no
+        sender — and that assertion coming out is how a phase gets finished
+        rather than forgotten. What it guards now is the other direction: a
+        *new* enum value with nothing behind it fails here, which is the
+        conversation adding one is supposed to start.
         """
+        from app.services import notifications as n
+
         senders = {
-            NotificationEvent.TURNOVER_POSTED: notifications.turnover_posted,
-            NotificationEvent.BID_RECEIVED: notifications.bid_received,
-            NotificationEvent.BID_ACCEPTED: notifications.bid_accepted,
-            NotificationEvent.BID_DECLINED: notifications.bids_declined,
-            NotificationEvent.TURNOVER_REMINDER: notifications.turnover_reminder,
-            NotificationEvent.TURNOVER_UNCLAIMED: notifications.turnover_unclaimed,
-            NotificationEvent.JOB_COMPLETED: notifications.job_completed,
-            NotificationEvent.PAYMENT_RECEIPT: notifications.payment_receipt,
-            NotificationEvent.PAYOUT_NOTICE: notifications.payout_notice,
+            NotificationEvent.TURNOVER_POSTED: n.turnover_posted,
+            NotificationEvent.BID_RECEIVED: n.bid_received,
+            NotificationEvent.BID_ACCEPTED: n.bid_accepted,
+            NotificationEvent.BID_DECLINED: n.bids_declined,
+            NotificationEvent.TURNOVER_REMINDER: n.turnover_reminder,
+            NotificationEvent.CLEANER_CANCELLED: n.award_cancelled,
+            NotificationEvent.CLEANER_NO_SHOW: n.award_cancelled,
+            NotificationEvent.OWNER_CANCELLED_AWARDED: n.award_cancelled,
+            NotificationEvent.TURNOVER_UNCLAIMED: n.turnover_unclaimed,
+            NotificationEvent.JOB_COMPLETED: n.job_completed,
+            NotificationEvent.PAYMENT_RECEIPT: n.payment_receipt,
+            NotificationEvent.PAYOUT_NOTICE: n.payout_notice,
+            NotificationEvent.REVIEW_RECEIVED: n.review_received,
         }
-        assert event not in senders
+        assert set(senders) == set(NotificationEvent), (
+            "an event is declared with nothing to fire it"
+        )
 
     def test_a_recipient_without_an_address_is_not_silently_dropped(
         self, client: TestClient, make_cleaner, make_open_turnover, db: Session, caplog

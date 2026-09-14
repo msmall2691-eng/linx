@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 
 import Alert from '../components/Alert.jsx'
 import EmptyState from '../components/EmptyState.jsx'
+import ReviewPanel from '../components/ReviewPanel.jsx'
 import StatusBadge from '../components/StatusBadge.jsx'
 import UrgencyBadge from '../components/UrgencyBadge.jsx'
 import { apiFetch } from '../lib/api.js'
@@ -127,13 +128,16 @@ function Job({ job, timeZone, onCancel, onStart, onComplete, busy }) {
       </dl>
 
       {done && (
-        <div className="mt-6 rounded-lg bg-emerald-50 p-3 text-sm" data-testid="job-done">
-          <p className="font-medium text-emerald-900">You marked this done.</p>
-          <p className="mt-1 text-emerald-800">
-            The owner has been asked to pay. Your share lands in your Stripe account
-            once they do.
-          </p>
-        </div>
+        <>
+          <div className="mt-6 rounded-lg bg-emerald-50 p-3 text-sm" data-testid="job-done">
+            <p className="font-medium text-emerald-900">You marked this done.</p>
+            <p className="mt-1 text-emerald-800">
+              The owner has been asked to pay. Your share lands in your Stripe account
+              once they do.
+            </p>
+          </div>
+          <ReviewPanel turnoverId={job.turnover_id} side="cleaner" />
+        </>
       )}
 
       {!cancelled && !done && (

@@ -27,7 +27,7 @@ is structural rather than a matter of remembering.
 | Job marked complete by the cleaner | owner |
 | Payment receipt | owner |
 | Payout notice | cleaner |
-| Review received, once visible | both directions |
+| Review received, **once visible** | the person reviewed, both directions |
 
 **A state transition is not done until its row here has both a sender and a test
 asserting it fires.** Not "the code path exists" — a test that would fail if the
@@ -36,10 +36,22 @@ the only thing that makes it loud.
 
 ## Where this stands today
 
-Twelve of the thirteen events have a sender and a test. Only `review_received`
-is still declared without one; reviews land in phase 7, and
-`tests/test_notifications.py` asserts that it is declared-and-unwired so the
-phase inherits a list rather than somebody's memory.
+**All thirteen events have a sender and a test.** The list is finished. The test
+that guarded the declared-and-unwired entries has flipped: it now fails if an
+enum value exists with nothing behind it, which is the conversation adding one is
+supposed to start.
+
+Two of the thirteen fire somewhere other than the obvious moment, and both are
+deliberate:
+
+- **payment receipt / payout notice** fire from the webhook that confirms the
+  money moved, never from the request that started a checkout. A receipt for a
+  charge that then failed is worse than no receipt, because it is believed.
+- **review received** fires when a review becomes *visible*, never when it is
+  written. "You have a new review" landing the moment the other side submits
+  hands them exactly what the delayed reveal withholds — that a review exists,
+  and by implication how soon they need to get theirs in. Its recipient is the
+  person reviewed, not the author.
 
 **The list grew by one in phase 6, and that is how this is supposed to work.**
 `job_completed` was added with the transition it belongs to: once the owner is
