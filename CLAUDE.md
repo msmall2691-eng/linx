@@ -173,6 +173,7 @@ not tenant. There is deliberately no `org_id`-style scoping.
 | `bids` | A cleaner names a price on a turnover |
 | `awards` | One **live** row per turnover — guardrail 1 governs this; a cancelled one is kept as history |
 | `documents` | Cleaner vetting uploads (id / insurance / reference), admin-reviewed |
+| `property_calendars` | A booking feed an owner connected, and how its last read went |
 | `reviews` | Mutual, delayed reveal |
 | `payments_in` | Collects from the owner |
 | `payouts` | Pays the cleaner |
@@ -277,6 +278,50 @@ cleaner has for pricing, so it is asked for and shown on the board.
 
 The privacy boundary below does not soften for a home — it matters more.
 Somebody lives there.
+
+### Booking calendars — a projection, not a source of truth
+
+An owner connects the .ics their Airbnb or VRBO listing already publishes, and
+each checkout in it becomes a **draft** turnover they confirm.
+`app/services/calendars.py` owns all of it, and every rule there follows from
+one sentence: **linx owns the turnover; the listing site owns the booking.**
+
+1. **A booking becomes a draft, never a live job.** An owner who wanted ten jobs
+   posted can do that in a minute; an owner who did not cannot unsend the
+   alerts, the bids, or the apology.
+2. **A row a person has touched is theirs.** Sync updates a draft it wrote and
+   nothing else. `turnovers.source_synced_at` against `updated_at` is the test,
+   and **both come from the database clock** (`func.now()`, which is
+   transaction-start time) so the comparison is exact rather than approximate.
+   An earlier version allowed a second of slack and would have silently
+   reverted an edit made just after a sync.
+3. **Vanishing from the feed is not permission to delete.** An untouched draft
+   goes, because nothing was staffed for it. A posted or awarded job stays and
+   is *reported* — a guest cancelling does not get to cancel a cleaner.
+4. **Identity is the event's UID, not its dates** — unique on
+   `(source_calendar_id, external_ref)`. A booking whose dates move is one
+   booking; without this it becomes a second job while the first sits orphaned.
+5. **An unreadable feed changes nothing.** "The feed is empty" legitimately
+   deletes drafts, so "the feed did not load" must never look the same. A
+   failure is recorded on the calendar row and every turnover is left alone.
+
+Two things the feed cannot tell us, and where they come from instead:
+
+- **The time.** Exports are all-day — a guest leaves "on the 7th" with no hour —
+  and the urgency ladder is measured in hours. `properties.default_checkout_time`
+  and `default_checkin_time` are the house's own policy, which the owner knows
+  and the calendar does not.
+- **Whether an event is a stay.** Airbnb sends the owner's blocked dates through
+  the same feed. `calendars.BLOCK_MARKERS` is a substring heuristic and is
+  labelled as one; it is allowed to be a heuristic because its failure mode is a
+  draft the owner deletes.
+
+**A feed URL is secret the way a link is secret** — anybody holding it can read
+the booking dates for somebody's house. It is owner-only, on no cleaner-facing
+or admin shape, and there is a test that it appears nowhere in a board response.
+The URL is also not editable in place: changing it would keep the calendar's id
+while pointing it at different bookings, so every turnover keyed to it would
+claim a source it never came from.
 
 ---
 
@@ -469,8 +514,11 @@ Phase 4's `app/services/alerts.py` is gone, replaced by it.
   unknown outcome may not be assumed failed any more than successful, and
   assuming failure is how somebody gets the same message twice.
 
-Three things hang off the clock rather than off something a person did: the
-day-of reminder, the unclaimed alarm, and — from phase 7 — the review reveal.
+Four things hang off the clock rather than off something a person did: the
+day-of reminder, the unclaimed alarm, the review reveal, and reading the booking
+calendars. The calendar pass gives each feed its own `try` — one listing site
+having a bad afternoon is exactly when every *other* owner's sync most needs to
+keep working.
 `app/tasks/scheduled.py` is their entry point (`python -m app.tasks.scheduled`),
 runs safely as often as you like because of the dedupe key, and drains the
 outbox on the way past. Their three windows (`REMINDER_HOURS_BEFORE`,

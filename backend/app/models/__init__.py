@@ -8,6 +8,7 @@ invisible to migrations.
 from app.models.award import Award
 from app.models.base import Base
 from app.models.bid import Bid
+from app.models.calendar import PropertyCalendar
 from app.models.cleaner_profile import CleanerProfile
 from app.models.document import Document
 from app.models.enums import (
@@ -50,6 +51,7 @@ __all__ = [
     "PaymentStatus",
     "Payout",
     "Property",
+    "PropertyCalendar",
     "PropertyType",
     "Recurrence",
     "Review",

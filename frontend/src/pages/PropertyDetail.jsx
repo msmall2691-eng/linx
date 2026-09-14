@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 
 import Alert from '../components/Alert.jsx'
+import CalendarFeeds from '../components/CalendarFeeds.jsx'
 import PropertyForm from '../components/PropertyForm.jsx'
 import StatusBadge from '../components/StatusBadge.jsx'
 import UrgencyBadge from '../components/UrgencyBadge.jsx'
@@ -114,7 +115,24 @@ export default function PropertyDetail() {
         />
       ) : (
         <>
+          <CalendarFeeds
+            propertyId={propertyId}
+            isHome={property.property_type === 'residential'}
+          />
+
           <dl className="card mt-6 grid gap-4 sm:grid-cols-2">
+            <div>
+              <dt className="text-xs font-medium uppercase tracking-wide text-slate-500">
+                Checkout / checkin
+              </dt>
+              {/* Shown because a synced turnover's times come from here — an
+                  all-day calendar export has no hour in it, so this is what
+                  decides where a job sits on the urgency ladder. */}
+              <dd className="mt-1 text-sm">
+                {String(property.default_checkout_time).slice(0, 5)} out ·{' '}
+                {String(property.default_checkin_time).slice(0, 5)} in
+              </dd>
+            </div>
             <div>
               <dt className="text-xs font-medium uppercase tracking-wide text-slate-500">Size</dt>
               <dd className="mt-1 text-sm">

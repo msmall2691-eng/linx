@@ -41,7 +41,7 @@ from app.models.award import Award
 from app.models.enums import TurnoverStatus
 from app.models.property import Property
 from app.models.turnover import Turnover
-from app.services import awards, geocoding, notifications, reviews
+from app.services import awards, calendars, geocoding, notifications, reviews
 
 logger = logging.getLogger("linx.scheduled")
 
@@ -155,15 +155,38 @@ def place_unmapped_properties(db: Session) -> int:
     return len(rows)
 
 
+def sync_calendars(db: Session) -> int:
+    """Read every connected booking feed. Returns how many drafts it created.
+
+    **One feed failing must not stop the rest.** Each gets its own try: a
+    listing site having a bad afternoon, or one owner's expired link, is exactly
+    the situation where every other calendar most needs to keep working. The
+    reason is recorded on the failing row where its owner can see it, and this
+    pass moves on.
+    """
+    created = 0
+    for calendar in calendars.active_calendars(db):
+        try:
+            created += calendars.sync(db, calendar).created
+        except calendars.CalendarError as error:
+            logger.info("calendar %s could not be read: %s", calendar.id, error.detail)
+        except Exception:  # noqa: BLE001 - one bad feed must not end the pass
+            logger.exception("calendar %s failed unexpectedly", calendar.id)
+            db.rollback()
+    return created
+
+
 def run(db: Session, *, now: datetime | None = None) -> dict[str, int]:
     """One pass. Queue what is due, then send everything owed."""
     placed = place_unmapped_properties(db)
+    synced = sync_calendars(db)
     reminders = send_reminders(db, now=now)
     unclaimed = alert_unclaimed(db, now=now)
     revealed = reveal_reviews(db, now=now)
     delivered = notifications.deliver_pending(db, limit=SCHEDULED_DRAIN_LIMIT)
     return {
         "placed": placed,
+        "synced": synced,
         "reminders": reminders,
         "unclaimed": unclaimed,
         "revealed": revealed,
@@ -181,9 +204,11 @@ def main() -> None:  # pragma: no cover - exercised through run()
     finally:
         db.close()
     logger.info(
-        "scheduled pass: %d properties placed, %d reminders queued, "
-        "%d unclaimed alerts queued, %d reviews revealed, %d delivered",
+        "scheduled pass: %d properties placed, %d drafts from calendars, "
+        "%d reminders queued, %d unclaimed alerts queued, %d reviews revealed, "
+        "%d delivered",
         result["placed"],
+        result["synced"],
         result["reminders"],
         result["unclaimed"],
         result["revealed"],

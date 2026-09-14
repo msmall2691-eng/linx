@@ -15,6 +15,8 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy import (
     Boolean,
+    String,
+    UniqueConstraint,
     CheckConstraint,
     DateTime,
     Enum,
@@ -48,6 +50,11 @@ class Turnover(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         ),
         # The bench board reads open turnovers ordered by urgency then checkout.
         Index("ix_turnovers_status_checkout_at", "status", "checkout_at"),
+        # One job per booking per feed. This is what makes a re-sync idempotent
+        # rather than a way to accumulate duplicates every fifteen minutes.
+        UniqueConstraint(
+            "source_calendar_id", "external_ref", name="uq_turnovers_source_event"
+        ),
     )
 
     property_id: Mapped[uuid.UUID] = mapped_column(
@@ -103,6 +110,27 @@ class Turnover(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         nullable=False,
         default=ServiceType.TURNOVER,
         server_default=ServiceType.TURNOVER.value,
+    )
+
+    #: The calendar feed that proposed this job, if one did. Null on anything
+    #: an owner posted themselves — which is most of them, and all of them
+    #: before this existed.
+    source_calendar_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("property_calendars.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    #: The booking's own id in that feed (its iCalendar UID). **Identity comes
+    #: from the feed, not from the dates**: a booking whose dates move is still
+    #: the same booking, and without this it would become a second job while
+    #: the first sat orphaned.
+    external_ref: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    #: When sync last wrote this row. Compared against `updated_at` to answer
+    #: the only question that matters on a re-sync: **has a person touched this
+    #: since?** If they have, the feed does not get to argue with them.
+    source_synced_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
     )
 
     #: Integer cents. Optional guide price the owner posts with the job.
