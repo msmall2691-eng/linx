@@ -80,3 +80,56 @@ class PaymentStatus(str, Enum):
     FAILED = "failed"
     REFUNDED = "refunded"
     REQUIRES_REVIEW = "requires_review"
+
+
+class NotificationEvent(str, Enum):
+    """The fixed event list from CLAUDE.md, as a native Postgres enum.
+
+    A native type rather than free text, because the list is meant to be closed:
+    adding an event is a migration and therefore a decision somebody makes on
+    purpose, not a string that appears in one call site and nowhere else.
+
+    The last three have no state transition to fire them yet — payments land in
+    phase 6, reviews in phase 7. They are declared here for the same reason
+    phase 1 declared every table: the shape is settled now, the behavior arrives
+    with its phase.
+    """
+
+    TURNOVER_POSTED = "turnover_posted"
+    BID_RECEIVED = "bid_received"
+    BID_ACCEPTED = "bid_accepted"
+    BID_DECLINED = "bid_declined"
+    TURNOVER_REMINDER = "turnover_reminder"
+    CLEANER_CANCELLED = "cleaner_cancelled"
+    CLEANER_NO_SHOW = "cleaner_no_show"
+    OWNER_CANCELLED_AWARDED = "owner_cancelled_awarded"
+    TURNOVER_UNCLAIMED = "turnover_unclaimed"
+    PAYMENT_RECEIPT = "payment_receipt"
+    PAYOUT_NOTICE = "payout_notice"
+    REVIEW_RECEIVED = "review_received"
+
+
+class NotificationChannel(str, Enum):
+    """How it reaches a person.
+
+    Email is the only channel with a sender at v1. SMS is declared because the
+    product needs it for day-of reminders and it changes the row's shape, not
+    just its delivery — but a vendor client written against no account is the
+    thing `background_check.py` warns about, so it arrives with its provider.
+    """
+
+    EMAIL = "email"
+    SMS = "sms"
+
+
+class NotificationStatus(str, Enum):
+    """`FAILED` is a real outcome, not an absence.
+
+    A delivery whose outcome is unknown stays `PENDING` with `attempted_at`
+    set — the same posture guardrail 2 takes on a Stripe call that may or may
+    not have gone through. Nothing is assumed sent.
+    """
+
+    PENDING = "pending"
+    SENT = "sent"
+    FAILED = "failed"

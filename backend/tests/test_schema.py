@@ -42,6 +42,9 @@ EXPECTED_TABLES = {
     "reviews",
     "payments_in",
     "payouts",
+    # Phase 5. The one table phase 1 did not declare, because a notification is
+    # a record of something happening rather than part of the domain shape.
+    "notifications",
 }
 
 

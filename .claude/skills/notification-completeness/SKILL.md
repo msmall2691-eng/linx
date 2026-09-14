@@ -35,26 +35,47 @@ the only thing that makes it loud.
 
 ## Where this stands today
 
-Phase 4 built the cancellation half early, because "never silently" belongs to
-the no-show policy rather than to the notification feature:
+Phase 5 built it. `app/services/notifications.py` is the only place that decides
+who hears about anything, and nine of the twelve events in `NotificationEvent`
+have a sender and a test. The three that do not — payment receipt, payout notice,
+review received — have no state transition to fire them until phases 6 and 7, and
+`tests/test_notifications.py` asserts exactly that: declared, unwired, and the
+list closed at twelve. That test is what makes "we forgot one" loud.
 
-- `app/services/alerts.py` names the event, resolves **every** recipient (admin
-  is a role, not an address — a hardcoded address stops alerting the day someone
-  new takes over the inbox), and records the alert.
-- `app/services/awards.py` calls it on every cancellation of a live award —
-  cleaner backing out, owner calling it off, no-show — never conditional on the
-  cancellation being late.
-- `backend/tests/test_cancellation.py` asserts the owner, the cleaner and an
-  admin are all in the recipients.
+The mechanics, each one load-bearing:
 
-It is deliberately **not** a notification system: no templates, no queue, no
-`notifications` table, no delivery. Phase 5 replaces the sink (`_deliver`) and
-fills in the rest of the table above.
+- **`queue()` does not commit.** It writes rows into the caller's open
+  transaction, so a notification cannot survive a rollback of the thing it
+  describes. `deliver_pending()` is called after the commit.
+- **`dedupe_key` is a unique constraint** built from the event plus a stable
+  database id — a turnover, a bid, a recipient. Never a clock, never a random
+  value. It is why `python -m app.tasks.scheduled` can run every five minutes and
+  send one reminder rather than twelve, and why a retried request cannot double
+  up. A duplicate insert is caught on a savepoint so it cannot poison the
+  caller's transaction.
+- **A row is `pending` until a sender says otherwise.** Failures write `failed`
+  with the reason. With no `SMTP_HOST` the logging sender runs and reports
+  `delivers=False`, so rows stay `pending` — the log is not a delivery.
+- **The outbox is drained twice over**: by the request that queued the rows, and
+  by the scheduled pass, so a process that died between commit and send does not
+  lose the notification.
+- **A drain claims its rows before sending them** — one `UPDATE ... FOR UPDATE
+  SKIP LOCKED`, committed before the network call. The dedupe key makes the row
+  unique per transition; it does nothing about two overlapping drains both
+  sending it, and since every request drains, overlapping is the ordinary case.
+  A row attempted with no outcome is not retried: assuming failure is how
+  somebody gets the same message twice.
 
-## Rules for phase 5, decided now
+`app/services/alerts.py` is gone. Its two callers in `app/services/awards.py` now
+call `notifications.award_cancelled`, and `tests/test_cancellation.py` asserts on
+notification rows rather than log records — still checking that the owner, the
+cleaner and an admin are all told on every cancellation of a live award, never
+conditional on it being late.
+
+## The rules these were built to, still binding
 
 - **One place decides recipients.** Call sites say what happened; the service
-  works out who hears it.
+  works out who hears it. `admin` is a role, not an address.
 - **Duplicates are as bad as misses.** An event fires once per transition. If a
   retry could fire it twice, it needs a key — the same reasoning as guardrail 2,
   for the same reason.
