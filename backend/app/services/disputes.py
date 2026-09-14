@@ -58,19 +58,21 @@ class Parties:
     award: Award
 
 
-def award_for(db: Session, turnover: Turnover, user: User) -> Award | None:
-    """The award on this turnover that **this person** is a party to.
+def disputable_awards(db: Session, turnover: Turnover, user: User) -> list[Award]:
+    """Every booking on this turnover **this person** is a party to, newest first.
 
     Not "the award on this turnover" — that is a question with a different
     answer next week. A turnover can carry several awards over its life: a
     cancellation re-posts it to the bench (`awards.py` sets it back to `open`)
-    and the next accept writes a second row. So the party has to be resolved
-    per person, newest first:
+    and the next accept writes a second row. So the party is resolved per
+    person:
 
     * a **cleaner** is a party to their own awards, and to nobody else's — a
       cleaner whose booking was cancelled is still party to the job that went
-      wrong, which is exactly the one worth complaining about;
-    * the **owner** is a party to all of them, so they get the most recent.
+      wrong, which is exactly the one worth complaining about. They can hold
+      more than one: backing out and later winning the re-posted job is two
+      awards, both theirs;
+    * the **owner** is a party to all of them.
 
     Reading the newest award for everybody, which is what this did first, had
     two faces of one bug. A cleaner whose award had been superseded was told
@@ -80,19 +82,75 @@ def award_for(db: Session, turnover: Turnover, user: User) -> Award | None:
     """
     prop = db.get(Property, turnover.property_id)
     if prop is None:
-        return None
+        return []
 
-    awards = db.execute(
-        select(Award)
-        .where(Award.turnover_id == turnover.id)
-        # `id` breaks the tie: two awards can share a timestamp, and an
-        # ordering that is not total picks a different row on a different day.
-        .order_by(Award.awarded_at.desc(), Award.id.desc())
-    ).scalars().all()
+    awards = list(
+        db.execute(
+            select(Award)
+            .where(Award.turnover_id == turnover.id)
+            # `id` breaks the tie: two awards can share a timestamp, and an
+            # ordering that is not total picks a different row on a different
+            # day.
+            .order_by(Award.awarded_at.desc(), Award.id.desc())
+        ).scalars().all()
+    )
 
     if prop.owner_id == user.id:
-        return awards[0] if awards else None
-    return next((award for award in awards if award.cleaner_id == user.id), None)
+        return awards
+    return [award for award in awards if award.cleaner_id == user.id]
+
+
+def award_under_dispute(
+    db: Session,
+    turnover: Turnover,
+    user: User,
+    award_id: uuid.UUID | None = None,
+) -> Award:
+    """Which booking this complaint is about. **Refuses rather than guessing.**
+
+    Binding the newest award is right exactly when there is only one to pick,
+    and silently wrong otherwise — which is the second half of the bug that
+    `dispute.award_id` fixed the first half of. Freezing the award at filing
+    time stops a dispute *changing* who it is about; it does not make an
+    inferred choice correct in the first place. An owner whose cleaner
+    cancelled and whose job was re-awarded before they got round to
+    complaining would have their complaint filed against the replacement — the
+    person who has done nothing — and the console and the resolution
+    notification would both name them. The same happens to a cleaner who
+    cancelled, re-bid and was booked again: two awards, both theirs, and only
+    they know which one went wrong.
+
+    So the API takes an `award_id` and this refuses without one when there is
+    a real choice to make. That is the house rule from `service_type_for`: a
+    mismatch is refused, never corrected, because somebody who is told what
+    they asked for was received can check it and somebody who is not, cannot.
+    """
+    candidates = disputable_awards(db, turnover, user)
+    if not candidates:
+        raise DisputeRefused(
+            "Nobody was ever booked for this turnover, so there is no one to "
+            "raise a dispute with. If the problem is the posting itself, "
+            "cancel it instead."
+        )
+
+    if award_id is not None:
+        chosen = next((a for a in candidates if a.id == award_id), None)
+        if chosen is None:
+            # Not "that award is not yours" — the 404 rule again: a refusal
+            # that distinguishes "exists but not yours" from "does not exist"
+            # confirms the id.
+            raise DisputeRefused("That booking is not one of yours on this job.")
+        return chosen
+
+    if len(candidates) == 1:
+        return candidates[0]
+
+    raise DisputeRefused(
+        "This job has been booked more than once. Say which booking you are "
+        "complaining about — picking the most recent would file your "
+        "complaint against whoever holds the job today, who may have had "
+        "nothing to do with it."
+    )
 
 
 def parties_of(db: Session, award: Award) -> Parties | None:
@@ -127,10 +185,6 @@ def parties_of_dispute(db: Session, dispute: Dispute) -> Parties | None:
     return None if award is None else parties_of(db, award)
 
 
-def parties(db: Session, turnover: Turnover, user: User) -> Parties | None:
-    """The award this person could raise a dispute under, as its two people."""
-    award = award_for(db, turnover, user)
-    return None if award is None else parties_of(db, award)
 
 
 def role_for(people: Parties, user: User) -> UserRole | None:
@@ -165,6 +219,7 @@ def raise_dispute(
     raiser: User,
     reason: DisputeReason,
     description: str,
+    award_id: uuid.UUID | None = None,
 ) -> Dispute:
     """File a complaint about this job. Commits, then delivers.
 
@@ -176,13 +231,7 @@ def raise_dispute(
     take a row lock; a lock here would imply an atomicity this path does not
     need and does not have.
     """
-    award = award_for(db, turnover, raiser)
-    if award is None:
-        raise DisputeRefused(
-            "Nobody was ever booked for this turnover, so there is no one to "
-            "raise a dispute with. If the problem is the posting itself, "
-            "cancel it instead."
-        )
+    award = award_under_dispute(db, turnover, raiser, award_id)
     people = parties_of(db, award)
     if people is None:
         raise DisputeRefused(
@@ -234,6 +283,47 @@ def raise_dispute(
 # --------------------------------------------------------------------------
 
 
+def _claim(db: Session, dispute: Dispute) -> Dispute:
+    """Lock the row and re-read it, before checking anything about it.
+
+    **Guardrail 1's shape, applied to a state transition rather than an
+    award.** Raising a dispute needs no lock — two rows in a queue is one extra
+    card a human closes — but *working* one does, because two admins with the
+    same inbox open is the ordinary case rather than a race nobody hits.
+
+    Unlocked, each request checked a status it had loaded independently, and
+    two interleavings were reachable. An acknowledge that committed after a
+    resolve wrote `acknowledged` back over `resolved` while leaving
+    `resolved_at` and the note populated — a row that says nobody has settled
+    it, carrying a settlement, after both parties were told it was settled. And
+    two resolves both passed the check, so the row kept the *last* admin's note
+    while the dedupe key had already queued and sent the *first* one: the
+    record a dispute is argued from later disagreeing with the message the
+    people involved actually received.
+
+    That second one is the reason this is not merely tidiness. An earlier
+    version of this module argued the opposite in a docstring — "the last write
+    wins, which is two people agreeing anyway, and the dedupe key means the
+    message still goes out exactly once" — and both halves were wrong: they are
+    not agreeing, and the message that goes out is not the one on the row.
+
+    `populate_existing` is not optional. A locking `SELECT` takes the lock and
+    still hands back the instance already in the session's identity map, with
+    its old attribute values — so without it the row is locked and then read
+    stale, which is the whole failure this exists to stop (CLAUDE.md says the
+    same about `calendars._claim`).
+    """
+    locked = db.execute(
+        select(Dispute)
+        .where(Dispute.id == dispute.id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    ).scalars().first()
+    if locked is None:
+        raise DisputeRefused("This dispute no longer exists.")
+    return locked
+
+
 def acknowledge(db: Session, dispute: Dispute, admin: User) -> Dispute:
     """Mark that a person has picked this up. Sends nothing, on purpose.
 
@@ -242,14 +332,16 @@ def acknowledge(db: Session, dispute: Dispute, admin: User) -> Dispute:
     look at their own dispute — so the queue is not a void without becoming a
     mailing list.
     """
+    dispute = _claim(db, dispute)
     if dispute.status is DisputeStatus.RESOLVED:
+        db.commit()  # release the lock; nothing changed
         raise DisputeRefused("This dispute is already resolved.")
 
     if dispute.status is DisputeStatus.OPEN:
         dispute.status = DisputeStatus.ACKNOWLEDGED
         dispute.acknowledged_at = datetime.now(timezone.utc)
         dispute.acknowledged_by_id = admin.id
-        db.commit()
+    db.commit()
     return dispute
 
 
@@ -262,15 +354,19 @@ def resolve(db: Session, dispute: Dispute, admin: User, notes: str) -> Dispute:
     "resolved" with no explanation, to somebody who did not know they were
     being complained about, is worse than silence.
 
-    Two admins resolving at the same instant is not guarded with a lock. The
-    last write wins on the row, which is two people agreeing anyway, and the
-    notification's dedupe key means the message still goes out exactly once.
+    **Serialised on the row** — see `_claim`. The note that is stored and the
+    note that is sent have to be the same words, and without the lock they
+    were not: two admins both passed the already-resolved check, the row kept
+    the last one's note, and the dedupe key had already sent the first one's.
     """
+    dispute = _claim(db, dispute)
     if dispute.status is DisputeStatus.RESOLVED:
+        db.commit()  # release the lock; nothing changed
         raise DisputeRefused("This dispute is already resolved.")
 
     text = notes.strip()
     if not text:
+        db.commit()  # release the lock; nothing changed
         raise DisputeRefused(
             "A resolution needs a reason. A dispute closed with no explanation "
             "is one nobody can argue with, which is the thing this is for."

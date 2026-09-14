@@ -631,6 +631,28 @@ relying on it.
     Both now mount unconditionally and let the server decide — the panel
     self-hides when there is nobody to dispute with — and a browser test raises
     a dispute from each side of a cancelled booking.
+  - **The person filing says which booking**, and the server refuses rather
+    than guessing (`disputes.award_under_dispute`). Freezing the award stops a
+    dispute *changing* who it is about; it does not make an inferred choice
+    right in the first place. An owner whose cleaner cancelled and whose job
+    was re-awarded before they got round to complaining would have had their
+    complaint filed against the replacement, who has done nothing — and the
+    same happens to a cleaner who cancelled, re-bid and was booked again, two
+    awards both theirs. `DisputeIn.award_id` is optional only because most
+    turnovers have exactly one booking and asking a question with one possible
+    answer is noise; with several, the refusal is the house rule from
+    `service_type_for`. `DisputesOut.bookings` is what the screen renders the
+    choice from.
+  - **Working a dispute is serialised on the row; raising one is not.** That
+    asymmetry is the difference between a duplicate a human closes and a record
+    that disagrees with what the parties were told. Unlocked, two admins each
+    checked a status they had loaded independently: an acknowledge committing
+    after a resolve wrote `acknowledged` back over a settled dispute while
+    leaving the note on it, and two resolves both passed, so the row kept the
+    *last* admin's note while the dedupe key had already sent the *first* one.
+    `disputes._claim` is guardrail 1's shape applied to a state transition,
+    `populate_existing` included, and there is a real two-thread test rather
+    than a sequential stand-in.
   - **A dispute is bound to one award, written when it is filed**
     (`disputes.award_id`), and `parties_of_dispute` is the only reader of it.
     "The award on this turnover" is a question with a different answer next
@@ -894,6 +916,12 @@ become untrustworthy and there is no way to tell which is lying.
   scheduled alarm makes, moved out of `app/tasks/scheduled.py` so the two
   cannot drift. `UNCLAIMED_LOOKBACK` moved with it and is re-exported from its
   old home, because a name that moves silently is a name somebody still imports.
+  Its bid count is `BidStatus.SUBMITTED` only: a job re-posted after a
+  cancellation still carries the accepted bid and every declined one, so
+  counting them all made the alarm read "3 bids, none accepted" — an owner
+  dithering over offers — when there were no live offers and the real problem
+  was that nobody had bid. An alarm that misdescribes the problem is worse than
+  one that does not fire.
 - Nothing on it links to `/turnovers/:id`. That route is `OwnerRoute`-wrapped
   and its endpoint is owner-only, so an admin clicking one was bounced to
   `/dashboard`; the console offered three drill-downs no console user could

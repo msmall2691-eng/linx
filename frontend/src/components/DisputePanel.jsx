@@ -74,6 +74,7 @@ export default function DisputePanel({ turnoverId }) {
   const [state, setState] = useState(null)
   const [open, setOpen] = useState(false)
   const [reason, setReason] = useState('quality')
+  const [awardId, setAwardId] = useState('')
   const [description, setDescription] = useState('')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
@@ -98,10 +99,16 @@ export default function DisputePanel({ turnoverId }) {
       setState(
         await apiFetch(`/turnovers/${turnoverId}/disputes`, {
           method: 'POST',
-          body: { reason, description },
+          // Sent only when there is a choice to send. The server refuses to
+          // guess between several bookings and accepts the one obvious answer
+          // without being told, so an empty string must not become a value.
+          body: awardId
+            ? { reason, description, award_id: awardId }
+            : { reason, description },
         }),
       )
       setDescription('')
+      setAwardId('')
       setOpen(false)
     } catch (err) {
       setError(err.message)
@@ -160,6 +167,39 @@ export default function DisputePanel({ turnoverId }) {
             nobody is charged or refunded because a dispute was opened.
           </p>
 
+          {/* **Only when there is a real choice.** A turnover that was
+              cancelled and re-awarded has more than one booking in its
+              history, and the server refuses to guess which one a complaint is
+              about rather than filing it against whoever holds the job today.
+              One booking needs no question asked. */}
+          {state.bookings.length > 1 && (
+            <div>
+              <label htmlFor="dispute-award" className="field-label">
+                Which booking?
+              </label>
+              <select
+                id="dispute-award"
+                value={awardId}
+                onChange={(e) => setAwardId(e.target.value)}
+                className="field-input"
+                data-testid="dispute-award"
+              >
+                <option value="">Choose the booking this is about…</option>
+                {state.bookings.map((booking) => (
+                  <option key={booking.award_id} value={booking.award_id}>
+                    {booking.cleaner_name} — booked{' '}
+                    {formatDateTime(booking.awarded_at, timeZone)}
+                    {booking.was_no_show
+                      ? ' (recorded as a no-show)'
+                      : booking.cancelled_at
+                        ? ' (cancelled)'
+                        : ''}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
           <div>
             <label htmlFor="dispute-reason" className="field-label">
               What kind of problem?
@@ -198,7 +238,14 @@ export default function DisputePanel({ turnoverId }) {
             <button
               type="submit"
               className="btn-primary"
-              disabled={busy || description.trim().length === 0}
+              disabled={
+                busy ||
+                description.trim().length === 0 ||
+                // The server would refuse this anyway; the button saying so
+                // first is the difference between a form that waits and a form
+                // that rejects what it accepted.
+                (state.bookings.length > 1 && !awardId)
+              }
               data-testid="submit-dispute"
             >
               {busy ? 'Sending…' : 'Send it'}

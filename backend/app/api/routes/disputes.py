@@ -21,11 +21,17 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
 from app.db import get_db
+from app.models.award import Award
 from app.models.dispute import Dispute
 from app.models.property import Property
 from app.models.turnover import Turnover
 from app.models.user import User
-from app.schemas.dispute import DisputeIn, DisputeOut, DisputesOut
+from app.schemas.dispute import (
+    DisputableBookingOut,
+    DisputeIn,
+    DisputeOut,
+    DisputesOut,
+)
 from app.services import disputes
 
 router = APIRouter(tags=["disputes"])
@@ -43,14 +49,12 @@ def _answer(db: Session, turnover: Turnover, user: User) -> DisputesOut:
     about is a decision a person makes when they work the queue, and a count on
     this screen would make it for them.
     """
-    people = disputes.parties(db, turnover, user)
-    if people is None:
+    bookings = disputes.disputable_awards(db, turnover, user)
+    if not bookings:
         blocker = (
             "Nobody was ever booked for this turnover, so there is no one to "
             "raise a dispute with."
         )
-    elif disputes.role_for(people, user) is None:
-        blocker = "You were not part of this turnover."
     elif disputes.open_dispute_of(db, turnover.id, user) is not None:
         blocker = (
             "You already have an open dispute on this job. Somebody is looking "
@@ -69,7 +73,31 @@ def _answer(db: Session, turnover: Turnover, user: User) -> DisputesOut:
         can_raise=blocker is None,
         blocker=blocker,
         mine=[_out(dispute) for dispute in mine],
+        # Sent whenever they could file, so a screen with a real choice to make
+        # can make it. `award_under_dispute` refuses to guess when there is more
+        # than one, so a panel that did not ask would be unusable rather than
+        # merely quiet.
+        bookings=[] if blocker else _bookings(db, bookings),
     )
+
+
+def _bookings(db: Session, awards: list[Award]) -> list[DisputableBookingOut]:
+    """The bookings, named well enough to tell apart."""
+    out: list[DisputableBookingOut] = []
+    for award in awards:
+        cleaner = db.get(User, award.cleaner_id)
+        if cleaner is None:
+            continue
+        out.append(
+            DisputableBookingOut(
+                award_id=award.id,
+                cleaner_name=cleaner.full_name,
+                awarded_at=award.awarded_at,
+                cancelled_at=award.cancelled_at,
+                was_no_show=award.was_no_show,
+            )
+        )
+    return out
 
 
 def _readable_turnover(db: Session, turnover_id: uuid.UUID, user: User) -> Turnover:
@@ -100,7 +128,7 @@ def _readable_turnover(db: Session, turnover_id: uuid.UUID, user: User) -> Turno
     # turnover has since been re-awarded to somebody else is still party to the
     # job they were booked for, and must not lose sight of their own dispute
     # about it.
-    if disputes.award_for(db, turnover, user) is None:
+    if not disputes.disputable_awards(db, turnover, user):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Turnover not found"
         )
@@ -147,6 +175,7 @@ def raise_dispute(
             raiser=user,
             reason=payload.reason,
             description=payload.description,
+            award_id=payload.award_id,
         )
     except disputes.DisputeRefused as refused:
         raise HTTPException(

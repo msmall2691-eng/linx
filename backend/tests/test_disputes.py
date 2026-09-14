@@ -20,6 +20,7 @@ Three groups of assertion here, and the middle one is the load-bearing group:
 
 from __future__ import annotations
 
+import threading
 import uuid
 
 import pytest
@@ -27,6 +28,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.main import app
 from app.models import NotificationEvent
 from app.models.notification import Notification
 
@@ -566,4 +568,305 @@ class TestADisputeStaysWithItsOwnAward:
         assert mine.status_code == 200, mine.text
         assert [d["id"] for d in mine.json()["mine"]] == [raised["id"]], (
             "the cleaner who raised it was locked out of their own complaint"
+        )
+
+
+class TestTheFilerSaysWhichBooking:
+    """**Freezing the award stopped a dispute changing who it was about; it
+    did not make an inferred choice right in the first place.**
+
+    A turnover can carry several bookings, and only the person filing knows
+    which one went wrong. Picking the newest files an owner's complaint about
+    last month's no-show against the cleaner who took the re-posted job — who
+    has done nothing — and the console and the resolution email both name them.
+    """
+
+    def test_it_refuses_to_guess_between_two_bookings(
+        self, client: TestClient, make_cleaner, make_open_turnover
+    ) -> None:
+        job = _awarded_job(client, make_cleaner, make_open_turnover)
+        _re_award(client, job, make_cleaner)
+
+        resp = _raise(client, job["owner"], job["turnover"]["id"])
+        assert resp.status_code == 409, resp.text
+        assert "which booking" in resp.json()["detail"].lower()
+
+    def test_the_owner_can_name_the_booking_that_went_wrong(
+        self, client: TestClient, make_cleaner, make_open_turnover, admin_user,
+        db: Session,
+    ) -> None:
+        job = _awarded_job(client, make_cleaner, make_open_turnover)
+        first = job["cleaner"]
+        replacement = _re_award(client, job, make_cleaner)
+
+        # The screen offers both, newest first, and says what became of each.
+        state = client.get(
+            f"/api/turnovers/{job['turnover']['id']}/disputes",
+            headers=job["owner"]["auth"],
+        ).json()
+        assert len(state["bookings"]) == 2
+        older = state["bookings"][-1]
+        assert older["cleaner_name"] == first["user"]["full_name"]
+        assert older["cancelled_at"] is not None
+
+        raised = _raised(
+            client, job["owner"], job["turnover"]["id"], award_id=older["award_id"]
+        )
+
+        row = next(
+            d
+            for d in client.get("/api/admin/disputes", headers=admin_user["auth"]).json()
+            if d["id"] == raised["id"]
+        )
+        assert row["cleaner"]["email"] == first["user"]["email"]
+
+        client.post(
+            f"/api/admin/disputes/{raised['id']}/resolve",
+            json={"notes": "Spoke to both."},
+            headers=admin_user["auth"],
+        )
+        told = {n.destination for n in _events(db, NotificationEvent.DISPUTE_RESOLVED)}
+        assert first["user"]["email"] in told
+        assert replacement["user"]["email"] not in told
+
+    def test_a_booking_that_is_not_yours_is_refused(
+        self, client: TestClient, make_cleaner, make_open_turnover
+    ) -> None:
+        job = _awarded_job(client, make_cleaner, make_open_turnover)
+        first = job["cleaner"]
+        _re_award(client, job, make_cleaner)
+
+        # The owner can see both; the first cleaner may only name their own.
+        bookings = client.get(
+            f"/api/turnovers/{job['turnover']['id']}/disputes",
+            headers=job["owner"]["auth"],
+        ).json()["bookings"]
+        newest = bookings[0]
+
+        resp = _raise(
+            client, first, job["turnover"]["id"], award_id=newest["award_id"]
+        )
+        assert resp.status_code == 409, resp.text
+        assert "not one of yours" in resp.json()["detail"]
+
+    def test_a_cleaner_booked_twice_is_asked_which_time(
+        self, client: TestClient, make_cleaner, make_open_turnover
+    ) -> None:
+        """Backing out and later winning the re-posted job is two awards, both
+        theirs. Neither the server nor the screen can tell which one the
+        complaint is about."""
+        job = _awarded_job(client, make_cleaner, make_open_turnover)
+        cleaner = job["cleaner"]
+        turnover_id = job["turnover"]["id"]
+
+        cancelled = client.post(
+            f"/api/board/jobs/{turnover_id}/cancel",
+            json={"reason": "Van is off the road."},
+            headers=cleaner["auth"],
+        )
+        assert cancelled.status_code == 200, cancelled.text
+
+        bid = _bid(client, cleaner, turnover_id, cents=17_000)
+        accepted = client.post(
+            f"/api/turnovers/{turnover_id}/bids/{bid['id']}/accept",
+            headers=job["owner"]["auth"],
+        )
+        assert accepted.status_code == 200, accepted.text
+
+        state = client.get(
+            f"/api/turnovers/{turnover_id}/disputes", headers=cleaner["auth"]
+        ).json()
+        assert len(state["bookings"]) == 2, (
+            "both awards are this cleaner's own, and only they know which one "
+            "the complaint is about"
+        )
+
+        assert _raise(client, cleaner, turnover_id).status_code == 409
+        assert (
+            _raise(
+                client,
+                cleaner,
+                turnover_id,
+                award_id=state["bookings"][-1]["award_id"],
+            ).status_code
+            == 201
+        )
+
+
+class TestTwoAdminsAtOnce:
+    """Working a dispute is serialised on the row; raising one is not.
+
+    The asymmetry is deliberate and is the difference between a duplicate
+    somebody closes and a record that disagrees with what the parties were
+    told.
+    """
+
+    def test_acknowledging_cannot_reopen_a_settled_dispute(
+        self, client: TestClient, make_cleaner, make_open_turnover, admin_user,
+        db: Session,
+    ) -> None:
+        job = _awarded_job(client, make_cleaner, make_open_turnover)
+        raised = _raised(client, job["owner"], job["turnover"]["id"])
+
+        resolved = client.post(
+            f"/api/admin/disputes/{raised['id']}/resolve",
+            json={"notes": "Settled."},
+            headers=admin_user["auth"],
+        )
+        assert resolved.status_code == 200, resolved.text
+
+        # The second admin's click lands after the first one's write.
+        late = client.post(
+            f"/api/admin/disputes/{raised['id']}/acknowledge",
+            headers=admin_user["auth"],
+        )
+        assert late.status_code == 409, (
+            "acknowledging wrote `acknowledged` back over a resolved dispute, "
+            "leaving the resolution note on a row that said nobody had settled "
+            "it — after both parties had been told it was settled"
+        )
+
+        from app.models.dispute import Dispute
+
+        row = db.get(Dispute, uuid.UUID(raised["id"]))
+        db.refresh(row)
+        assert row.status.value == "resolved"
+        assert row.resolution_notes == "Settled."
+
+    def test_two_simultaneous_resolves_agree_with_what_was_sent(
+        self,
+        client: TestClient,
+        make_cleaner,
+        make_open_turnover,
+        admin_user,
+        db: Session,
+        own_session_per_request,
+    ) -> None:
+        """**The real race, not a sequential stand-in.**
+
+        The test below asserts the refusal exists; this one asserts the lock
+        makes it trustworthy. Two admins press Resolve at the same instant with
+        different notes. Unlocked, both read `open`, both write, the row keeps
+        the last note and the dedupe key had already queued the first — so the
+        record disagrees with the message. Locked, the second sees a resolved
+        dispute and is refused.
+        """
+        job = _awarded_job(client, make_cleaner, make_open_turnover)
+        raised = _raised(client, job["owner"], job["turnover"]["id"])
+        auth = admin_user["auth"]
+        dispute_id = raised["id"]
+
+        # Release the setup session's snapshot and any locks it holds.
+        db.commit()
+
+        start = threading.Barrier(2)
+        results: dict[str, int] = {}
+
+        def settle(name: str, note: str) -> None:
+            with TestClient(app) as racer:
+                start.wait(timeout=10)
+                resp = racer.post(
+                    f"/api/admin/disputes/{dispute_id}/resolve",
+                    json={"notes": note},
+                    headers=auth,
+                )
+                results[name] = resp.status_code
+
+        threads = [
+            threading.Thread(target=settle, args=("first", "Cleaner returns Thursday.")),
+            threading.Thread(target=settle, args=("second", "Full refund instead.")),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=30)
+            assert not thread.is_alive(), "a resolve never returned — deadlock?"
+
+        assert sorted(results.values()) == [200, 409], results
+
+        from app.models.dispute import Dispute
+
+        db.expire_all()
+        row = db.get(Dispute, uuid.UUID(dispute_id))
+        sent = [n.body for n in _events(db, NotificationEvent.DISPUTE_RESOLVED)]
+        assert len(sent) == 2, "both parties, once each"
+        assert row.resolution_notes is not None
+        for body in sent:
+            assert row.resolution_notes in body, (
+                "the note on the row is not the note the parties were sent"
+            )
+
+    def test_the_stored_note_is_the_note_that_was_sent(
+        self, client: TestClient, make_cleaner, make_open_turnover, admin_user,
+        db: Session,
+    ) -> None:
+        """The record a dispute is argued from later must say what the people
+        involved actually received."""
+        job = _awarded_job(client, make_cleaner, make_open_turnover)
+        raised = _raised(client, job["owner"], job["turnover"]["id"])
+
+        first = client.post(
+            f"/api/admin/disputes/{raised['id']}/resolve",
+            json={"notes": "Cleaner returning Thursday."},
+            headers=admin_user["auth"],
+        )
+        assert first.status_code == 200, first.text
+
+        second = client.post(
+            f"/api/admin/disputes/{raised['id']}/resolve",
+            json={"notes": "Full refund instead."},
+            headers=admin_user["auth"],
+        )
+        assert second.status_code == 409, (
+            "a second resolve overwrote the note on the row while the dedupe "
+            "key had already sent the first one"
+        )
+
+        from app.models.dispute import Dispute
+
+        row = db.get(Dispute, uuid.UUID(raised["id"]))
+        db.refresh(row)
+        sent = [n.body for n in _events(db, NotificationEvent.DISPUTE_RESOLVED)]
+        assert row.resolution_notes == "Cleaner returning Thursday."
+        assert all("Full refund instead" not in body for body in sent)
+        assert any("Cleaner returning Thursday" in body for body in sent)
+
+
+class TestTheUnclaimedAlarmCountsOffers:
+    def test_it_counts_only_bids_the_owner_could_accept(
+        self, client: TestClient, make_cleaner, make_open_turnover, admin_user
+    ) -> None:
+        """**A job re-posted after a cancellation still carries its old bids.**
+
+        Counting them made the console say "3 bids, none accepted" — an owner
+        dithering over offers — when there were no live offers at all and the
+        real problem was that nobody had bid. An operational alarm that
+        misdescribes the problem is worse than one that does not fire.
+        """
+        from datetime import datetime, timedelta, timezone as tz
+
+        job = _awarded_job(client, make_cleaner, make_open_turnover)
+        turnover_id = job["turnover"]["id"]
+
+        cancelled = client.post(
+            f"/api/board/jobs/{turnover_id}/cancel",
+            json={"reason": "Van is off the road."},
+            headers=job["cleaner"]["auth"],
+        )
+        assert cancelled.status_code == 200, cancelled.text
+
+        # Bring checkout inside the alarm's window so the row shows up.
+        from app.models.turnover import Turnover
+        from app.db import SessionLocal
+
+        with SessionLocal() as session:
+            row = session.get(Turnover, uuid.UUID(turnover_id))
+            row.checkout_at = datetime.now(tz.utc) + timedelta(hours=2)
+            session.commit()
+
+        rows = client.get("/api/admin/unclaimed", headers=admin_user["auth"]).json()
+        mine = next(r for r in rows if r["turnover_id"] == turnover_id)
+        assert mine["bid_count"] == 0, (
+            "the accepted-then-cancelled bid was counted as an offer the owner "
+            "could still choose"
         )

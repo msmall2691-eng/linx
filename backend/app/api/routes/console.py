@@ -35,6 +35,7 @@ from app.models.bid import Bid
 from app.models.cleaner_profile import CleanerProfile
 from app.models.dispute import Dispute
 from app.models.enums import (
+    BidStatus,
     UserRole,
     VerificationStatus,
 )
@@ -280,10 +281,20 @@ def unclaimed(
         return []
 
     turnover_ids = [turnover.id for turnover, _ in rows]
+    # **Only bids the owner could actually accept right now.** Counting every
+    # historical row made the alarm lie in the direction that matters: a job
+    # re-posted after a cancellation still carries the accepted bid and every
+    # declined one, so the console read "3 bids, none accepted" — an owner
+    # dithering over offers — when there were no live offers at all and the
+    # real problem was that nobody had bid. An operational alarm that
+    # misdescribes the problem is worse than one that does not fire.
     counts = dict(
         db.execute(
             select(Bid.turnover_id, func.count(Bid.id))
-            .where(Bid.turnover_id.in_(turnover_ids))
+            .where(
+                Bid.turnover_id.in_(turnover_ids),
+                Bid.status == BidStatus.SUBMITTED,
+            )
             .group_by(Bid.turnover_id)
         ).all()
     )

@@ -26,6 +26,13 @@ class DisputeIn(BaseModel):
     """Filing one. A category for triage, and the description that matters."""
 
     reason: DisputeReason
+    #: **Which booking the complaint is about.** Optional only because most
+    #: turnovers have exactly one, and asking a question with one possible
+    #: answer is noise. When there are several the server refuses rather than
+    #: picking: a turnover that was cancelled and re-awarded has two cleaners
+    #: in its history, and inferring the newest files the complaint against
+    #: whoever holds the job today.
+    award_id: uuid.UUID | None = None
     #: Required, and required to be non-empty after stripping: an empty dispute
     #: cannot be acted on, and a person who submits one has told nobody
     #: anything while believing they have.
@@ -95,6 +102,24 @@ class AdminDisputeOut(DisputeOut):
     award_was_no_show: bool
 
 
+class DisputableBookingOut(BaseModel):
+    """One booking this person could file a complaint about.
+
+    Carries only what is needed to tell two bookings apart — who was on it and
+    what became of it. The cleaner's name is not a widening of the privacy
+    boundary: for an owner these are the cleaners they themselves accepted, and
+    for a cleaner every entry is their own award.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    award_id: uuid.UUID
+    cleaner_name: str
+    awarded_at: datetime
+    cancelled_at: datetime | None
+    was_no_show: bool
+
+
 class DisputesOut(BaseModel):
     """Everything one person may see about a turnover's disputes.
 
@@ -114,3 +139,7 @@ class DisputesOut(BaseModel):
     #: Why not, in words, or null when they can. Rendered verbatim.
     blocker: str | None
     mine: list[DisputeOut]
+    #: The bookings this person may complain about, newest first. Usually one.
+    #: When it is more than one the screen has to ask which, because the server
+    #: refuses to guess — see `disputes.award_under_dispute`.
+    bookings: list[DisputableBookingOut] = []
