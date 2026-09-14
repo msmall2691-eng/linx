@@ -30,10 +30,17 @@ cleaned.
    pass, that is the seam talking. Rewriting it may well be right — phase 4 did
    exactly that to the phase-2 test that refused to cancel an awarded turnover —
    but it is a decision to justify in the PR, never a formality.
-4. **Write down what you found in the change description**, even when the answer
+4. **Ask where the same rule lives under another name.** Grep finds the column;
+   it does not find the sibling that encodes the same invariant by convention.
+   Phase 4 loosened one-award-per-turnover into one-*live*-award-per-turnover,
+   which leaves `payments_in.turnover_id` and `payouts.turnover_id` still unique
+   per turnover — right today, and a decision phase 6 now has to make
+   deliberately. That finding does not come out of a grep. It comes out of
+   asking what else was relying on the *shape* of the rule rather than its name.
+5. **Write down what you found in the change description**, even when the answer
    is "nothing depends on this." The empty answer is the valuable one: it is the
    difference between "I checked and nothing depends on it" and "I didn't look."
-5. **Decide explicitly what replaces it.** If something was relying on the
+6. **Decide explicitly what replaces it.** If something was relying on the
    removed step — a safety check, a notification, a visibility rule, a gate — it
    does not just silently disappear. Either the replacement is in the same
    change, or the PR says plainly why nothing is needed.

@@ -13,8 +13,13 @@ whether the change accounts for it.
 
 ## First: is this a removal diff?
 
-Run `git diff` (or the PR diff) and decide. It counts as a removal if anything
-is deleted, disabled, bypassed, or loosened — not just `git rm`:
+Run `git diff` (or the PR diff) and decide. If the diff you were handed spans
+two branch tips and the change description comes from a single commit, check
+they cover the same work before trusting the description; when they diverge, say
+so and audit the diff, since the diff is what merges.
+
+It counts as a removal if anything is deleted, disabled, bypassed, or loosened —
+not just `git rm`:
 
 - a function, field, status value, enum member, constant, endpoint, or test
   deleted or renamed
@@ -46,10 +51,17 @@ For each removed thing, in this order:
    a serializer.
 3. **Find tests that assert it happened** — a 409, an alert, a refusal, a
    redirect, a rendered string. List them by name.
-4. **Check the frontend separately.** A removed API field, status value or
+4. **Look for the same invariant living somewhere else under a different name.**
+   Grep finds the column; it does not find the sibling that encodes the same
+   rule by convention. If a uniqueness rule on `awards.turnover_id` is being
+   loosened, ask what else keys on one-per-turnover — `payments_in.turnover_id`,
+   `payouts.turnover_id` — and whether the loosening makes any of them wrong
+   later. This step takes judgement rather than a pattern, and it is where the
+   expensive findings are.
+5. **Check the frontend separately.** A removed API field, status value or
    `data-testid` fails in the browser, not in pytest. Grep `frontend/src` for
    the literal.
-5. **Check the docs.** `CLAUDE.md` states rules as facts; a removal that makes a
+6. **Check the docs.** `CLAUDE.md` states rules as facts; a removal that makes a
    line in it false must update that line.
 
 ## Then: judge
@@ -79,6 +91,11 @@ Then check the change description (commit message or PR body) against your list:
 Lead with the verdict: safe, or blocking with the reasons. Then a table of what
 was removed, what depends on it, and the judgement for each — file and line for
 every dependent, because a finding without a location cannot be checked.
+
+Include the near misses too, in a line each: the check that still refuses what
+it always refused, the test that looks adjacent but exercises a different path.
+A reader who wondered about those learns they were looked at, and a later reader
+learns where the edges of this change were.
 
 If the change description already covers everything you found, say so explicitly
 and name what you verified. That sentence is the record that the seam was
