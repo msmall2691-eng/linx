@@ -469,7 +469,12 @@ def report_no_show(
     """
     turnover = _lock_owned_turnover(turnover_id, db, owner)
 
-    if turnover.status is not TurnoverStatus.AWARDED:
+    # Both live-booking statuses. Keying on AWARDED alone would mean a cleaner
+    # who taps "I'm on site" from the driveway and drives away has made the
+    # no-show unrecordable — and `was_no_show` is the history a dispute is
+    # argued from. A completed job is a different conversation: that is a
+    # dispute and a refund, not a no-show.
+    if turnover.status not in awards.LIVE_BOOKING_STATUSES:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=(

@@ -284,7 +284,11 @@ def cancel_my_job(
     if award is None or award.cleaner_id != user.id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
 
-    if turnover.status is not TurnoverStatus.AWARDED:
+    # Both live-booking statuses, not just AWARDED. A cleaner who tapped "I'm
+    # on site" and then hit a problem must still be able to say so — "always
+    # allowed" above is the whole policy, and a cleaner who cannot back out says
+    # nothing instead, which is how the owner finds out by arriving.
+    if turnover.status not in awards.LIVE_BOOKING_STATUSES:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=(

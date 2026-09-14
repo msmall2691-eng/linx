@@ -308,6 +308,15 @@ relying on it.
   - **Any** cancellation of a live award — the cleaner backs out, or never turns
     up — re-posts the job to the bench and alerts the owner, the cleaner and an
     admin immediately. Never conditional, never silent.
+  - **"Live" means `awarded` *or* `in_progress`**, named once in
+    `awards.LIVE_BOOKING_STATUSES`. Phase 6 made `in_progress` reachable, and
+    keying these paths on `awarded` alone would have meant a cleaner who tapped
+    "I'm on site" could no longer back out, and — worse — could make a no-show
+    unrecordable by tapping it from the driveway and leaving. Both refusals
+    would have been a 409 reading "there is nobody booked", which is false, on
+    the one path this policy says is never conditional. A `completed` job is
+    deliberately outside that list: backing out of finished work is a dispute
+    and a refund, not a cancellation.
   - A cancellation inside **48 hours** of checkout (`LATE_CANCELLATION_WITHIN`)
     is *late*, and the alert says so. It does not change what happens; it is the
     number the policy is written against, kept in one place so the policy and

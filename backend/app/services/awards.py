@@ -58,6 +58,24 @@ from app.services.turnovers import apply_derived_fields
 #: written against. One place, so the policy and the alert cannot disagree.
 LATE_CANCELLATION_WITHIN = timedelta(hours=48)
 
+#: The statuses in which somebody is still on the hook for a cleaning.
+#:
+#: **Phase 6 made this a list rather than a single value**, and getting it wrong
+#: is not a style problem. Before completion existed, "a live booking" and
+#: "status is AWARDED" were the same sentence, so every guard on the
+#: cancellation path spelled the second one. The moment a cleaner could tap
+#: "I'm on site", that stopped being true — and keying on AWARDED alone would
+#: have meant a cleaner who tapped start could no longer back out, and an owner
+#: whose cleaner tapped start and then never showed up could no longer report
+#: the no-show. Both refusals would have been silent: a 409 saying "there is
+#: nobody booked", which is false, on the exact path CLAUDE.md describes as
+#: never conditional.
+#:
+#: `COMPLETED` is deliberately **not** here. Once the work is done, backing out
+#: is not a cancellation — it is a dispute, and it is answered with a refund by
+#: a human.
+LIVE_BOOKING_STATUSES = (TurnoverStatus.AWARDED, TurnoverStatus.IN_PROGRESS)
+
 
 class AwardConflict(Exception):
     """The action cannot be taken in the turnover's current state."""

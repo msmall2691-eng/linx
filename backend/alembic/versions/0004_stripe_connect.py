@@ -144,6 +144,22 @@ def downgrade() -> None:
     # Postgres has no DROP VALUE. Rebuilding the type is the only honest way
     # back, and doing it means a downgrade followed by an upgrade works twice
     # rather than failing the second time on a value that never went away.
+    #
+    # It is **not** row-safe, and it says so rather than discovering it as an
+    # opaque cast error: a `job_completed` notification has no representation
+    # in the twelve-value type. Those rows are the record that somebody was
+    # told, so this refuses and names them instead of deleting them quietly.
+    # Whoever is downgrading decides what happens to that history.
+    stranded = op.get_bind().execute(
+        sa.text("SELECT count(*) FROM notifications WHERE event = 'job_completed'")
+    ).scalar_one()
+    if stranded:
+        raise RuntimeError(
+            f"{stranded} job_completed notification(s) cannot be represented in the "
+            "pre-phase-6 enum. Decide what happens to them — archive or delete the "
+            "rows — before downgrading; this migration will not discard them for you."
+        )
+
     op.execute("ALTER TYPE notification_event RENAME TO notification_event_old")
     values = ", ".join(f"'{value}'" for value in NOTIFICATION_EVENTS_BEFORE)
     op.execute(f"CREATE TYPE notification_event AS ENUM ({values})")

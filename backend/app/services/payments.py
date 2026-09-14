@@ -291,10 +291,18 @@ def start_checkout(
             "outcome and is waiting on a human. It will not be retried "
             "automatically."
         )
-
-    split = split_for(award.agreed_price_cents)
+    if payment and payment.status is PaymentStatus.REFUNDED:
+        # The derived key is the same string as the original charge, so paying
+        # again here would replay the refunded session rather than raise a new
+        # charge — money would appear to move and would not. Refunding and then
+        # re-charging is a decision for the person who issued the refund.
+        raise PaymentRefused(
+            "This turnover was refunded. Charging it again is a manual "
+            "decision, not a retry."
+        )
 
     if payment is None:
+        split = split_for(award.agreed_price_cents)
         payment = PaymentIn(
             turnover_id=turnover.id,
             amount_cents=split.total_cents,
@@ -305,6 +313,13 @@ def start_checkout(
             idempotency_key=f"charge:award:{award.id}",
         )
         db.add(payment)
+
+    # What goes on the wire is what the row says, always — never recomputed
+    # from today's fee rate. A retry has to send a byte-identical body to the
+    # attempt it is retrying, and a rate change between the two would otherwise
+    # put a different number in the request than in the record of it.
+    amount_cents = payment.amount_cents
+    platform_fee_cents = payment.platform_fee_cents
 
     # Guardrail 2, the other half: the attempt is on the row and committed
     # before the network call. A crash between here and the response leaves a
@@ -331,7 +346,7 @@ def start_checkout(
                         "quantity": 1,
                         "price_data": {
                             "currency": "usd",
-                            "unit_amount": split.total_cents,
+                            "unit_amount": amount_cents,
                             "product_data": {
                                 "name": f"Turnover cleaning — {prop.nickname}",
                                 "description": (
@@ -346,7 +361,7 @@ def start_checkout(
                     # The destination charge. Stripe moves
                     # `total - application_fee` to the cleaner as part of this
                     # one transaction; there is no second call to forget.
-                    "application_fee_amount": split.platform_fee_cents,
+                    "application_fee_amount": platform_fee_cents,
                     "transfer_data": {"destination": cleaner_profile.stripe_account_id},
                     "metadata": {
                         "turnover_id": str(turnover.id),
@@ -462,6 +477,13 @@ def settle(
         payout.status = PaymentStatus.SUCCEEDED
         payout.stripe_transfer_id = transfer_id or payout.stripe_transfer_id
 
+    # The id is assigned in Python, so it is None until the row is flushed —
+    # and `announce_settlement` builds the payout notice's dedupe key from it.
+    # An unflushed id yields the key `payout_notice:None:<cleaner>`, which is
+    # unique per cleaner: they would be told about their first payout and then
+    # silently never again, forever. Incidental flushes cover this today; a
+    # flush here means it does not depend on the order somebody queries in.
+    db.flush()
     return payout
 
 
@@ -512,7 +534,15 @@ def refund_payment(db: Session, *, payment: PaymentIn, reason: str) -> PaymentIn
             "a human."
         )
 
+    # Guardrail 2, on the refund exactly as on the charge: the attempt is
+    # written *and the row moved out of a settled state* before the network
+    # call. Timestamping alone was not enough — a process killed here would
+    # have left a row reading "paid, never refunded" while Stripe had already
+    # refunded and reversed the transfer, and `reconcile()` would have read
+    # that row and reported the books balanced. The one instrument that would
+    # catch it would have said everything was fine.
     payment.attempted_at = datetime.now(timezone.utc)
+    payment.status = PaymentStatus.PROCESSING
     db.commit()
 
     try:

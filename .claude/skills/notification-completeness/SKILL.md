@@ -69,6 +69,17 @@ The mechanics underneath, each load-bearing:
   that starts a checkout. A receipt for a payment that then failed is worse than
   no receipt, because it is believed.
 
+**The phase-4 rule this replaced is still the rule.** `app/services/alerts.py`
+is gone, but what it guaranteed is not: on *every* cancellation of a live award
+— the cleaner backs out, the owner calls it off, the cleaner never turns up —
+the owner, the cleaner and an admin are all told, and it is **never conditional
+on the cancellation being late**. `tests/test_cancellation.py` asserts it on
+notification rows. Phase 6 nearly broke it sideways by making `in_progress`
+reachable, which is why `awards.LIVE_BOOKING_STATUSES` exists and why
+`tests/test_payments.py::TestStartingWorkDoesNotSwitchOffThePolicy` guards it:
+a state transition can switch off a notification without anybody touching the
+notification.
+
 ## The rules these were built to, still binding
 
 - **One place decides recipients.** Call sites say what happened; the service

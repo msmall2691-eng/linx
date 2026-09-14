@@ -11,6 +11,12 @@ import { formatCents, formatDateTime, formatTurnaround } from '../lib/datetime.j
 import { showsUrgency } from '../lib/turnover.js'
 
 const CANCELLABLE = ['draft', 'open', 'awarded']
+// Mirrors awards.LIVE_BOOKING_STATUSES on the server. A no-show is only a
+// thing while somebody is still on the hook: once the job is marked done it is
+// a dispute and a refund, not a no-show, and rendering the button anyway means
+// a button that 409s — the dead-screen class this suite exists to catch,
+// inverted.
+const LIVE_BOOKING = ['awarded', 'in_progress']
 
 /**
  * The bids on this job, cheapest first.
@@ -346,16 +352,19 @@ export default function TurnoverDetail() {
                 </p>
               </div>
             ) : (
-              <button
-                type="button"
-                onClick={() => {
-                  setCancelReason('')
-                  setConfirmingNoShow(true)
-                }}
-                className="btn-secondary text-red-700"
-              >
-                They did not turn up
-              </button>
+              LIVE_BOOKING.includes(turnover.status) && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCancelReason('')
+                    setConfirmingNoShow(true)
+                  }}
+                  className="btn-secondary text-red-700"
+                  data-testid="report-no-show"
+                >
+                  They did not turn up
+                </button>
+              )
             )}
           </div>
         </div>

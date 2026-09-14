@@ -195,9 +195,18 @@ def pay_for_turnover(
 ) -> dict[str, str]:
     """Raise the charge and hand back Stripe's hosted payment page.
 
-    The turnover row is locked before anything is read about it, so two tabs
-    cannot both decide nothing has been charged yet. The unique index on
-    `payments_in.turnover_id` is the backstop behind that, not the mechanism.
+    The turnover row is locked before anything is read about it, the same order
+    as every other action on this row. **The lock is not what prevents a double
+    charge here**, and it is worth saying so plainly, because believing it does
+    is how somebody later decides the idempotency key is redundant:
+
+    guardrail 2 requires the attempt to be committed before the network call,
+    and that commit releases the lock — so a second tab can and does reach
+    Stripe. What makes that harmless is that both requests read the same stored
+    key off the same row and send it, so Stripe collapses them into one session.
+    The derived key is the mechanism; the unique index on
+    `payments_in.turnover_id` is the backstop; the lock keeps the row's own
+    reads and writes consistent.
 
     Card details go to Stripe's page, never to this server.
     """

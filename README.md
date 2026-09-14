@@ -52,7 +52,7 @@ What works today:
 - The full v1 database schema — eleven tables — built by Alembic migrations.
   Tables belonging to later phases exist and are empty on purpose.
 - A single-container deploy: the backend serves the built frontend.
-- 323 tests against real PostgreSQL, plus 8 browser click-throughs — including bid → award → job done → paid, against a Stripe that answers over real HTTP.
+- 329 tests against real PostgreSQL, plus 8 browser click-throughs — including bid → award → job done → paid, against a Stripe that answers over real HTTP.
 
 Reviews are **not** built yet, and neither is the admin console. Each is its own
 phase, reviewed before the next begins — see the phase table in

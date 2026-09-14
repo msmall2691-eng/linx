@@ -298,6 +298,144 @@ class TestMarkingTheJobDone:
         assert resp.status_code == 404
 
 
+class TestStartingWorkDoesNotSwitchOffThePolicy:
+    """The seam phase 6 opened, and the tests that keep it shut.
+
+    Before this phase `IN_PROGRESS` was unreachable, so "a live booking" and
+    "status is AWARDED" were the same sentence and every guard on the
+    cancellation path spelled the second one. The moment a cleaner could tap
+    "I'm on site", that stopped being true — and every one of these paths would
+    have failed *silently*, with a 409 saying "there is nobody booked".
+
+    Which is a lie, and worse, it is the lie on the path CLAUDE.md describes as
+    never conditional and never silent.
+    """
+
+    def _started_job(self, client, make_cleaner, make_open_turnover, db) -> dict:
+        job = make_open_turnover()
+        cleaner = make_cleaner(cleared=True)
+        bid = _bid(client, cleaner, job["turnover"]["id"])
+        client.post(
+            f"/api/turnovers/{job['turnover']['id']}/bids/{bid['id']}/accept",
+            headers=job["owner"]["auth"],
+        )
+        started = client.post(
+            f"/api/board/jobs/{job['turnover']['id']}/start", headers=cleaner["auth"]
+        )
+        assert started.status_code == 200, started.text
+        job["cleaner"] = cleaner
+        return job
+
+    def test_a_cleaner_who_started_can_still_back_out(
+        self, client: TestClient, make_cleaner, make_open_turnover, db: Session
+    ) -> None:
+        """"Always allowed" is the whole policy, not a default.
+
+        A cleaner who cannot say "I can't make it" says nothing instead, and the
+        owner finds out by arriving at a dirty house.
+        """
+        job = self._started_job(client, make_cleaner, make_open_turnover, db)
+        resp = client.post(
+            f"/api/board/jobs/{job['turnover']['id']}/cancel",
+            json={"reason": "Water main burst, I have to go."},
+            headers=job["cleaner"]["auth"],
+        )
+        assert resp.status_code == 200, resp.text
+
+        turnover = db.get(Turnover, uuid.UUID(job["turnover"]["id"]))
+        db.refresh(turnover)
+        assert turnover.status is TurnoverStatus.OPEN, "the job never went back on the bench"
+
+    def test_tapping_start_does_not_make_a_no_show_unrecordable(
+        self, client: TestClient, make_cleaner, make_open_turnover, admin_user, db: Session
+    ) -> None:
+        """The failure this guards against is somebody gaming it.
+
+        Tap "I'm on site" from the driveway, drive away, and — if the no-show
+        path keyed on AWARDED alone — the owner could no longer record it.
+        `was_no_show` is the history a dispute is argued from.
+        """
+        job = self._started_job(client, make_cleaner, make_open_turnover, db)
+        resp = client.post(
+            f"/api/turnovers/{job['turnover']['id']}/no-show",
+            json={"reason": "Marked themselves on site. Nobody came."},
+            headers=job["owner"]["auth"],
+        )
+        assert resp.status_code == 200, resp.text
+
+        award = db.execute(
+            select(Award).where(Award.turnover_id == uuid.UUID(job["turnover"]["id"]))
+        ).scalar_one()
+        db.refresh(award)
+        assert award.was_no_show is True
+
+        told = {
+            row.destination
+            for row in db.execute(
+                select(notifications.Notification).where(
+                    notifications.Notification.event == NotificationEvent.CLEANER_NO_SHOW
+                )
+            ).scalars()
+        }
+        assert job["owner"]["user"]["email"] in told
+        assert job["cleaner"]["user"]["email"] in told
+        assert admin_user["user"].email in told
+
+    def test_the_day_of_reminder_survives_an_early_start(
+        self, client: TestClient, make_cleaner, make_open_turnover, db: Session
+    ) -> None:
+        """Nothing gates `start`, so it can be tapped days early.
+
+        A reminder that stops firing is the quietest possible regression: no
+        error, no failing request, just two people who are never reminded.
+        """
+        from datetime import timedelta
+
+        from app.tasks import scheduled
+
+        job = self._started_job(client, make_cleaner, make_open_turnover, db)
+        turnover = db.get(Turnover, uuid.UUID(job["turnover"]["id"]))
+        db.refresh(turnover)
+        when = turnover.checkout_at - timedelta(hours=1)
+
+        queued = scheduled.send_reminders(db, now=when)
+        assert queued == 2, "both sides should still be reminded"
+
+        told = {
+            row.destination
+            for row in db.execute(
+                select(notifications.Notification).where(
+                    notifications.Notification.event == NotificationEvent.TURNOVER_REMINDER
+                )
+            ).scalars()
+        }
+        assert job["owner"]["user"]["email"] in told
+        assert job["cleaner"]["user"]["email"] in told
+
+    def test_a_finished_job_is_a_dispute_not_a_no_show(
+        self, client: TestClient, make_cleaner, make_open_turnover, db: Session
+    ) -> None:
+        """`COMPLETED` is deliberately outside the live-booking statuses.
+
+        Once the work is done, "they did not turn up" is not the conversation —
+        a refund is, and it goes through a human.
+        """
+        job = _completed_job(client, make_cleaner, make_open_turnover, db)
+        resp = client.post(
+            f"/api/turnovers/{job['turnover']['id']}/no-show",
+            json={"reason": "Changed my mind about the clean."},
+            headers=job["owner"]["auth"],
+        )
+        assert resp.status_code == 409
+
+        cancel = client.post(
+            f"/api/board/jobs/{job['turnover']['id']}/cancel",
+            json={"reason": "Actually I want out."},
+            headers=job["cleaner"]["auth"],
+        )
+        assert cancel.status_code == 409
+
+
 # --------------------------------------------------------------------------
 # Guardrail 2 — the carry-over idempotency row
 # --------------------------------------------------------------------------
@@ -908,6 +1046,58 @@ class TestRefunds:
         )
         assert second.status_code == 409
         assert len(stripe.paths("/refunds")) == 1
+
+    def test_the_refund_attempt_is_flagged_before_the_call(
+        self, client, make_cleaner, make_open_turnover, admin_user, db, stripe, webhook_secret
+    ) -> None:
+        """Guardrail 2 on the refund, not only on the charge.
+
+        A timestamp alone was not enough here. A process killed mid-refund
+        would leave a row reading "paid, never refunded" while Stripe had
+        already refunded and reversed the transfer — and `reconcile()` reads
+        that row and reports the books balanced. The one instrument that would
+        catch it would have said everything was fine.
+        """
+        job = self._paid_job(client, make_cleaner, make_open_turnover, db, stripe)
+        stripe.failures["/refunds"] = stripe_client.StripeError("connection reset")
+
+        resp = client.post(
+            f"/api/turnovers/{job['turnover']['id']}/refund",
+            json={"reason": "Disputed."},
+            headers=admin_user["auth"],
+        )
+        assert resp.status_code == 409
+
+        payment = _payment(db, job["turnover"]["id"])
+        assert payment.status is PaymentStatus.REQUIRES_REVIEW
+        assert payment.status is not PaymentStatus.SUCCEEDED, (
+            "a refund with an unknown outcome still reads as a settled payment"
+        )
+
+    def test_a_refunded_turnover_is_not_quietly_re_chargeable(
+        self, client, make_cleaner, make_open_turnover, admin_user, db, stripe, webhook_secret
+    ) -> None:
+        """The derived key cuts both ways, and this is the edge of it.
+
+        Paying again after a refund would send the *same* key as the original
+        charge, so Stripe replays the refunded session rather than raising a
+        new one: money appears to move and does not. Re-charging after a refund
+        is a decision, not a retry.
+        """
+        job = self._paid_job(client, make_cleaner, make_open_turnover, db, stripe)
+        client.post(
+            f"/api/turnovers/{job['turnover']['id']}/refund",
+            json={"reason": "Disputed."},
+            headers=admin_user["auth"],
+        )
+
+        before = len(stripe.paths("/checkout/sessions"))
+        again = client.post(
+            f"/api/turnovers/{job['turnover']['id']}/pay", headers=job["owner"]["auth"]
+        )
+        assert again.status_code == 409
+        assert "manual decision" in again.json()["detail"]
+        assert len(stripe.paths("/checkout/sessions")) == before
 
     def test_an_owner_cannot_refund_themselves(
         self, client, make_cleaner, make_open_turnover, db, stripe, webhook_secret
