@@ -45,6 +45,13 @@ EXPECTED_TABLES = {
     # Phase 5. The one table phase 1 did not declare, because a notification is
     # a record of something happening rather than part of the domain shape.
     "notifications",
+    # A booking feed an owner connects. Phase 1 could not have declared it: the
+    # domain shape it belongs to is somebody *else's* system, and this table is
+    # only the pointer at it plus what happened last time we read it. Adding it
+    # failed this assertion first, which is what the assertion is for — a new
+    # table should be a decision somebody makes out loud rather than a file that
+    # appears.
+    "property_calendars",
 }
 
 

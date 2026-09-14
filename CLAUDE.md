@@ -173,6 +173,7 @@ not tenant. There is deliberately no `org_id`-style scoping.
 | `bids` | A cleaner names a price on a turnover |
 | `awards` | One **live** row per turnover — guardrail 1 governs this; a cancelled one is kept as history |
 | `documents` | Cleaner vetting uploads (id / insurance / reference), admin-reviewed |
+| `property_calendars` | A booking feed an owner connected, and how its last read went |
 | `reviews` | Mutual, delayed reveal |
 | `payments_in` | Collects from the owner |
 | `payouts` | Pays the cleaner |
@@ -277,6 +278,222 @@ cleaner has for pricing, so it is asked for and shown on the board.
 
 The privacy boundary below does not soften for a home — it matters more.
 Somebody lives there.
+
+### Booking calendars — a projection, not a source of truth
+
+An owner connects the .ics their Airbnb or VRBO listing already publishes, and
+each checkout in it becomes a **draft** turnover they confirm.
+`app/services/calendars.py` owns all of it, and every rule there follows from
+one sentence: **linx owns the turnover; the listing site owns the booking.**
+
+1. **A booking becomes a draft, never a live job.** An owner who wanted ten jobs
+   posted can do that in a minute; an owner who did not cannot unsend the
+   alerts, the bids, or the apology.
+2. **A row a person has touched is theirs.** Sync updates a *draft* it wrote and
+   nothing else; `calendars._belongs_to_the_feed` is both halves of that in one
+   place, so the status test and the person test cannot drift apart.
+
+   The person test is **`turnovers.owner_edited_at`, an explicit marker written
+   where people edit** — not a comparison against `updated_at`. That comparison
+   was the first design and it was wrong for a reason worth keeping written
+   down: `updated_at` moves for *any* write, and the read paths write.
+   `refresh_urgency` persists a standing vacancy's climb up the urgency ladder,
+   which is exactly what a synced draft with no next guest is — so merely
+   opening the turnover list stamped the draft as edited, and from then on the
+   feed could neither correct its dates nor withdraw it when the guest
+   cancelled. Rule 2 switched off by a page view, with nothing failing to say so.
+3. **Vanishing from the feed is not permission to delete.** An untouched draft
+   goes, because nothing was staffed for it. A posted or awarded job stays and
+   is *reported* — a guest cancelling does not get to cancel a cleaner.
+4. **Identity is the event's UID *and* its RECURRENCE-ID, not its dates** —
+   unique on `(source_calendar_id, external_ref)`. **It survives the calendar
+   being removed**: deleting a feed is `ON DELETE SET NULL` because a job
+   outlives the calendar that proposed it, and re-adding the same feed is the
+   *documented* way to change its URL — so `reconcile` adopts an orphan on the
+   same property carrying the same event id **and the same
+   `turnovers.source_feed_key`** rather than proposing the booking a second
+   time. Without adoption, remove-and-re-add turned one stay into two jobs;
+   without the feed key, adoption reached too far — UIDs are arbitrary
+   feed-local strings, so two listings on one property whose feeds reuse one
+   would hand each other's jobs over. The key is a digest rather than the URL
+   because the URL is a credential. A booking whose dates move is
+   one booking; without that it becomes a second job while the first sits
+   orphaned. The RECURRENCE-ID half is iCalendar's own rule rather than a
+   workaround: an overridden occurrence legitimately repeats its parent's UID,
+   and reading the UID alone made two events one identity — so both rows were
+   inserted and the *commit* failed, surfacing as a 500 with no reason recorded.
+   It is formatted from the value, never `str()` of the library's object, since
+   identity that moves between library versions orphans everything keyed to the
+   old spelling. Past that pair, a repeat is a feed we cannot interpret: the
+   first is kept and the rest logged, because inserting both is a crash. An
+   identity too long for `external_ref` is **hashed, never truncated** — two long
+   UIDs sharing a prefix would truncate to the same identity, which is the one
+   thing identity may never do.
+5. **An unreadable feed changes nothing.** "The feed is empty" legitimately
+   deletes drafts, so "the feed did not load" must never look the same. A
+   failure is recorded on the calendar row and every turnover is left alone.
+
+Two things the feed cannot tell us, and where they come from instead:
+
+- **The time.** Exports are all-day — a guest leaves "on the 7th" with no hour —
+  and the urgency ladder is measured in hours. `properties.default_checkout_time`
+  and `default_checkin_time` are the house's own policy, which the owner knows
+  and the calendar does not.
+- **Which arrival is *this* clean's checkin.** Only one close enough behind the
+  departure to be the job — `NEXT_STAY_WITHIN`, which *is* `SOON_WITHIN` rather
+  than a number of its own so the rule and the ladder it feeds cannot drift.
+  A stay three weeks later would otherwise make a checkout twelve hours away
+  read `standard`, because the measure becomes the length of a three-week window
+  instead of how soon the job is.
+- **Which departures are still jobs.** Exports keep their history and the
+  horizon only bounded the future, so there is a floor as well
+  (`PAST_TOLERANCE`): without one, connecting a calendar proposes an overdue,
+  `urgent` draft for every stay the listing ever had.
+- **Whether an event is a stay.** Airbnb sends the owner's blocked dates through
+  the same feed. `calendars.BLOCK_MARKERS` is a substring heuristic and is
+  labelled as one; it is allowed to be a heuristic because its failure mode is a
+  draft the owner deletes.
+
+**A feed URL is secret the way a link is secret** — anybody holding it can read
+the booking dates for somebody's house. It is owner-only, on no cleaner-facing
+or admin shape, and there is a test that it appears nowhere in a board response.
+
+**A log file is not an exception to that.** httpx logs the full request URL at
+INFO and listing sites put the token in the path or query, so every unattended
+sync wrote every owner's credential into the application log until
+`calendars.py` turned that logger down. It is a module-level global on purpose:
+the leak happens in two processes (the web app for the Sync button, the
+scheduled task) and this module is imported by both, so configuring it at each
+entry point would be two places to keep in step.
+The URL is also not editable in place: changing it would keep the calendar's id
+while pointing it at different bookings, so every turnover keyed to it would
+claim a source it never came from.
+
+**It is also a place this server connects to**, which makes the field a request
+forgery primitive unless it is guarded. Two rules, both in `calendars.py`:
+
+- **Every hop is checked, not just the URL the owner typed.** The guard lives in
+  the HTTP transport (`_PublicOnlyTransport`), because a perfectly public host
+  answering `302` to `http://169.254.169.254/` is the whole attack rather than
+  an edge case. Anything that does not resolve to a global address is refused —
+  and the residual DNS-rebind window is named in the code rather than papered
+  over.
+- **`MAX_FEED_BYTES` is enforced while the body streams**, never on
+  `len(response.content)` — reading the whole thing before measuring it is not a
+  limit at all, and this path runs unattended for every owner on every pass.
+- **`MAX_FEED_SECONDS` is a second, separate limit**, because the byte cap does
+  not bound time and `FETCH_TIMEOUT_SECONDS` is per-receive inactivity rather
+  than a total deadline: a host dribbling one small chunk every nineteen seconds
+  trips neither. That matters here more than elsewhere, since the scheduled pass
+  reads feeds **serially and first** — one slow feed would stop the reminders,
+  the unclaimed alarm, the outbox and the review reveal for everybody.
+- **The stored URL is the one that will be fetched.** `CalendarCreate`
+  canonicalises the request identity — fragment dropped, scheme and host
+  lowercased, an explicit default port removed, an empty path written as `/` —
+  because
+  `uq_property_calendars_property_url` compares *strings* while the network
+  compares *requests*, and one feed spelled three ways is three calendars and
+  three drafts per booking. The path and query are left exactly as typed: those
+  are case-sensitive, and listing sites put a token in one of them.
+- **A `STATUS:CANCELLED` event is not a stay.** Providers may keep a cancelled
+  reservation in the feed rather than dropping it; read as live it becomes a
+  draft for a stay that is not happening, and on later syncs it still looks
+  live, so the job is never even reported as vanished.
+
+**A booking that vanishes from a job somebody is already on is reported, and the
+report is stored.** `property_calendars.last_stale_kept` holds it, because the
+pass that normally finds it is the scheduled one, which has no screen to answer
+— a number returned only to a button nobody pressed is a warning the product
+promised and then dropped. Whether it should also *notify* is a genuine open
+question rather than an oversight: `NotificationEvent` is a closed list, and
+opening it is meant to be a decision somebody makes out loud.
+
+**`sync()` is an explicit sequence, and the sequence is the design.** Four
+rounds of review on this feature produced findings that were all really one
+finding — *a step in the wrong place* — so the function is now written as the
+order itself:
+
+1. **Gate, before touching the network.** `_gate(calendar, prop)` is one
+   predicate over both rows: the feed switched on, and the property still a live
+   short-term rental. An archived property costs no outbound request.
+2. **Fetch, under a deadline the caller can rely on** (`_fetch_within`).
+3. **Claim — lock and re-read both rows, then gate again** with the same
+   predicate. The answer can change while we are on the network.
+4. **Reconcile and record**, inside that lock.
+
+The single-author rule (`refuse_ineligible`, which the add endpoint also asks
+rather than copying) took three rounds to arrive at, and each round the rule was
+real, written down, and reachable around on exactly one path: first `sync` had
+it and `active_calendars` did not; then `active_calendars` had it and the Sync
+button did not; then the add endpoint carried its own copy covering only the
+residential half. **Asking one predicate at both moments is what retired the
+class** — if an answer can change, it must be asked before *and* after, and it
+must be the same question both times.
+
+**`_claim` needs the lock and `populate_existing`, and the second is easy to
+miss.** A locking `SELECT` takes the lock but still hands back the instance
+already in the session's identity map, *with its old attribute values* — so
+without it the row is locked and then read stale, which is the whole failure.
+Property first, then calendar, always: a consistent lock order is what stops two
+paths that take both from deadlocking. `update_property` takes the same row lock.
+
+**The newest read wins, and the lock does not decide that.** A lock serialises
+writes; it says nothing about which snapshot is current. A manual sync and the
+scheduled pass can overlap, and the slower fetch commits second holding *older*
+bookings — which would recreate a draft the newer pass correctly removed, or put
+moved dates back. `sync` records when its fetch began and discards a snapshot
+older than the calendar's last successful read.
+
+**`property_calendars.sync_epoch` is the whole of that**, and it is an integer
+rather than a clock on purpose. Three review rounds went into doing this with
+timestamps — which one to store, which one to compare, whether a failed read
+counts — and each answer produced the next question, because comparing wall
+clocks across two processes is the wrong primitive for "has anything happened
+since I looked?". Plain optimistic concurrency instead: note the epoch before
+fetching, and under the lock either it is unchanged (commit, bump it) or this
+snapshot is stale by definition. The same comparison guards the failure path, so
+an older failure cannot bury a newer success and send the owner looking for a
+problem that is already over.
+
+**Every `CalendarError` out of `sync` leaves its reason on the row**, from any
+step, via one handler that rolls back first. A gate refusal once escaped the
+recording block and a caller swallowed it assuming a reason had been written —
+the owner got a success with no jobs and no explanation. A uniform handler makes
+that impossible rather than fixed, and the rollback matters now that it covers
+reconcile: a failure partway through must not commit half a sync alongside its
+own error message.
+
+**The fetch deadline runs on a worker thread and *ends* the work, because a
+blocking socket read cannot be cancelled.** `MAX_FEED_SECONDS` inside the
+streaming loop does not bound the call: `client.stream()` must receive the whole
+response *head* first, and httpx's read timeout is per-receive inactivity, so a
+host trickling header bytes holds the call open indefinitely — tying up the
+request worker behind the Sync button and stalling the scheduled pass, whose
+budget is only checked *between* feeds.
+
+**Stopping waiting is not the same as stopping**, and the first version of this
+stopped there and called the leftover thread an acceptable residual. It was not:
+for a header-trickler the body deadline is never reached, so no timeout ever
+fires for that thread, and every scheduled pass and every press of the button
+starts another that also never ends — an unbounded leak with a scheduler feeding
+it. The deadline therefore **closes the client**, which closes the socket under
+the blocked read and makes it raise. There is a test against a real server that
+dribbles header bytes forever, asserting the worker is gone rather than merely
+no longer waited on.
+
+**And the population is capped outright** (`MAX_CONCURRENT_FETCHES`), because
+closing the client still cannot interrupt a worker inside `socket.getaddrinfo`
+— bounded by the OS resolver rather than unbounded, but able to outlive the
+grace period. Chasing each way a worker might outstay its deadline is a losing
+game; bounding how many can exist is not. The permit is held by the *thread* and
+released when it ends, so what is counted is live workers rather than live
+callers.
+
+**The stale warning is only counted while it is still true.** A completed or
+cancelled job, or one whose checkout has passed, has no booking in the feed
+either — counting those would make `last_stale_kept` climb on every sync until
+"a guest cancelled and a cleaner may still be coming" mostly described last
+month's finished work, and a warning that is usually wrong is one nobody reads.
 
 ---
 
@@ -469,8 +686,22 @@ Phase 4's `app/services/alerts.py` is gone, replaced by it.
   unknown outcome may not be assumed failed any more than successful, and
   assuming failure is how somebody gets the same message twice.
 
-Three things hang off the clock rather than off something a person did: the
-day-of reminder, the unclaimed alarm, and — from phase 7 — the review reveal.
+Four things hang off the clock rather than off something a person did: the
+day-of reminder, the unclaimed alarm, the review reveal, and reading the booking
+calendars. The calendar pass gives each feed its own `try` — one listing site
+having a bad afternoon is exactly when every *other* owner's sync most needs to
+keep working.
+
+**Calendars run last in `run()`, and that order is load-bearing.** Reading feeds
+is the only step that waits on somebody else's server, so everything that owes a
+person something — the reminders, the unclaimed alarm, the review reveal, the
+outbox drain — goes first and cannot be delayed by the network at all. It is
+safe to reorder precisely because a synced booking becomes a *draft*, and a
+draft notifies nobody. The pass also has a whole-pass budget
+(`CALENDAR_PASS_BUDGET`) on top of the per-feed one, since otherwise the worst
+case is the number of feeds times the per-feed deadline; feeds skipped by the
+budget are first in line next time, because `active_calendars` is
+oldest-sync-first.
 `app/tasks/scheduled.py` is their entry point (`python -m app.tasks.scheduled`),
 runs safely as often as you like because of the dedupe key, and drains the
 outbox on the way past. Their three windows (`REMINDER_HOURS_BEFORE`,

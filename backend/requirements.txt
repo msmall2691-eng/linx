@@ -9,5 +9,10 @@ python-multipart==0.0.20
 PyJWT==2.10.1
 bcrypt==4.2.1
 email-validator==2.2.0
-# Used by the Checkr client in app/services/background_check.py.
+# Used by the Checkr client in app/services/background_check.py, and to fetch
+# calendar feeds in app/services/calendars.py.
 httpx==0.28.1
+# Parsing Airbnb / VRBO .ics exports. A hand-rolled parser would have to get
+# line folding, escaping and DATE-vs-DATETIME right, and would get one of them
+# wrong on somebody's real calendar.
+icalendar==7.3.0

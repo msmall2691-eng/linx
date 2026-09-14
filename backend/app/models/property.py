@@ -5,6 +5,8 @@ from __future__ import annotations
 import uuid
 from typing import TYPE_CHECKING
 
+from datetime import time
+
 from sqlalchemy import (
     Boolean,
     CheckConstraint,
@@ -14,6 +16,7 @@ from sqlalchemy import (
     Numeric,
     String,
     Text,
+    Time,
 )
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -22,6 +25,7 @@ from app.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
 from app.models.enums import PropertyType
 
 if TYPE_CHECKING:
+    from app.models.calendar import PropertyCalendar
     from app.models.turnover import Turnover
     from app.models.user import User
 
@@ -78,6 +82,20 @@ class Property(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     #: number. Cleaners price on it when it is there, so it is asked for.
     square_feet: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
+    #: **What an all-day calendar cannot tell us.** Airbnb and VRBO export
+    #: bookings as whole days — a guest leaves "on the 7th" with no hour
+    #: attached — but the urgency ladder is measured in hours, so a synced
+    #: turnover needs a time from somewhere. These are that somewhere: the
+    #: house's own checkout and checkin policy, which the owner knows and the
+    #: feed does not. Region-local, stored as a plain time, with the defaults
+    #: most listings use.
+    default_checkout_time: Mapped[time] = mapped_column(
+        Time, nullable=False, default=time(11, 0), server_default="11:00:00"
+    )
+    default_checkin_time: Mapped[time] = mapped_column(
+        Time, nullable=False, default=time(16, 0), server_default="16:00:00"
+    )
+
     #: Gate codes, lockbox locations, parking notes. Sensitive: only the owner,
     #: an admin, and the awarded cleaner should ever see this field. The access
     #: rule lands with the property endpoints in phase 2.
@@ -90,6 +108,10 @@ class Property(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     owner: Mapped["User"] = relationship(back_populates="properties")
     turnovers: Mapped[list["Turnover"]] = relationship(
+        back_populates="property",
+        cascade="all, delete-orphan",
+    )
+    calendars: Mapped[list["PropertyCalendar"]] = relationship(
         back_populates="property",
         cascade="all, delete-orphan",
     )

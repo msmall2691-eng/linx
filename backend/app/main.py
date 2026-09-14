@@ -18,6 +18,7 @@ from app.api.routes import (
     admin,
     auth,
     board,
+    calendars,
     cleaners,
     health,
     payments,
@@ -48,6 +49,7 @@ api_router = APIRouter(prefix=API_PREFIX)
 api_router.include_router(health.router)
 api_router.include_router(auth.router)
 api_router.include_router(properties.router)
+api_router.include_router(calendars.router)
 api_router.include_router(turnovers.router)
 api_router.include_router(cleaners.router)
 api_router.include_router(board.router)

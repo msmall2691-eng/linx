@@ -10,7 +10,7 @@ holding the code to a house they have not been hired to clean.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import datetime, time
 from decimal import Decimal
 from typing import ClassVar
 
@@ -40,6 +40,13 @@ class PropertyBase(BaseModel):
     #: Optional, because plenty of owners do not know it — and a required field
     #: somebody has to guess at produces a number worse than no number.
     square_feet: int | None = Field(default=None, gt=0, le=100_000)
+
+    #: **What an all-day calendar cannot tell us.** Airbnb and VRBO export
+    #: whole days — a guest leaves "on the 7th" with no hour — but the urgency
+    #: ladder is measured in hours. These are the house's own policy, which the
+    #: owner knows and the feed does not, and they are region-local.
+    default_checkout_time: time = time(11, 0)
+    default_checkin_time: time = time(16, 0)
 
     access_notes: str | None = None
     cleaning_notes: str | None = None
@@ -86,6 +93,8 @@ class PropertyUpdate(BaseModel):
     #: Same story. An owner who looks it up and types it in must not be told it
     #: was saved when it was thrown away.
     square_feet: int | None = Field(default=None, gt=0, le=100_000)
+    default_checkout_time: time | None = None
+    default_checkin_time: time | None = None
     access_notes: str | None = None
     cleaning_notes: str | None = None
     is_active: bool | None = None
@@ -110,6 +119,8 @@ class PropertyUpdate(BaseModel):
         "property_type",
         "bedrooms",
         "bathrooms",
+        "default_checkout_time",
+        "default_checkin_time",
         "is_active",
     )
 

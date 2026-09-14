@@ -14,6 +14,8 @@ const BLANK = {
   bedrooms: 1,
   bathrooms: '1',
   square_feet: '',
+  default_checkout_time: '11:00',
+  default_checkin_time: '16:00',
   access_notes: '',
   cleaning_notes: '',
 }
@@ -48,6 +50,8 @@ export default function PropertyForm({ initial, onSubmit, submitLabel, error }) 
         // somebody guessed at is worse than no number, and cleaners price on
         // this when it is there.
         square_feet: form.square_feet === '' ? null : Number(form.square_feet),
+        default_checkout_time: `${String(form.default_checkout_time).slice(0, 5)}:00`,
+        default_checkin_time: `${String(form.default_checkin_time).slice(0, 5)}:00`,
         address_line2: form.address_line2 || null,
         // Only sent when autocomplete provided them. Absent, the server places
         // the property from its ZIP — never nothing, because a property with no
@@ -175,6 +179,39 @@ export default function PropertyForm({ initial, onSubmit, submitLabel, error }) 
               single most useful thing a cleaner has for pricing. */}
           <p className="mt-1 text-xs text-slate-500">
             Helps cleaners price it. Leave blank if you&rsquo;re not sure.
+          </p>
+        </div>
+      </div>
+
+      {/* An Airbnb export is all-day — "the guest leaves on the 7th", with no
+          hour — but urgency is measured in hours. These are what a synced
+          turnover uses, so they are the house's policy rather than a guess. */}
+      <div className="grid gap-4 sm:grid-cols-2">
+        <div>
+          <label htmlFor="default_checkout_time" className="field-label">
+            Guests usually check out
+          </label>
+          <input
+            id="default_checkout_time"
+            type="time"
+            value={String(form.default_checkout_time ?? '11:00').slice(0, 5)}
+            onChange={update('default_checkout_time')}
+            className="field-input"
+          />
+        </div>
+        <div>
+          <label htmlFor="default_checkin_time" className="field-label">
+            And check in
+          </label>
+          <input
+            id="default_checkin_time"
+            type="time"
+            value={String(form.default_checkin_time ?? '16:00').slice(0, 5)}
+            onChange={update('default_checkin_time')}
+            className="field-input"
+          />
+          <p className="mt-1 text-xs text-slate-500">
+            Used when a booking calendar fills in a turnover for you.
           </p>
         </div>
       </div>

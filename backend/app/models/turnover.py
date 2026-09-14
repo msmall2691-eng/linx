@@ -15,6 +15,8 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy import (
     Boolean,
+    String,
+    UniqueConstraint,
     CheckConstraint,
     DateTime,
     Enum,
@@ -48,6 +50,11 @@ class Turnover(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         ),
         # The bench board reads open turnovers ordered by urgency then checkout.
         Index("ix_turnovers_status_checkout_at", "status", "checkout_at"),
+        # One job per booking per feed. This is what makes a re-sync idempotent
+        # rather than a way to accumulate duplicates every fifteen minutes.
+        UniqueConstraint(
+            "source_calendar_id", "external_ref", name="uq_turnovers_source_event"
+        ),
     )
 
     property_id: Mapped[uuid.UUID] = mapped_column(
@@ -103,6 +110,52 @@ class Turnover(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         nullable=False,
         default=ServiceType.TURNOVER,
         server_default=ServiceType.TURNOVER.value,
+    )
+
+    #: The calendar feed that proposed this job, if one did. Null on anything
+    #: an owner posted themselves — which is most of them, and all of them
+    #: before this existed.
+    source_calendar_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("property_calendars.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    #: The booking's own id in that feed (its iCalendar UID). **Identity comes
+    #: from the feed, not from the dates**: a booking whose dates move is still
+    #: the same booking, and without this it would become a second job while
+    #: the first sat orphaned.
+    external_ref: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    #: When sync last wrote this row. A row with this set and `owner_edited_at`
+    #: still null is a draft the feed owns and may keep up to date.
+    source_synced_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    #: A digest of the feed URL that proposed this job. **Kept so identity can
+    #: survive its calendar being deleted**: removing a feed nulls
+    #: `source_calendar_id`, and re-adding the same feed adopts the orphans
+    #: rather than proposing every booking a second time — but "the same feed"
+    #: has to mean something, and a matching event id on the same property does
+    #: not prove it. Two different listings whose feeds reuse a UID string would
+    #: otherwise hand one's jobs to the other.
+    #:
+    #: A digest rather than the URL because the URL is a credential (see
+    #: `PropertyCalendar.url`) and this column sits on a row with
+    #: cleaner-facing shapes near it. Equality is all adoption needs.
+    source_feed_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    #: When a **person** last changed this job, as opposed to the system
+    #: maintaining it. This is the answer to the only question a re-sync asks:
+    #: has somebody touched this? If they have, the feed does not get to argue.
+    #:
+    #: **It is its own column because `updated_at` answers a different
+    #: question.** `updated_at` moves for any write at all, and the read paths
+    #: write: `refresh_urgency` persists a standing vacancy's climb up the
+    #: ladder, so merely *looking* at a turnover list could stamp a synced draft
+    #: as edited. From then on the feed could neither move its dates nor remove
+    #: it when the guest cancelled — rule 2 silently switched off by a page
+    #: view, with nothing failing to say so.
+    owner_edited_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
     )
 
     #: Integer cents. Optional guide price the owner posts with the job.
