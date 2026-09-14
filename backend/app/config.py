@@ -101,6 +101,21 @@ class Settings(BaseSettings):
     #: which is right in development and wrong behind a proxy in production.
     public_base_url: str | None = None
 
+    # ---------------------------------------------------------------------
+    # Reviews (phase 7)
+    #
+    # How long a one-sided review waits before it is revealed anyway. The
+    # delay is the whole mechanism: a review that appears the moment it lands
+    # rewards getting in first with a bad one to poison the other side's, so
+    # neither is visible until both are in — or until this window passes and
+    # the silent side has had every chance.
+    #
+    # Fourteen days is long enough that "I was busy" is not a reason it went
+    # unanswered, and short enough that an honest review is still useful to the
+    # next person reading it.
+    # ---------------------------------------------------------------------
+    review_reveal_after_days: int = Field(default=14, ge=1, le=90)
+
     platform_fee_bps: int = Field(
         default=1500,
         ge=0,

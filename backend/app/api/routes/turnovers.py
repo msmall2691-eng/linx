@@ -30,7 +30,7 @@ import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.api.deps import require_role
@@ -42,6 +42,7 @@ from app.models.property import Property
 from app.models.turnover import Turnover
 from app.models.user import User
 from app.schemas.award import AwardCancel, BidderOut, TurnoverBidOut
+from app.schemas.review import ReputationOut
 from app.schemas.turnover import (
     TurnoverCancel,
     TurnoverCreate,
@@ -49,7 +50,7 @@ from app.schemas.turnover import (
     TurnoverOut,
     TurnoverUpdate,
 )
-from app.services import awards, notifications
+from app.services import awards, notifications, reviews
 from app.services.turnovers import apply_derived_fields, refresh_urgency
 
 router = APIRouter(prefix="/turnovers", tags=["turnovers"])
@@ -172,8 +173,17 @@ def list_turnovers(
     if status_filter is not None:
         stmt = stmt.where(Turnover.status == status_filter)
     elif not include_finished:
+        # A finished job the owner can still review is **not** finished with
+        # them. Phase 7 made the review window close for good once the other
+        # side's is published, so a job that only appears behind a toggle is a
+        # window somebody misses by never finding the toggle. `reviews.py` owns
+        # the rule; this asks it rather than re-deriving it.
+        reviewable = reviews.open_review_windows(db, owner)
+        unfinished = Turnover.status.notin_(
+            (TurnoverStatus.COMPLETED, TurnoverStatus.CANCELLED)
+        )
         stmt = stmt.where(
-            Turnover.status.notin_((TurnoverStatus.COMPLETED, TurnoverStatus.CANCELLED))
+            or_(unfinished, Turnover.id.in_(reviewable)) if reviewable else unfinished
         )
 
     if property_id is not None:
@@ -361,6 +371,11 @@ def list_turnover_bids(
         .order_by(Bid.price_cents)
     ).all()
 
+    # Every bidder's rating in one query rather than one each: a job with twenty
+    # bids on it must not become twenty-one round trips. `reviews.py` owns the
+    # definition — this asks it for several at once, it does not re-derive.
+    reputations = reviews.reputation_counts(db, [user.id for _, user, _ in rows])
+
     return [
         TurnoverBidOut(
             id=bid.id,
@@ -376,6 +391,10 @@ def list_turnover_bids(
                 # Straight from the column Postgres generates. Never re-derived.
                 can_take_jobs=bool(profile.can_take_jobs) if profile else False,
                 has_insurance_on_file=bool(profile.has_insurance_on_file) if profile else False,
+                reputation=ReputationOut(
+                    count=reputations[user.id].count,
+                    average=reputations[user.id].average,
+                ),
             ),
         )
         for bid, user, profile in rows

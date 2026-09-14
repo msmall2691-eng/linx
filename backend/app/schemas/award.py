@@ -15,6 +15,7 @@ from datetime import datetime
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.enums import BidStatus
+from app.schemas.review import ReputationOut
 
 
 class BidderOut(BaseModel):
@@ -29,6 +30,11 @@ class BidderOut(BaseModel):
     can_take_jobs: bool
     #: A flag at v1, not a gate — shown prominently when it is missing.
     has_insurance_on_file: bool
+    #: What owners have said about them, from **visible** reviews only. Display
+    #: only: the list is still sorted cheapest-first, because rating-weighted
+    #: ranking is out of scope for v1 and a cleaner with no reviews yet must not
+    #: be pushed below one with a single three-star.
+    reputation: ReputationOut
 
 
 class TurnoverBidOut(BaseModel):

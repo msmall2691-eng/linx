@@ -92,6 +92,38 @@ def client(db: Session) -> Iterator[TestClient]:
 
 
 @pytest.fixture
+def own_session_per_request() -> Iterator[None]:
+    """Give every request its own session, as production does.
+
+    The `client` fixture deliberately shares the test's session so a test can
+    read back what a request wrote. That sharing makes a concurrency test
+    meaningless — two requests on one connection cannot race — so any test that
+    means to prove a row lock swaps in the real thing for its duration.
+
+    Lives here rather than in one test module because there are now two locked
+    paths worth racing: accepting a bid (`test_awards.py`) and writing a review
+    (`test_reviews.py`).
+    """
+
+    def _get_db() -> Iterator[Session]:
+        session = SessionLocal()
+        try:
+            yield session
+        finally:
+            session.close()
+
+    previous = app.dependency_overrides.get(get_db)
+    app.dependency_overrides[get_db] = _get_db
+    try:
+        yield
+    finally:
+        if previous is None:
+            app.dependency_overrides.pop(get_db, None)
+        else:
+            app.dependency_overrides[get_db] = previous
+
+
+@pytest.fixture
 def make_user(client: TestClient):
     """Sign a user up through the real endpoint and hand back the payload."""
 

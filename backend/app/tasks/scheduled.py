@@ -1,8 +1,8 @@
-"""The two notifications nothing triggers: the day-of reminder, and the alarm.
+"""The work nothing triggers: the day-of reminder, the alarm, and the reveal.
 
-Every other event in the fixed list hangs off something a person did — a bid was
-placed, an award was accepted, a booking came undone. These two hang off the
-clock passing a line, so they need something that runs.
+Most of the product hangs off something a person did — a bid was placed, an
+award was accepted, a booking came undone. These three hang off the clock
+passing a line, so they need something that runs.
 
     python -m app.tasks.scheduled
 
@@ -16,10 +16,16 @@ The job also drains the outbox, so a notification queued by a request whose
 process died before delivery still goes out on the next run rather than sitting
 as a row nobody ever reads.
 
-The two windows are deliberately separate numbers (`REMINDER_HOURS_BEFORE`,
-`UNCLAIMED_ALERT_HOURS_BEFORE`). One is a courtesy to two people who already
-have a booking; the other is an operational alarm about work nobody has taken.
-Tying them together would mean tuning the alarm changes the courtesy.
+The windows are deliberately separate numbers (`REMINDER_HOURS_BEFORE`,
+`UNCLAIMED_ALERT_HOURS_BEFORE`, `REVIEW_REVEAL_AFTER_DAYS`). One is a courtesy
+to two people who already have a booking, one is an operational alarm about work
+nobody has taken, and one is how long a review waits for an answer that may
+never come. Tying any two together would mean tuning one changes another.
+
+The reveal is the one here that is **load-bearing rather than a courtesy**: a
+one-sided review that is never revealed makes silence a veto, and refusing to
+answer becomes the way to bury a bad review. If this job stops running, that is
+what quietly stops working.
 """
 
 from __future__ import annotations
@@ -35,7 +41,7 @@ from app.models.award import Award
 from app.models.enums import TurnoverStatus
 from app.models.property import Property
 from app.models.turnover import Turnover
-from app.services import awards, notifications
+from app.services import awards, notifications, reviews
 
 logger = logging.getLogger("linx.scheduled")
 
@@ -105,12 +111,27 @@ def alert_unclaimed(db: Session, *, now: datetime | None = None) -> int:
     return queued
 
 
+def reveal_reviews(db: Session, *, now: datetime | None = None) -> int:
+    """Open one-sided reviews whose window has run out.
+
+    Silence must not be a veto. `app/services/reviews.py` owns the rule and the
+    only write to `visible_at`; this just gives it a clock.
+    """
+    return reviews.reveal_overdue(db, now=now)
+
+
 def run(db: Session, *, now: datetime | None = None) -> dict[str, int]:
     """One pass. Queue what is due, then send everything owed."""
     reminders = send_reminders(db, now=now)
     unclaimed = alert_unclaimed(db, now=now)
+    revealed = reveal_reviews(db, now=now)
     delivered = notifications.deliver_pending(db, limit=SCHEDULED_DRAIN_LIMIT)
-    return {"reminders": reminders, "unclaimed": unclaimed, "delivered": delivered}
+    return {
+        "reminders": reminders,
+        "unclaimed": unclaimed,
+        "revealed": revealed,
+        "delivered": delivered,
+    }
 
 
 def main() -> None:  # pragma: no cover - exercised through run()
@@ -123,9 +144,11 @@ def main() -> None:  # pragma: no cover - exercised through run()
     finally:
         db.close()
     logger.info(
-        "scheduled pass: %d reminders queued, %d unclaimed alerts queued, %d delivered",
+        "scheduled pass: %d reminders queued, %d unclaimed alerts queued, "
+        "%d reviews revealed, %d delivered",
         result["reminders"],
         result["unclaimed"],
+        result["revealed"],
         result["delivered"],
     )
 

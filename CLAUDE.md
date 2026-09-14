@@ -302,6 +302,37 @@ relying on it.
 - **Reviews are mutual and delayed.** Neither side's review is visible until
   both are submitted or a timeout passes. Show-immediately systems create an
   incentive to leave a pre-emptive bad review to suppress the other side's.
+  Built in phase 7 (`app/services/reviews.py`):
+  - **`visible_at` has exactly one author.** `reviews.reveal_pair` is the only
+    function that writes it, and there is a test that greps for a second one —
+    a rival writer would fail no other test until it disagreed in production.
+  - **The response shape carries no tell.** Not just the text: the *fact* that
+    the other side has written is itself the signal, because knowing they have
+    is knowing to hurry and knowing they have not is knowing you can safely go
+    first with a bad one. There is no "awaiting", no count, no timestamp to
+    difference — and a browser test asserts one side's rendered panel is
+    byte-identical before and after the other side writes.
+  - **Silence is not a veto.** A one-sided review is revealed anyway after
+    `REVIEW_REVEAL_AFTER_DAYS` (14), swept by `app/tasks/scheduled.py`. Without
+    that sweep, refusing to answer becomes the way to bury a bad review — the
+    same suppression, achieved by doing nothing. It is the one scheduled job
+    that is load-bearing rather than a courtesy.
+  - **No edits.** A review you can rewrite once the other side's appears is a
+    review you can rewrite *in response to* it.
+  - **Reviewable means finished.** A cancellation or a no-show is not: there is
+    no mutual review to balance when one side did not turn up, and the product
+    already records it as `was_no_show` plus an admin alert, answered by a human.
+  - **`review_received` fires on reveal, never on write** — telling somebody a
+    review has landed hands them what the delay withholds. The recipient is the
+    person reviewed, not the author.
+  - **Ratings are shown, never ranked.** `reviews.reputation_of` is the one
+    definition — visible reviews only, so a rating cannot leak the hidden half
+    by arithmetic — with `reputation_counts` its batch form for a list screen,
+    and a test asserting the two agree. It reaches an owner on the bid list and
+    a cleaner on their own profile, and nothing sorts by it (see the v1 scope
+    list below). `GET /cleaners/{id}/reputation` is readable by any signed-in
+    user because a rating is the thing a marketplace makes public; there is
+    deliberately no public, unauthenticated cleaner directory at v1.
 - **Disputes go to a human inbox, not a bot, at v1.**
 - **No-show / cancellation policy is defined before launch.** Built in phase 4
   (`app/services/awards.py`), and the definition is:
@@ -344,10 +375,10 @@ in `app/models/enums.py` holds exactly these and nothing else:
 - Payment receipt (owner) / payout notice (cleaner)
 - Review received (both directions, once visible)
 
-Twelve of those thirteen are live; only `review_received` is still declared with
-no sender, because the transition that fires it arrives in phase 7.
-Declared-and-unwired is deliberate and tested as such; it is not the same as
-forgotten.
+**All thirteen now have a sender.** Nothing is declared-and-unwired any more;
+the test that guarded that has flipped to guarding the other direction — a new
+enum value with nothing behind it fails, which is the conversation adding one is
+supposed to start.
 
 **The list grew by one, on purpose.** `job_completed` was added in phase 6
 alongside the transition it belongs to. Before money hung off completion, "the
@@ -389,13 +420,17 @@ Phase 4's `app/services/alerts.py` is gone, replaced by it.
   unknown outcome may not be assumed failed any more than successful, and
   assuming failure is how somebody gets the same message twice.
 
-Two events hang off the clock rather than off something a person did: the day-of
-reminder and the unclaimed alarm. `app/tasks/scheduled.py` is their entry point
-(`python -m app.tasks.scheduled`), runs safely as often as you like because of
-the dedupe key, and drains the outbox on the way past. Their two windows
-(`REMINDER_HOURS_BEFORE`, `UNCLAIMED_ALERT_HOURS_BEFORE`) are separate settings
-on purpose — one is a courtesy, the other an operational alarm, and the alarm is
-still deliberately **not** a rung on the urgency ladder.
+Three things hang off the clock rather than off something a person did: the
+day-of reminder, the unclaimed alarm, and — from phase 7 — the review reveal.
+`app/tasks/scheduled.py` is their entry point (`python -m app.tasks.scheduled`),
+runs safely as often as you like because of the dedupe key, and drains the
+outbox on the way past. Their three windows (`REMINDER_HOURS_BEFORE`,
+`UNCLAIMED_ALERT_HOURS_BEFORE`, `REVIEW_REVEAL_AFTER_DAYS`) are separate
+settings on purpose — one is a courtesy, one is an operational alarm still
+deliberately **not** a rung on the urgency ladder, and one is how long a review
+waits for an answer that may never come. The reveal is the only one of the three
+that is load-bearing rather than a courtesy: if the job stops running, silence
+becomes a veto and refusing to answer becomes the way to bury a bad review.
 
 ---
 
@@ -405,7 +440,7 @@ Do not build toward these:
 
 - Non-STR recurring residential cleaning
 - Automated dispute resolution
-- Rating-weighted search ranking
+- Rating-weighted search ranking — phase 7 shows a rating on the owner's bid list and on a cleaner's own profile, but nothing orders by it: the bid list stays cheapest-first and the bench board urgency-first, so a cleaner with no reviews is not buried in a marketplace short of supply
 - Multi-region logic — one region is hardcoded
 - Native mobile apps — responsive web only
 - In-app messaging — email/SMS notifications are enough at this size
@@ -425,7 +460,7 @@ phase.
 | 4 | Award + guardrail-1 concurrency + no-show / cancellation path | **done** |
 | 5 | Notifications (the event list above) | **done** |
 | 6 | Stripe Connect, test mode end to end, refunds, reconciliation | **done** |
-| 7 | Mutual delayed-reveal reviews | not started |
+| 7 | Mutual delayed-reveal reviews | **done** |
 | 8 | Admin console — vetting queue, dispute inbox, unclaimed alerts, ledger | not started |
 | 9 | Pilot launch checklist — new Connect platform account under the new entity | not started |
 
@@ -505,7 +540,7 @@ Written down from day one, built with their phases:
 - ~~Stripe idempotency — replay the same charge attempt, assert no duplicate~~ — `tests/test_payments.py`, asserting the *same derived key* on both attempts rather than merely that a key was sent
 - ~~Collected-vs-paid-out reconciliation — collected always equals payout + platform fee, no drift~~ — `payments.reconcile()`, asserted across a range of prices and after a refund
 - ~~Refund path — fee and transfer both resolve, nothing left stranded~~ — `tests/test_payments.py::TestRefunds`, asserting `refund_application_fee` and `reverse_transfer` on the wire
-- Mutual review reveal — a one-sided review never shows before the other side submits or the timeout passes
+- ~~Mutual review reveal — a one-sided review never shows before the other side submits or the timeout passes~~ — `tests/test_reviews.py`, plus a browser test asserting the *other side's screen does not change* when a review is written
 - ~~A real click-through of bid → award → payment, not just "the button renders"~~ — bid → award → back out is `tests/e2e/test_award_flow.py`; bid → award → done → paid is `tests/e2e/test_payment_flow.py`, against a Stripe that answers over real HTTP
 
 ---

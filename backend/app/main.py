@@ -22,6 +22,7 @@ from app.api.routes import (
     health,
     payments,
     properties,
+    reviews,
     turnovers,
 )
 from app.config import settings
@@ -51,6 +52,7 @@ api_router.include_router(cleaners.router)
 api_router.include_router(board.router)
 api_router.include_router(admin.router)
 api_router.include_router(payments.router)
+api_router.include_router(reviews.router)
 app.include_router(api_router)
 
 

@@ -12,7 +12,7 @@ reference to any other codebase.
 
 ---
 
-## Status: phase 6 — payments
+## Status: phase 7 — reviews
 
 What works today:
 
@@ -39,10 +39,10 @@ What works today:
 - **Cancellations and no-shows** — an award is cancelled, never deleted; the job
   goes back on the bench; and the owner, the cleaner and an admin are told every
   time, never conditional on the cancellation being late.
-- **Notifications** — twelve of the thirteen events in the fixed list, recorded
-  in the same transaction as the state change and delivered after it, with a
-  unique `dedupe_key` so a retry cannot send twice. Only the review notice waits
-  for its phase.
+- **Notifications** — all thirteen events in the fixed list, recorded in the
+  same transaction as the state change and delivered after it, with a unique
+  `dedupe_key` so a retry cannot send twice. The last of them, the review
+  notice, was wired in phase 7 and fires on reveal rather than on write.
 - **Payments** — the cleaner marks a job done, the owner pays on Stripe's own
   hosted page, and one **destination charge** settles both halves at once: the
   cleaner's share transfers to their Express account and the platform fee comes
@@ -52,11 +52,23 @@ What works today:
 - The full v1 database schema — eleven tables — built by Alembic migrations.
   Tables belonging to later phases exist and are empty on purpose.
 - A single-container deploy: the backend serves the built frontend.
-- 329 tests against real PostgreSQL, plus 8 browser click-throughs — including bid → award → job done → paid, against a Stripe that answers over real HTTP.
+- **Reviews** — mutual and delayed. Neither side sees the other's until both
+  have written or two weeks pass, and the screen gives away no more than the API
+  does: not even the fact that a review exists. Once a review is visible it
+  counts towards a rating, shown on the owner's bid list and on a cleaner's own
+  profile — shown, never ranked: the bid list still sorts cheapest-first.
+- 375 tests against real PostgreSQL, plus 9 browser click-throughs — including
+  bid → award → job done → paid against a Stripe that answers over real HTTP,
+  and a two-browser check that one side's page does not change when the other
+  reviews them.
 
-Reviews are **not** built yet, and neither is the admin console. Each is its own
-phase, reviewed before the next begins — see the phase table in
-[`CLAUDE.md`](CLAUDE.md).
+The admin console is **not** built yet. The vetting queue is the exception and
+predates it — a real screen since phase 3, because a human reviewing a photo ID
+is what stands between "hands off" and "anyone can walk into a stranger's
+house". The dispute inbox and the ledger have neither: disputes are a policy
+written into comments and answered by a person today, and `payments.reconcile()`
+is a service function with no route and no page. That is phase 8; see the phase
+table in [`CLAUDE.md`](CLAUDE.md).
 
 **All Stripe work is test mode.** Going live means a new, separate Connect
 platform account under the new entity — never a migrated one, and never real
@@ -196,7 +208,10 @@ One Railway service, one Postgres, nothing shared with any other project.
    and that pass also drains any notification a crashed request left queued.
    Every fifteen minutes is a reasonable schedule; running it more often is safe
    by design, because both events key their `dedupe_key` off the turnover and
-   the unique constraint refuses the second copy.
+   the unique constraint refuses the second copy. The same pass also reveals
+   one-sided reviews once their window is up — that one is **load-bearing**, not
+   a courtesy: without it, refusing to write a review becomes the way to bury a
+   bad one.
 
 5. Set `SMTP_HOST` and its credentials when you have a mail provider. Without
    them the logging sender runs: notifications are still recorded as rows and
@@ -250,10 +265,11 @@ backend/
     services/background_check.py  Checkr, or manual when no key is set
     services/stripe_client.py  the ONLY door to Stripe; keys are not optional
     services/payments.py   the destination charge, the split, and refunds
+    services/reviews.py    the ONLY author of a review's visibility
     services/awards.py   guardrail 1 — the row lock, and the cancellation policy
     services/notifications.py  the one place that decides who hears about what
     services/delivery.py   the sender — SMTP, or the log when none is configured
-    tasks/scheduled.py   the two events a clock fires, and the outbox drain
+    tasks/scheduled.py   the three things a clock fires, and the outbox drain
   alembic/versions/    migrations — one head, always
   tests/               pytest suite, real Postgres
   tests/e2e/           browser click-throughs, opt-in

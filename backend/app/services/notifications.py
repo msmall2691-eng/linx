@@ -23,11 +23,12 @@ from a clock or a random value. The unique constraint makes "fires once per
 transition" a property of the database. It is what lets the reminder job run
 every fifteen minutes without sending fifteen-minute reminders.
 
-The last event on the fixed list — review received — has no state transition to
-fire it yet. It is declared in `NotificationEvent` and wired in phase 7. Nothing
-here pretends otherwise. Payment receipt and payout notice were the other two
-until phase 6; both are queued from the webhook that confirms the money actually
-moved, never from the request that started a checkout.
+**Every event on the fixed list now has a sender.** Two of them fire on
+something other than the obvious moment, on purpose: payment receipt and payout
+notice come from the webhook that confirms the money actually moved rather than
+from the request that started a checkout, and `review_received` fires when a
+review becomes *visible* rather than when it is written — telling somebody a
+review has landed would hand them exactly what the delayed reveal withholds.
 """
 
 from __future__ import annotations
@@ -52,6 +53,7 @@ from app.models.enums import (
 from app.models.notification import Notification
 from app.models.payment import PaymentIn, Payout
 from app.models.property import Property
+from app.models.review import Review
 from app.models.turnover import Turnover
 from app.models.user import User
 from app.services import delivery
@@ -653,7 +655,10 @@ def job_completed(
             f"Checkout: {_when(turnover.checkout_at)}\n"
             f"Agreed price: {_money(award.agreed_price_cents)}\n\n"
             "Open the turnover to pay. Your cleaner is paid out of the same "
-            "charge, so paying is what closes this out for both of you."
+            "charge, so paying is what closes this out for both of you.\n\n"
+            "You can also review each other now. Neither review is visible "
+            "until you have both written, or the window passes — and once "
+            "theirs is published, yours can no longer be added."
         ),
         dedupe_scope=str(award.id),
         turnover_id=turnover.id,
@@ -715,5 +720,43 @@ def payout_notice(
             "dashboard for the schedule."
         ),
         dedupe_scope=str(payout.id),
+        turnover_id=turnover.id,
+    )
+
+
+def review_received(
+    db: Session,
+    turnover: Turnover,
+    prop: Property,
+    review: Review,
+    subject: User,
+) -> list[Notification]:
+    """Somebody reviewed you, and it is now visible.
+
+    **The last event on the fixed list**, and the only one that fires on a
+    *reveal* rather than on the write. Telling somebody the moment a review
+    landed would hand them the one piece of information the delay exists to
+    withhold — that the other side has written, and by implication how soon they
+    need to get their own in. So this is queued from `reviews.reveal_pair`, the
+    single place that opens a review, and never from the submit path.
+
+    The recipient is the person the review is *about*, not its author. An author
+    already knows what they wrote.
+    """
+    return queue(
+        db,
+        NotificationEvent.REVIEW_RECEIVED,
+        recipients=[subject],
+        subject=f"You have a new review: {_where(prop)}",
+        body=(
+            f"Your review for this turnover is now visible.\n\n"
+            f"Where: {_where(prop)}\n"
+            f"Checkout: {_when(turnover.checkout_at)}\n"
+            f"Rating: {review.rating} out of 5\n"
+            + (f"\n{review.text}\n" if review.text else "")
+            + "\nReviews stay hidden until both sides have written or the "
+            "window passes, so this one is only appearing now."
+        ),
+        dedupe_scope=str(review.id),
         turnover_id=turnover.id,
     )

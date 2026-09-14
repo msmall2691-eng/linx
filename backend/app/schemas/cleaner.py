@@ -9,6 +9,7 @@ from decimal import Decimal
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.enums import DocumentStatus, DocumentType, VerificationStatus
+from app.schemas.review import ReputationOut
 
 
 class CleanerProfileUpsert(BaseModel):
@@ -78,3 +79,9 @@ class CleanerProfileDetailOut(CleanerProfileOut):
 
     vetting: VettingStateOut
     documents: list[DocumentOut]
+    #: Their own rating, from reviews that are already visible. A cleaner sees
+    #: the same number an owner does — deliberately, because a rating somebody
+    #: cannot check is a rating they cannot argue with. Unrevealed reviews are
+    #: excluded here as everywhere: including them would leak the hidden half by
+    #: arithmetic.
+    reputation: ReputationOut
