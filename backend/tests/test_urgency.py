@@ -135,3 +135,54 @@ def test_the_rungs_sit_exactly_where_they_claim(hours: int, expected: TurnoverUr
     """Pins the boundaries, so a later change to a threshold is a visible one."""
     now = _utc(2026, 6, 1)
     assert derive_urgency(now + timedelta(hours=hours), None, now=now) is expected
+
+
+class TestAReopenedTurnover:
+    """`reopened_at` — phase 4's input to the same one rule.
+
+    A booking that comes undone puts the job back on the bench, and from that
+    moment the time left to find somebody counts again, exactly as it does for a
+    standing vacancy. It never *lowers* a rung, and it never invents a rule of
+    its own: the ladder still has one author.
+    """
+
+    def test_a_late_cancellation_raises_a_wide_window_to_urgent(self) -> None:
+        now = _utc(2026, 6, 1)
+        checkout = now + timedelta(hours=6)
+        checkin = checkout + timedelta(days=4)
+
+        # The window alone is roomy; four days is nobody's emergency.
+        assert derive_urgency(checkout, checkin, now=now) is TurnoverUrgency.STANDARD
+        # Re-posted six hours before checkout, it is exactly that.
+        assert (
+            derive_urgency(checkout, checkin, reopened_at=now, now=now)
+            is TurnoverUrgency.URGENT
+        )
+
+    def test_a_cancellation_weeks_out_changes_nothing(self) -> None:
+        now = _utc(2026, 6, 1)
+        checkout = now + timedelta(days=21)
+        checkin = checkout + timedelta(days=4)
+        assert (
+            derive_urgency(checkout, checkin, reopened_at=now, now=now)
+            is TurnoverUrgency.STANDARD
+        )
+
+    def test_it_never_lowers_a_rung(self) -> None:
+        """A same-day turnover stays same-day, however far off it is."""
+        now = _utc(2026, 6, 1)
+        checkout = now + timedelta(days=30)
+        checkin = checkout + timedelta(hours=6)
+        assert (
+            derive_urgency(checkout, checkin, reopened_at=now, now=now)
+            is TurnoverUrgency.SAME_DAY
+        )
+
+    def test_a_reopened_vacancy_reads_the_same_as_before(self) -> None:
+        """No checkin means lead time was already the whole signal."""
+        now = _utc(2026, 6, 1)
+        checkout = now + timedelta(hours=30)
+        assert derive_urgency(checkout, None, now=now) is TurnoverUrgency.SOON
+        assert (
+            derive_urgency(checkout, None, reopened_at=now, now=now) is TurnoverUrgency.SOON
+        )

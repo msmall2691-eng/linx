@@ -233,12 +233,18 @@ class TestCanTakeJobs:
 class TestAwardIsSetOnce:
     """The database backstop behind guardrail 1.
 
-    The row lock is the mechanism; this constraint is what turns a missed lock
-    into a loud error rather than a second award. A turnover promised to two
-    cleaners is the failure this schema refuses to represent.
+    The row lock is the mechanism; this index is what turns a missed lock into a
+    loud error rather than a second award. A turnover promised to two cleaners
+    at once is the failure this schema refuses to represent.
+
+    "At once" is the whole of it since phase 4. A booking can come undone — the
+    cleaner backs out, or never turns up — and the job goes back on the bench to
+    be awarded again, so the index is partial: unique on `turnover_id` *where
+    the award is live*. Cancelled awards stay, because who backed out is the
+    history a dispute is argued from.
     """
 
-    def test_one_award_per_turnover(self, db: Session) -> None:
+    def test_one_live_award_per_turnover(self, db: Session) -> None:
         owner = _owner(db)
         turnover = _turnover(db, owner)
         first, second = _cleaner(db), _cleaner(db)
@@ -261,6 +267,47 @@ class TestAwardIsSetOnce:
         ).scalars().all()
         assert len(awards) == 1
         assert awards[0].cleaner_id == first.id
+
+    def test_a_cancelled_award_frees_the_turnover_to_be_awarded_again(
+        self, db: Session
+    ) -> None:
+        """The re-post path, at the schema level.
+
+        Without this the only way to re-staff a job would be to delete the award
+        of the cleaner who backed out — erasing the record of exactly the thing
+        an owner would later want to point at.
+        """
+        from datetime import datetime, timezone
+
+        owner = _owner(db)
+        turnover = _turnover(db, owner)
+        first, second = _cleaner(db), _cleaner(db)
+        db.commit()
+
+        original = Award(
+            turnover_id=turnover.id, cleaner_id=first.id, agreed_price_cents=12_500
+        )
+        db.add(original)
+        db.commit()
+
+        original.cancelled_at = datetime.now(timezone.utc)
+        original.cancellation_reason = "Van broke down."
+        db.commit()
+
+        db.add(
+            Award(turnover_id=turnover.id, cleaner_id=second.id, agreed_price_cents=13_000)
+        )
+        db.commit()
+
+        awards = (
+            db.execute(select(Award).where(Award.turnover_id == turnover.id))
+            .scalars()
+            .all()
+        )
+        assert len(awards) == 2, "the cancelled award should still be on the record"
+        live = [award for award in awards if award.cancelled_at is None]
+        assert len(live) == 1
+        assert live[0].cleaner_id == second.id
 
     def test_an_award_price_must_be_positive(self, db: Session) -> None:
         owner = _owner(db)

@@ -17,6 +17,7 @@ const LINKS = {
   ],
   cleaner: [
     { to: '/board', label: 'Open turnovers' },
+    { to: '/jobs', label: 'Your jobs' },
     { to: '/cleaner/profile', label: 'Your profile' },
   ],
   admin: [{ to: '/admin/vetting', label: 'Vetting queue' }],

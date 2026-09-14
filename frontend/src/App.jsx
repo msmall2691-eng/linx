@@ -4,6 +4,7 @@ import Nav from './components/Nav.jsx'
 import RequireAuth from './components/RequireAuth.jsx'
 import AdminVetting from './pages/AdminVetting.jsx'
 import Board from './pages/Board.jsx'
+import CleanerJobs from './pages/CleanerJobs.jsx'
 import CleanerProfile from './pages/CleanerProfile.jsx'
 import Dashboard from './pages/Dashboard.jsx'
 import Landing from './pages/Landing.jsx'
@@ -119,6 +120,14 @@ export default function App() {
             element={
               <CleanerRoute>
                 <Board />
+              </CleanerRoute>
+            }
+          />
+          <Route
+            path="/jobs"
+            element={
+              <CleanerRoute>
+                <CleanerJobs />
               </CleanerRoute>
             }
           />

@@ -82,3 +82,66 @@ class BidCreate(BaseModel):
 
     price_cents: int = Field(gt=0, le=100_000_00, description="Integer cents. Never a float.")
     message: str | None = Field(default=None, max_length=2000)
+
+
+class AwardedPropertyOut(BaseModel):
+    """The other side of the boundary: this cleaner has actually been hired.
+
+    A third model rather than a widened `BoardPropertyOut`, for the same reason
+    that one is not a filtered `PropertyOut`. The street address and the gate
+    code appear here because somebody has to open the door, and they appear
+    *only* here — one shape a reader can check in full, rather than a flag
+    somewhere that decides whether a field is filled in.
+
+    Still withheld: the owner's identity and contact details. Phase 5's
+    notifications are how the two sides reach each other.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    nickname: str
+    address_line1: str
+    address_line2: str | None
+    city: str
+    state: str
+    postal_code: str
+    bedrooms: int
+    bathrooms: Decimal
+    cleaning_notes: str | None
+    #: Gate codes, lockbox locations. Released on award, never before.
+    access_notes: str | None
+
+
+class AwardedJobOut(BaseModel):
+    """One job this cleaner is booked for.
+
+    **One shape per resource**: every endpoint that answers with a single
+    awarded job answers with this, the list included. An action that replied
+    with less would blank the screen it replaced.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    award_id: uuid.UUID
+    turnover_id: uuid.UUID
+    checkout_at: datetime
+    checkin_at: datetime | None
+    is_same_day: bool
+    status: TurnoverStatus
+    urgency: TurnoverUrgency
+    notes: str | None
+    #: Integer cents, frozen when the bid was accepted.
+    agreed_price_cents: int
+    awarded_at: datetime
+    cancelled_at: datetime | None
+    cancellation_reason: str | None
+    was_no_show: bool
+
+    property: AwardedPropertyOut
+
+
+class JobCancel(BaseModel):
+    """Backing out of a job. The reason is required and goes to the owner."""
+
+    reason: str = Field(min_length=1, max_length=2000)

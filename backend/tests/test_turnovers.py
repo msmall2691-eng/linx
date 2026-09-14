@@ -434,23 +434,42 @@ class TestStatusTransitions:
     def test_an_awarded_turnover_cannot_be_quietly_cancelled(
         self, client: TestClient, make_user, db
     ) -> None:
+        """Phase 4 made this a real path; it did not make it a quiet one.
+
+        Until phase 4 this endpoint refused an awarded turnover outright and
+        said so. Now it cancels the booking, tells the cleaner and an admin, and
+        demands a reason first — so the "quietly" in this test's name is what it
+        still guards. The full path, including who gets told, is covered in
+        test_cancellation.py; here it is enough that a bare cancel bounces.
+        """
         import uuid as _uuid
 
-        from app.models import Turnover, TurnoverStatus
+        from app.models import Award, Turnover, TurnoverStatus
 
         owner = make_user(role="owner")
         prop = _property(client, owner["auth"])
         created = _turnover(client, owner["auth"], prop["id"])
+        cleaner = make_user(role="cleaner")
 
         row = db.get(Turnover, _uuid.UUID(created["id"]))
         row.status = TurnoverStatus.AWARDED
+        db.add(
+            Award(
+                turnover_id=row.id,
+                cleaner_id=_uuid.UUID(cleaner["user"]["id"]),
+                agreed_price_cents=12_000,
+            )
+        )
         db.commit()
 
         resp = client.post(
             f"/api/turnovers/{created['id']}/cancel", json={}, headers=owner["auth"]
         )
-        assert resp.status_code == 409
-        assert "already scheduled" in resp.json()["detail"]
+        assert resp.status_code == 422
+        assert "Give a reason" in resp.json()["detail"]
+
+        db.refresh(row)
+        assert row.status is TurnoverStatus.AWARDED
 
     def test_a_cancelled_turnover_cannot_be_republished(
         self, client: TestClient, make_user

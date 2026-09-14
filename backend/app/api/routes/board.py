@@ -11,6 +11,13 @@ the badge cannot disagree.
 **The board shows less than the owner's view.** Responses use the `board`
 schemas, which withhold the street address and the access notes. A cleaner who
 has merely bid has not been hired and has no business holding the gate code.
+
+The `/board/jobs` routes are the other side of that line: they answer for jobs
+this cleaner has actually been *awarded*, and only those, so the address and the
+gate code appear there. The boundary is a live award — not a bid, not a past
+booking that was cancelled. Cancelling a job goes through the same service the
+owner's side uses, so a cleaner backing out cannot take a shortcut past the
+re-post and the alerts.
 """
 
 from __future__ import annotations
@@ -24,14 +31,23 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.api.deps import require_role
 from app.db import get_db
+from app.models.award import Award
 from app.models.bid import Bid
 from app.models.cleaner_profile import CleanerProfile
 from app.models.enums import BidStatus, TurnoverStatus, UserRole
 from app.models.property import Property
 from app.models.turnover import Turnover
 from app.models.user import User
-from app.schemas.board import BidCreate, BoardBidOut, BoardPropertyOut, BoardTurnoverOut
-from app.services import vetting
+from app.schemas.board import (
+    AwardedJobOut,
+    AwardedPropertyOut,
+    BidCreate,
+    BoardBidOut,
+    BoardPropertyOut,
+    BoardTurnoverOut,
+    JobCancel,
+)
+from app.services import awards, vetting
 from app.services.geo import distance_miles_sql, haversine_miles
 from app.services.turnovers import refresh_urgency
 
@@ -147,6 +163,149 @@ def list_open_turnovers(
         _serialize(turnover, float(row[1]), own_bids.get(turnover.id))
         for turnover, row in zip(turnovers, rows, strict=True)
     ]
+
+
+def _serialize_job(award: Award, turnover: Turnover, prop: Property) -> AwardedJobOut:
+    """One awarded job, in the only shape any job endpoint answers with.
+
+    The access notes follow the award, not the history: they are released while
+    the booking is live and gone the moment it is not. One rule, applied in one
+    place, so a cancelled job cannot keep handing out a gate code.
+    """
+    return AwardedJobOut(
+        award_id=award.id,
+        turnover_id=turnover.id,
+        checkout_at=turnover.checkout_at,
+        checkin_at=turnover.checkin_at,
+        is_same_day=turnover.is_same_day,
+        status=turnover.status,
+        urgency=turnover.urgency,
+        notes=turnover.notes,
+        agreed_price_cents=award.agreed_price_cents,
+        awarded_at=award.awarded_at,
+        cancelled_at=award.cancelled_at,
+        cancellation_reason=award.cancellation_reason,
+        was_no_show=award.was_no_show,
+        property=AwardedPropertyOut(
+            id=prop.id,
+            nickname=prop.nickname,
+            address_line1=prop.address_line1,
+            address_line2=prop.address_line2,
+            city=prop.city,
+            state=prop.state,
+            postal_code=prop.postal_code,
+            bedrooms=prop.bedrooms,
+            bathrooms=prop.bathrooms,
+            cleaning_notes=prop.cleaning_notes,
+            access_notes=prop.access_notes if award.is_live else None,
+        ),
+    )
+
+
+def _job_rows(db: Session, cleaner_id: uuid.UUID, *, turnover_id: uuid.UUID | None = None):
+    stmt = (
+        select(Award, Turnover, Property)
+        .join(Turnover, Award.turnover_id == Turnover.id)
+        .join(Property, Turnover.property_id == Property.id)
+        .where(Award.cleaner_id == cleaner_id)
+    )
+    if turnover_id is not None:
+        stmt = stmt.where(Award.turnover_id == turnover_id)
+    return stmt
+
+
+@router.get("/jobs", response_model=list[AwardedJobOut])
+def list_my_jobs(
+    include_finished: bool = Query(
+        default=False, description="Include bookings that were cancelled."
+    ),
+    db: Session = Depends(get_db),
+    user: User = Depends(require_role(UserRole.CLEANER)),
+) -> list[AwardedJobOut]:
+    """Every job this cleaner is booked for, soonest checkout first."""
+    stmt = _job_rows(db, user.id)
+    if not include_finished:
+        stmt = stmt.where(Award.cancelled_at.is_(None))
+
+    rows = db.execute(stmt.order_by(Turnover.checkout_at)).all()
+    turnovers = [row[1] for row in rows]
+    refresh_urgency(db, turnovers)
+    return [_serialize_job(award, turnover, prop) for award, turnover, prop in rows]
+
+
+@router.get("/jobs/{turnover_id}", response_model=AwardedJobOut)
+def read_my_job(
+    turnover_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_role(UserRole.CLEANER)),
+) -> AwardedJobOut:
+    """One awarded job, with the address and the gate code.
+
+    Scoped by live award *and* cleaner in one query: a turnover somebody else
+    was awarded answers 404, exactly as a property belonging to another owner
+    does — and so does a booking of this cleaner's own that has since been
+    cancelled, because access ends with the booking. Their own history is still
+    readable from the list, without the access notes.
+    """
+    row = db.execute(
+        _job_rows(db, user.id, turnover_id=turnover_id).where(Award.cancelled_at.is_(None))
+    ).first()
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+
+    award, turnover, prop = row
+    refresh_urgency(db, [turnover])
+    return _serialize_job(award, turnover, prop)
+
+
+@router.post("/jobs/{turnover_id}/cancel", response_model=AwardedJobOut)
+def cancel_my_job(
+    turnover_id: uuid.UUID,
+    payload: JobCancel,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_role(UserRole.CLEANER)),
+) -> AwardedJobOut:
+    """Back out of a job you were awarded.
+
+    Always allowed, and deliberately: a cleaner who cannot say "I can't make it"
+    says nothing instead, and the owner finds out when nobody arrives. What the
+    product does about it is make the consequences immediate and visible — the
+    job goes straight back on the bench, its urgency is re-derived now that
+    nobody is staffed for it, and the owner and an admin are told the same
+    minute, whether or not it is inside the 48-hour window.
+    """
+    turnover = awards.lock_turnover(db, turnover_id)
+    if turnover is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+
+    award = awards.live_award(db, turnover.id)
+    if award is None or award.cleaner_id != user.id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+
+    if turnover.status is not TurnoverStatus.AWARDED:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"This turnover is {turnover.status.value} and cannot be cancelled here. "
+                "Contact support."
+            ),
+        )
+
+    awards.cancel_award(
+        db,
+        turnover=turnover,
+        award=award,
+        actor=user,
+        reason=payload.reason,
+        reopen=True,
+    )
+
+    # scalar_one, not an assert: the foreign key guarantees the row exists, and
+    # an assert is stripped by `python -O`, so it would guarantee nothing.
+    prop = db.execute(
+        select(Property).where(Property.id == turnover.property_id)
+    ).scalar_one()
+    return _serialize_job(award, turnover, prop)
 
 
 @router.get("/{turnover_id}", response_model=BoardTurnoverOut)

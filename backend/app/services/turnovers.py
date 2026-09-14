@@ -31,7 +31,12 @@ def apply_derived_fields(turnover: Turnover, *, now: datetime | None = None) -> 
     Call this after anything that touches `checkout_at` or `checkin_at`.
     """
     same_day = is_same_day(turnover.checkout_at, turnover.checkin_at)
-    urgency = derive_urgency(turnover.checkout_at, turnover.checkin_at, now=now)
+    urgency = derive_urgency(
+        turnover.checkout_at,
+        turnover.checkin_at,
+        reopened_at=turnover.reopened_at,
+        now=now,
+    )
 
     changed = turnover.is_same_day != same_day or turnover.urgency != urgency
     turnover.is_same_day = same_day
