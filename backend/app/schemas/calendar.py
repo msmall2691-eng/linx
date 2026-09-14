@@ -12,6 +12,8 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, time
 
+from urllib.parse import urlsplit, urlunsplit
+
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
@@ -39,20 +41,42 @@ class CalendarCreate(BaseModel):
         hand it out for one-click subscription — so it is rewritten rather than
         refused, which is what the owner meant.
 
-        **The fragment is dropped, because uniqueness has to mean the same
-        thing the network does.** A fragment is never sent in an HTTP request,
-        so `feed.ics` and `feed.ics#copy` fetch byte-for-byte the same calendar
-        — but they are different strings, so
-        `uq_property_calendars_property_url` would let both be added and every
-        booking would become two drafts under two calendar ids. Stored as what
-        will actually be requested.
+        **The stored string is canonicalised, because uniqueness has to mean the
+        same thing the network does.** `uq_property_calendars_property_url` is
+        what stops one feed becoming two calendars — and therefore every booking
+        becoming two drafts under two calendar ids — but it compares strings,
+        not requests. Three ways the same request is spelled differently:
+
+        * a **fragment**, which is never sent in an HTTP request at all;
+        * the **scheme and host in different case**, which are case-insensitive;
+        * an **explicit default port**, `:443` on https or `:80` on http.
+
+        The path, query, and any credentials are left exactly as they are: those
+        *are* case-sensitive, and a listing site's export links carry a token in
+        one of them.
         """
         url = v.strip()
         if url.lower().startswith("webcal://"):
             url = "https://" + url[len("webcal://") :]
         if not url.lower().startswith(("http://", "https://")):
             raise ValueError("A calendar link must start with http:// or https://")
-        url, _, _ = url.partition("#")
+
+        parts = urlsplit(url)
+        scheme = parts.scheme.lower()
+        host = (parts.hostname or "").lower()
+        if not host:
+            raise ValueError("That calendar link has no host in it.")
+
+        default_port = 443 if scheme == "https" else 80
+        netloc = host if parts.port in (None, default_port) else f"{host}:{parts.port}"
+        if parts.username:
+            credentials = parts.username
+            if parts.password:
+                credentials = f"{credentials}:{parts.password}"
+            netloc = f"{credentials}@{netloc}"
+
+        # Fragment dropped by never putting it back.
+        url = urlunsplit((scheme, netloc, parts.path, parts.query, ""))
         if len(url) < 10:
             raise ValueError("That does not look like a calendar link.")
         return url

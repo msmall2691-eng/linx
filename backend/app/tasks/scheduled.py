@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta, timezone
+from time import monotonic
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -155,6 +156,12 @@ def place_unmapped_properties(db: Session) -> int:
     return len(rows)
 
 
+#: How long the whole calendar pass may take, however many feeds there are.
+#: Sized so a pass that runs every fifteen minutes cannot overlap itself on
+#: calendars alone.
+CALENDAR_PASS_BUDGET = 300.0
+
+
 def sync_calendars(db: Session) -> tuple[int, int]:
     """Read every connected booking feed. Returns (drafts created, stale kept).
 
@@ -174,7 +181,22 @@ def sync_calendars(db: Session) -> tuple[int, int]:
     """
     created = 0
     stale = 0
+    deadline = monotonic() + CALENDAR_PASS_BUDGET
     for calendar in calendars.active_calendars(db):
+        if monotonic() > deadline:
+            # **A budget for the pass, not just for each feed.** Otherwise the
+            # worst case is the number of feeds times the per-feed deadline,
+            # which grows without limit as the product does.
+            #
+            # Fair because `active_calendars` is ordered oldest-sync-first: the
+            # feeds skipped here are the first ones read next time, so nobody's
+            # calendar is starved by somebody else's slow one.
+            logger.warning(
+                "calendar pass hit its %.0fs budget; the rest are first in line "
+                "next pass",
+                CALENDAR_PASS_BUDGET,
+            )
+            break
         try:
             result = calendars.sync(db, calendar)
         except calendars.CalendarError as error:
@@ -198,13 +220,30 @@ def sync_calendars(db: Session) -> tuple[int, int]:
 
 
 def run(db: Session, *, now: datetime | None = None) -> dict[str, int]:
-    """One pass. Queue what is due, then send everything owed."""
+    """One pass. Queue what is due, send everything owed, *then* read feeds.
+
+    **The order is the point.** Reading calendars is the only step here that
+    waits on somebody else's server, and it used to run second — so every feed's
+    deadline was spent before the reminders, the unclaimed alarm, the review
+    reveal or the outbox drain had started. A per-feed limit does not fix that:
+    fifty slow feeds is fifty times the limit, and the review reveal is the one
+    scheduled job that is load-bearing rather than a courtesy. Silence becoming
+    a veto because a listing site was slow is not a trade worth making.
+
+    So the work that owes somebody something goes first and cannot be delayed by
+    the network at all. Calendars go last, under a budget of their own, and the
+    worst case is a feed read on the next pass instead of this one.
+
+    Nothing is left unsent by that: sync writes drafts, and a draft notifies
+    nobody — which is rule 1 of the calendar module, and is what makes this
+    reordering safe rather than merely convenient.
+    """
     placed = place_unmapped_properties(db)
-    synced, stale_bookings = sync_calendars(db)
     reminders = send_reminders(db, now=now)
     unclaimed = alert_unclaimed(db, now=now)
     revealed = reveal_reviews(db, now=now)
     delivered = notifications.deliver_pending(db, limit=SCHEDULED_DRAIN_LIMIT)
+    synced, stale_bookings = sync_calendars(db)
     return {
         "placed": placed,
         "synced": synced,

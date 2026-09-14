@@ -394,6 +394,13 @@ def parse(text: str) -> list[Booking]:
             # is better than inventing a checkout from it.
             continue
 
+        # A provider may keep a cancelled reservation in the feed rather than
+        # dropping it. Treating it as a booking would create a draft for a stay
+        # that is not happening — and worse, on later syncs it looks like a
+        # live booking, so the job is never even reported as vanished.
+        if str(component.get("STATUS") or "").strip().upper() == "CANCELLED":
+            continue
+
         summary = str(component.get("SUMMARY") or "").strip()
         if any(marker in summary.casefold() for marker in BLOCK_MARKERS):
             continue
@@ -633,14 +640,13 @@ def reconcile(
 # --------------------------------------------------------------------------
 
 
-def _refuse_ineligible(prop: Property) -> None:
+def refuse_ineligible(prop: Property) -> None:
     """A feed only makes sense on a live short-term rental.
 
-    **Here rather than only in `active_calendars`**, because that filters the
-    scheduled pass and nothing else — the owner's own "Sync now" button reaches
-    `sync` directly, and an archived property still renders the calendar panel.
-    A rule enforced on one of two paths is not a rule, which is the same
-    correction this module has now needed three times.
+    **The one author of that rule**, so the scheduled pass, the Sync button and
+    the add endpoint cannot answer it differently. `active_calendars` carries
+    the same condition in SQL purely so the pass does not fetch feeds it would
+    then refuse; this is what decides.
     """
     if not prop.is_active:
         raise CalendarError(
@@ -669,8 +675,22 @@ def sync(
     as a successful pass. Crucially, **nothing about the turnovers changes** —
     "the feed is empty" and "the feed did not load" must never look the same,
     because the first one legitimately deletes drafts.
+
+    **Everything a caller could be wrong about is checked here**, not in the
+    caller: whether the feed is switched on, and whether the property can have
+    one at all. The alternative has already cost this module three rounds of
+    the same correction — a rule that lives in the scheduled path's query is
+    not enforced on the button beside it.
     """
     moment = now or datetime.now(tz=region_timezone())
+
+    if not calendar.is_active:
+        # Switched off through the PATCH endpoint. The scheduled query skips it;
+        # without this, the Sync button did not, so a feed the API describes as
+        # off could still create, move and delete drafts.
+        raise CalendarError(
+            "This calendar is switched off. Turn it back on to read it again."
+        )
 
     try:
         text = fetch(calendar.url, client=client)
@@ -681,10 +701,29 @@ def sync(
         db.commit()
         raise
 
-    prop = db.get(Property, calendar.property_id)
+    # **Re-read under a lock, rather than trusting what is already loaded.**
+    # `db.get` can hand back the instance an earlier ownership check put in the
+    # identity map, which is a copy from before this transaction. Worse, the
+    # eligibility answer can change underneath us: `update_property` locks the
+    # property, counts zero live turnovers, and commits `residential` — and if
+    # that lands between this check and the reconcile commit, the feed writes a
+    # rental turnover onto a home. Taking the same row lock it takes, and
+    # holding it through the commit, is what makes the two serialize.
+    prop = db.execute(
+        select(Property)
+        .where(Property.id == calendar.property_id)
+        .with_for_update(key_share=True)
+        # **`populate_existing` is not optional here, and that is not obvious.**
+        # A locking SELECT takes the lock, but SQLAlchemy still hands back the
+        # instance already in the identity map *with its old attribute values* —
+        # so without this the row is locked and then read stale, which is
+        # precisely the half of the bug this re-read exists to fix. Verified by
+        # doing it both ways against a row changed in another session.
+        .execution_options(populate_existing=True)
+    ).scalar_one_or_none()
     if prop is None:
         raise CalendarError("That property no longer exists.")
-    _refuse_ineligible(prop)
+    refuse_ineligible(prop)
 
     result = reconcile(db, calendar, jobs_for(bookings, prop, now=moment), now=moment)
 

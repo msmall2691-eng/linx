@@ -358,10 +358,17 @@ forgery primitive unless it is guarded. Two rules, both in `calendars.py`:
   trips neither. That matters here more than elsewhere, since the scheduled pass
   reads feeds **serially and first** — one slow feed would stop the reminders,
   the unclaimed alarm, the outbox and the review reveal for everybody.
-- **The stored URL is the one that will be fetched.** Fragments are dropped in
-  `CalendarCreate`, because they are never sent in an HTTP request — so
-  `feed.ics` and `feed.ics#copy` are one feed to the network and two rows to a
-  unique constraint, which is every booking becoming two drafts.
+- **The stored URL is the one that will be fetched.** `CalendarCreate`
+  canonicalises the request identity — fragment dropped, scheme and host
+  lowercased, an explicit default port removed — because
+  `uq_property_calendars_property_url` compares *strings* while the network
+  compares *requests*, and one feed spelled three ways is three calendars and
+  three drafts per booking. The path and query are left exactly as typed: those
+  are case-sensitive, and listing sites put a token in one of them.
+- **A `STATUS:CANCELLED` event is not a stay.** Providers may keep a cancelled
+  reservation in the feed rather than dropping it; read as live it becomes a
+  draft for a stay that is not happening, and on later syncs it still looks
+  live, so the job is never even reported as vanished.
 
 **A booking that vanishes from a job somebody is already on is reported, and the
 report is stored.** `property_calendars.last_stale_kept` holds it, because the
@@ -371,13 +378,25 @@ promised and then dropped. Whether it should also *notify* is a genuine open
 question rather than an oversight: `NotificationEvent` is a closed list, and
 opening it is meant to be a decision somebody makes out loud.
 
-**A feed is only read while its property is still a live short-term rental.**
-An owner may archive a property or reclassify it as residential once its live
-work is finished; `reconcile` writes `service_type=turnover`, which is a
-category error on a home and refused everywhere else. `calendars._refuse_ineligible`
-is the authority and it sits inside `sync`, so the owner's own "Sync now" button
-gets the same answer as the scheduled pass — `active_calendars` carries the rule
-in SQL too, but only so the pass does not fetch feeds it would then refuse.
+**A feed is only read while its property is still a live short-term rental, and
+while the feed itself is switched on.** `calendars.refuse_ineligible` is the one
+author of the first rule and `sync` is the one gate for both, so the scheduled
+pass, the Sync button and the add endpoint cannot answer differently.
+`active_calendars` carries the same condition in SQL, but only so the pass does
+not fetch feeds it would then refuse.
+
+That single-author arrangement took three review rounds to arrive at, and each
+round the rule was real, written down, and reachable around on one path: first
+`sync` had it and `active_calendars` did not, then `active_calendars` had it and
+the Sync button did not, then the add endpoint carried its own copy that covered
+only the residential half.
+
+**The property is re-read under a lock, with `populate_existing`.** Both halves
+matter and the second is easy to miss: a locking `SELECT` takes the lock but
+still hands back the instance already in the session's identity map, *with its
+old attribute values* — so without it the row is locked and then read stale,
+which is the whole failure. `update_property` takes the same row lock, so a
+reclassification cannot land between the check and the reconcile commit.
 
 **The stale warning is only counted while it is still true.** A completed or
 cancelled job, or one whose checkout has passed, has no booking in the feed
@@ -581,6 +600,17 @@ day-of reminder, the unclaimed alarm, the review reveal, and reading the booking
 calendars. The calendar pass gives each feed its own `try` — one listing site
 having a bad afternoon is exactly when every *other* owner's sync most needs to
 keep working.
+
+**Calendars run last in `run()`, and that order is load-bearing.** Reading feeds
+is the only step that waits on somebody else's server, so everything that owes a
+person something — the reminders, the unclaimed alarm, the review reveal, the
+outbox drain — goes first and cannot be delayed by the network at all. It is
+safe to reorder precisely because a synced booking becomes a *draft*, and a
+draft notifies nobody. The pass also has a whole-pass budget
+(`CALENDAR_PASS_BUDGET`) on top of the per-feed one, since otherwise the worst
+case is the number of feeds times the per-feed deadline; feeds skipped by the
+budget are first in line next time, because `active_calendars` is
+oldest-sync-first.
 `app/tasks/scheduled.py` is their entry point (`python -m app.tasks.scheduled`),
 runs safely as often as you like because of the dedupe key, and drains the
 outbox on the way past. Their three windows (`REMINDER_HOURS_BEFORE`,

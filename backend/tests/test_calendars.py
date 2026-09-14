@@ -1183,3 +1183,249 @@ class TestEveryCallerGetsTheSameRule:
 
         db.expire_all()
         assert db.execute(select(Turnover)).scalars().all() == []
+
+
+# --------------------------------------------------------------------------
+# Third review round — and half of these were my own last round's doing
+#
+# Worth recording rather than quietly fixing: reordering `run()` and adding a
+# pass budget answers a P1 that only existed because the previous fix bounded
+# one feed instead of the pass; the `is_active` and archived-property holes are
+# the eligibility rule I added last round being enforced on one path again; and
+# the canonicalisation below is last round's fragment fix having stopped one
+# spelling short of three.
+# --------------------------------------------------------------------------
+
+
+class TestTheClockWorkComesFirst:
+    def test_feeds_are_read_after_the_work_that_owes_somebody_something(
+        self, db: Session, monkeypatch
+    ) -> None:
+        """**A per-feed deadline does not bound the pass.**
+
+        Fifty slow feeds is fifty times the limit, and while that ran, nobody's
+        reminder, unclaimed alert, review reveal or queued email had started.
+        The reveal is the one scheduled job that is load-bearing: silence
+        becoming a veto because a listing site was slow is not a trade worth
+        making. So the order is the fix, and this pins it.
+        """
+        from app.tasks import scheduled
+
+        order: list[str] = []
+
+        def record(name, value):
+            def _fn(*args, **kwargs):
+                order.append(name)
+                return value
+
+            return _fn
+
+        monkeypatch.setattr(scheduled, "place_unmapped_properties", record("placed", 0))
+        monkeypatch.setattr(scheduled, "send_reminders", record("reminders", 0))
+        monkeypatch.setattr(scheduled, "alert_unclaimed", record("unclaimed", 0))
+        monkeypatch.setattr(scheduled, "reveal_reviews", record("revealed", 0))
+        monkeypatch.setattr(
+            scheduled.notifications, "deliver_pending", record("delivered", 0)
+        )
+        monkeypatch.setattr(scheduled, "sync_calendars", record("calendars", (0, 0)))
+
+        scheduled.run(db)
+
+        assert order.index("calendars") > order.index("revealed")
+        assert order.index("calendars") > order.index("reminders")
+        assert order.index("calendars") > order.index("unclaimed")
+        assert order.index("calendars") > order.index("delivered")
+
+    def test_the_pass_stops_starting_feeds_once_its_budget_is_spent(
+        self, client: TestClient, make_user, db: Session, monkeypatch
+    ) -> None:
+        """Fair because `active_calendars` is oldest-first: a feed skipped here
+        is first in line next pass, so nobody is starved by somebody else's."""
+        from app.tasks import scheduled
+
+        owner = make_user(role="owner")
+        for _ in range(3):
+            _calendar(
+                db,
+                _property(client, owner)["id"],
+                url=f"https://example.test/{uuid.uuid4().hex}.ics",
+            )
+
+        read: list[uuid.UUID] = []
+
+        def slow_sync(session, calendar, **kwargs):
+            read.append(calendar.id)
+            return calendars.SyncResult()
+
+        monkeypatch.setattr(calendars, "sync", slow_sync)
+        # First call sets the deadline, the next is already past it.
+        clock = iter([0.0, 0.0, scheduled.CALENDAR_PASS_BUDGET * 2])
+        monkeypatch.setattr(scheduled, "monotonic", lambda: next(clock))
+
+        scheduled.sync_calendars(db)
+        assert len(read) == 1, "the budget has to stop the loop, not just log"
+
+
+class TestACancelledEventIsNotAStay:
+    def test_a_cancelled_reservation_never_becomes_a_draft(self) -> None:
+        """A provider may keep a cancelled booking in the feed rather than
+        dropping it. Read as live, it becomes a draft for a stay that is not
+        happening — and on later syncs it still looks live, so the job is never
+        even reported as vanished."""
+        feed = _ics(
+            "BEGIN:VEVENT\n"
+            "DTSTART;VALUE=DATE:20991101\n"
+            "DTEND;VALUE=DATE:20991104\n"
+            "UID:called-off\n"
+            "SUMMARY:Reserved\n"
+            "STATUS:CANCELLED\n"
+            "END:VEVENT",
+            _event("real", "20991201", "20991204"),
+        )
+        assert [b.uid for b in calendars.parse(feed)] == ["real"]
+
+
+class TestOneSpellingPerFeed:
+    @pytest.mark.parametrize(
+        "second",
+        [
+            "https://EXAMPLE.test/feed.ics",
+            "https://example.test:443/feed.ics",
+            "https://example.test/feed.ics#again",
+        ],
+    )
+    def test_the_same_request_spelled_differently_is_still_one_feed(
+        self, client: TestClient, make_user, db: Session, second: str
+    ) -> None:
+        """The unique constraint compares strings; the network compares
+        requests. Case, a default port and a fragment are three ways to get two
+        rows for one calendar, and therefore two drafts for every booking."""
+        owner = make_user(role="owner")
+        prop = _property(client, owner)
+
+        first = client.post(
+            f"/api/properties/{prop['id']}/calendars",
+            json={"url": "https://example.test/feed.ics", "label": "Airbnb"},
+            headers=owner["auth"],
+        )
+        assert first.status_code == 201, first.text
+
+        again = client.post(
+            f"/api/properties/{prop['id']}/calendars",
+            json={"url": second, "label": "Airbnb again"},
+            headers=owner["auth"],
+        )
+        assert again.status_code == 409, again.text
+
+    def test_a_token_in_the_path_or_query_is_left_alone(self) -> None:
+        """Canonicalising must not touch the parts that are case-sensitive —
+        listing sites put a token in one of them."""
+        from app.schemas.calendar import CalendarCreate
+
+        url = "https://www.airbnb.com/calendar/ical/AbC123XyZ.ics?s=TokEn"
+        assert CalendarCreate(url=url).url == url
+
+
+class TestSwitchedOffMeansSwitchedOff:
+    def test_the_sync_button_refuses_a_calendar_that_is_turned_off(
+        self, client: TestClient, make_user, db: Session
+    ) -> None:
+        """The scheduled query skipped it; the button did not — so a feed the
+        API describes as off could still create, move and delete drafts."""
+        owner = make_user(role="owner")
+        calendar = _calendar(db, _property(client, owner)["id"])
+        calendar.is_active = False
+        db.commit()
+
+        with pytest.raises(calendars.CalendarError) as refused:
+            calendars.sync(db, calendar, client=_fake_client(_feed_for(10)))
+        assert "switched off" in refused.value.detail
+
+        db.expire_all()
+        assert db.execute(select(Turnover)).scalars().all() == []
+
+
+class TestAddingAFeedAnswersHonestly:
+    def test_an_archived_property_is_refused_rather_than_answered_201(
+        self, client: TestClient, make_user, db: Session
+    ) -> None:
+        """**The add route carried its own copy of the eligibility rule** and it
+        covered only the residential case. An archived rental fell through: the
+        calendar was committed, `sync` refused *after* the block that records a
+        fetch failure, and the handler swallowed it as though the reason had
+        been written to the row. The owner got 201, no error, and no jobs.
+        """
+        owner = make_user(role="owner")
+        prop = _property(client, owner)
+
+        row = db.get(Property, uuid.UUID(prop["id"]))
+        row.is_active = False
+        db.commit()
+
+        resp = client.post(
+            f"/api/properties/{prop['id']}/calendars",
+            json={"url": "https://example.test/a.ics", "label": "Airbnb"},
+            headers=owner["auth"],
+        )
+        assert resp.status_code == 409, resp.text
+        assert "archived" in resp.json()["detail"]
+
+        db.expire_all()
+        assert calendars.for_property(db, uuid.UUID(prop["id"])) == []
+
+    def test_a_home_is_still_refused_by_the_same_rule(
+        self, client: TestClient, make_user, db: Session
+    ) -> None:
+        owner = make_user(role="owner")
+        prop = _property(client, owner, property_type="residential")
+
+        resp = client.post(
+            f"/api/properties/{prop['id']}/calendars",
+            json={"url": "https://example.test/a.ics", "label": "Airbnb"},
+            headers=owner["auth"],
+        )
+        assert resp.status_code == 409, resp.text
+
+
+class TestEligibilityIsReadFresh:
+    def test_a_reclassification_in_flight_is_not_missed(
+        self, client: TestClient, make_user, db: Session
+    ) -> None:
+        """**The lock is only half of it.**
+
+        `sync` runs after an ownership check has already loaded the property, so
+        the instance is in the session's identity map. A locking `SELECT` takes
+        the lock — and still returns that cached instance with its *old*
+        attributes, unless `populate_existing` is set. Without it the property
+        is locked and then read stale, which is the exact case the re-read is
+        for: an owner reclassifying to residential while a feed request is in
+        flight, and the feed then writing a rental turnover onto a home.
+
+        Another session stands in for that PATCH here, because the failure does
+        not need the two to interleave — only for this one to have looked once
+        already.
+        """
+        from app.db import SessionLocal
+
+        owner = make_user(role="owner")
+        prop = _property(client, owner)
+        calendar = _calendar(db, prop["id"])
+
+        # Load it into this session, the way the real call path does.
+        loaded = db.get(Property, uuid.UUID(prop["id"]))
+        assert loaded.property_type is PropertyType.SHORT_TERM_RENTAL
+
+        elsewhere = SessionLocal()
+        try:
+            other = elsewhere.get(Property, uuid.UUID(prop["id"]))
+            other.property_type = PropertyType.RESIDENTIAL
+            elsewhere.commit()
+        finally:
+            elsewhere.close()
+
+        with pytest.raises(calendars.CalendarError):
+            calendars.sync(db, calendar, client=_fake_client(_feed_for(10)))
+
+        db.rollback()
+        db.expire_all()
+        assert db.execute(select(Turnover)).scalars().all() == []

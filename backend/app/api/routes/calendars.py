@@ -21,7 +21,7 @@ from app.api.deps import require_role
 from app.api.routes.properties import get_owned_property
 from app.db import get_db
 from app.models.calendar import PropertyCalendar
-from app.models.enums import PropertyType, UserRole
+from app.models.enums import UserRole
 from app.models.user import User
 from app.schemas.calendar import (
     CalendarCreate,
@@ -75,14 +75,19 @@ def add_calendar(
     """
     prop = get_owned_property(property_id, db, owner)
 
-    if prop.property_type is PropertyType.RESIDENTIAL:
+    # **Asked, not re-derived** — `calendars.refuse_ineligible` is the one
+    # author, so this endpoint, the Sync button and the scheduled pass cannot
+    # give three answers. This route used to carry its own copy that checked
+    # only the residential case, and the archived case fell through it: the
+    # calendar was committed, `sync` then refused *after* the block that records
+    # a fetch failure, and the handler below swallowed it as though the reason
+    # had been written to the row. The owner got a 201, no error, and no jobs.
+    try:
+        calendars.refuse_ineligible(prop)
+    except calendars.CalendarError as refused:
         raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=(
-                "A booking calendar describes guests arriving and leaving, which "
-                "a home does not have. Post its cleans directly instead."
-            ),
-        )
+            status_code=status.HTTP_409_CONFLICT, detail=refused.detail
+        ) from None
 
     calendar = PropertyCalendar(
         property_id=prop.id, url=payload.url, label=payload.label
