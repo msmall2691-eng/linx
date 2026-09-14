@@ -72,8 +72,19 @@ class PropertyUpdate(BaseModel):
     postal_code: str | None = Field(default=None, min_length=3, max_length=12)
     lat: Decimal | None = Field(default=None, ge=-90, le=90)
     lng: Decimal | None = Field(default=None, ge=-180, le=180)
+    #: Editable, because a property genuinely can change hands or change use —
+    #: and because every property that existed before the type column did is
+    #: labelled a rental whether or not it is one. Leaving it off the update
+    #: shape meant the form sent it, pydantic dropped it, and the endpoint
+    #: answered 200 with the old value: a save that reports success and
+    #: changes nothing, which is the worst way for this to fail.
+    property_type: PropertyType | None = None
+
     bedrooms: int | None = Field(default=None, ge=0, le=50)
     bathrooms: Decimal | None = Field(default=None, ge=0, le=50)
+    #: Same story. An owner who looks it up and types it in must not be told it
+    #: was saved when it was thrown away.
+    square_feet: int | None = Field(default=None, gt=0, le=100_000)
     access_notes: str | None = None
     cleaning_notes: str | None = None
     is_active: bool | None = None

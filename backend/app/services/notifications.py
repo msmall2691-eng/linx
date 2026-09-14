@@ -47,6 +47,8 @@ from app.models.cleaner_profile import CleanerProfile
 from app.models.enums import (
     NotificationEvent,
     NotificationStatus,
+    PropertyType,
+    ServiceType,
     TurnoverStatus,
     UserRole,
 )
@@ -356,6 +358,18 @@ def _money(cents: int) -> str:
     return f"{sign}${dollars:,}.{remainder:02d}"
 
 
+#: How a scope of work reads in a message. The badge in the UI uses the same
+#: words (`frontend/src/components/JobScope.jsx`); a cleaner who was emailed
+#: about a "deep clean" and finds "Standard clean" on the board has been told
+#: two different things about the same job.
+SCOPE_WORDS = {
+    ServiceType.TURNOVER: "turnover",
+    ServiceType.STANDARD: "standard clean",
+    ServiceType.DEEP: "deep clean",
+    ServiceType.MOVE_OUT: "move-out clean",
+}
+
+
 def _where(prop: Property) -> str:
     return f"{prop.nickname} — {prop.city}, {prop.state}"
 
@@ -373,21 +387,40 @@ def _posting_scope(turnover: Turnover) -> str:
 
 
 def turnover_posted(db: Session, turnover: Turnover, prop: Property) -> list[Notification]:
-    """A new job landed inside somebody's service radius."""
+    """A new job landed inside somebody's service radius.
+
+    **The wording follows the kind of place.** A home has no next guest, so an
+    email about one must not ask a cleaner to note when the next guest arrives
+    — the fields are not merely empty, they are the wrong question, and a
+    cleaner reading "next checkin: none booked yet" about somebody's house is
+    being told it is an empty rental.
+    """
     recipients = cleaners_in_range(db, prop)
+    is_home = prop.property_type is PropertyType.RESIDENTIAL
+    noun = "job" if is_home else "turnover"
+
     return queue(
         db,
         NotificationEvent.TURNOVER_POSTED,
         recipients=recipients,
-        subject=f"New turnover near you: {_where(prop)}",
+        subject=f"New {noun} near you: {_where(prop)}",
         body=(
-            f"A turnover was just posted in your service area.\n\n"
+            f"A {SCOPE_WORDS[turnover.service_type]} was just posted in your "
+            "service area.\n\n"
             f"Where: {_where(prop)}\n"
-            f"Checkout: {_when(turnover.checkout_at)}\n"
             + (
-                f"Next checkin: {_when(turnover.checkin_at)}\n"
-                if turnover.checkin_at
-                else "Next checkin: none booked yet\n"
+                f"Scheduled for: {_when(turnover.checkout_at)}\n"
+                if is_home
+                else f"Checkout: {_when(turnover.checkout_at)}\n"
+            )
+            + (
+                ""
+                if is_home
+                else (
+                    f"Next checkin: {_when(turnover.checkin_at)}\n"
+                    if turnover.checkin_at
+                    else "Next checkin: none booked yet\n"
+                )
             )
             + (
                 f"Owner's budget: {_money(turnover.owner_budget_cents)}\n"

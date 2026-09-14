@@ -246,6 +246,20 @@ def update_turnover(
     if payload.clear_checkin:
         turnover.checkin_at = None
 
+    # **The same rule as on create, because a rule enforced on only one path is
+    # not a rule.** Without this, a home could be given a checkin by PATCH,
+    # `apply_derived_fields` below would recompute on it, and the job would
+    # reach the `same_day` rung that a home is supposed to have no way of
+    # reaching — presenting somebody's house as a guest turnover.
+    try:
+        turnover.checkin_at = turnover_rules.checkin_for(
+            turnover.property, turnover.checkin_at
+        )
+    except turnover_rules.JobRefused as refused:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=refused.detail
+        ) from None
+
     if turnover.checkin_at is not None and turnover.checkin_at < turnover.checkout_at:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,

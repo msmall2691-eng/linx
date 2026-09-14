@@ -60,3 +60,57 @@ export function PropertySpecs({ property, className = '' }) {
     </p>
   )
 }
+
+/**
+ * The timing of a job, in the words that match the kind of place it is.
+ *
+ * **A home does not have a next guest**, so a card that says "Next checkin:
+ * None booked" under a scope badge reading "Deep clean" is telling somebody
+ * their house is an empty rental between bookings. The fields are not just
+ * empty — they are the wrong question.
+ *
+ * One component so the wording has one author. The board, the cleaner's job
+ * card and the owner's detail page all render this, and none of them carries
+ * its own idea of what a checkin means.
+ *
+ * Returns the `<div>` items for an existing `<dl>`, so each page keeps its own
+ * grid.
+ */
+function Field({ label, children, className = '' }) {
+  return (
+    <div className={className}>
+      <dt className="text-xs font-medium uppercase tracking-wide text-slate-500">{label}</dt>
+      <dd className="mt-0.5 text-sm">{children}</dd>
+    </div>
+  )
+}
+
+export function JobSchedule({ job, propertyType, timeZone, formatDateTime, formatTurnaround }) {
+  const isHome = propertyType === 'residential'
+
+  if (isHome) {
+    // One field, because there is exactly one time that matters. No window to
+    // measure and no second booking to measure it against.
+    return (
+      <Field label="Scheduled for" className="sm:col-span-2">
+        {formatDateTime(job.checkout_at, timeZone)}
+      </Field>
+    )
+  }
+
+  return (
+    <>
+      <Field label="Checkout">{formatDateTime(job.checkout_at, timeZone)}</Field>
+      <Field label="Next checkin">
+        {job.checkin_at ? (
+          formatDateTime(job.checkin_at, timeZone)
+        ) : (
+          <span className="text-slate-400">None booked yet</span>
+        )}
+      </Field>
+      <Field label="The window" className="sm:col-span-2">
+        {formatTurnaround(job.checkout_at, job.checkin_at)}
+      </Field>
+    </>
+  )
+}

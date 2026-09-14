@@ -317,3 +317,237 @@ class TestTheExistingProductIsUntouched:
 
         row = db.get(Turnover, uuid.UUID(posted.json()["id"]))
         assert row.service_type is ServiceType.TURNOVER
+
+
+# --------------------------------------------------------------------------
+# What the review caught after it merged
+# --------------------------------------------------------------------------
+
+
+class TestTheRuleHoldsOnEditToo:
+    """**A rule enforced on one path is not a rule.**
+
+    `checkin_for` ran on create and nowhere else, so a home could be given a
+    next guest by PATCH. `apply_derived_fields` would then recompute on it and
+    the job would reach `same_day` — the rung a home is supposed to have no way
+    of reaching — presenting somebody's house as a guest turnover.
+
+    Found by a review bot after the change had already merged, which is the
+    argument for the bot: the create path had a test, and the test proved
+    exactly as much as the guard it was written against.
+    """
+
+    def test_a_home_cannot_be_given_a_checkin_by_patch(
+        self, client: TestClient, make_user
+    ) -> None:
+        owner = make_user(role="owner")
+        home = _property(client, owner, property_type="residential")
+        job = _post_job(client, owner, home["id"]).json()
+
+        resp = client.patch(
+            f"/api/turnovers/{job['id']}",
+            json={
+                "checkin_at": (
+                    datetime.now(timezone.utc) + timedelta(days=5, hours=4)
+                ).isoformat()
+            },
+            headers=owner["auth"],
+        )
+        assert resp.status_code == 409
+        assert "next guest" in resp.json()["detail"]
+
+    def test_the_home_job_is_unchanged_after_the_refusal(
+        self, client: TestClient, make_user, db: Session
+    ) -> None:
+        """A refused edit must not half-apply. The row keeps its old schedule
+        and, critically, never acquires the same-day flag."""
+        owner = make_user(role="owner")
+        home = _property(client, owner, property_type="residential")
+        job = _post_job(client, owner, home["id"]).json()
+
+        client.patch(
+            f"/api/turnovers/{job['id']}",
+            json={
+                "checkin_at": (
+                    datetime.now(timezone.utc) + timedelta(days=5, hours=1)
+                ).isoformat()
+            },
+            headers=owner["auth"],
+        )
+
+        db.expire_all()
+        row = db.get(Turnover, uuid.UUID(job["id"]))
+        assert row.checkin_at is None
+        assert row.is_same_day is False
+        assert row.urgency is not TurnoverUrgency.SAME_DAY
+
+    def test_a_rental_can_still_be_rescheduled_with_a_checkin(
+        self, client: TestClient, make_user
+    ) -> None:
+        """The guard must not become a blanket refusal — editing a rental's
+        schedule is the ordinary case and has to keep working."""
+        owner = make_user(role="owner")
+        rental = _property(client, owner)
+        job = _post_job(client, owner, rental["id"]).json()
+
+        checkin = datetime.now(timezone.utc) + timedelta(days=5, hours=5)
+        resp = client.patch(
+            f"/api/turnovers/{job['id']}",
+            json={"checkin_at": checkin.isoformat()},
+            headers=owner["auth"],
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["checkin_at"] is not None
+
+
+class TestEditingAProperty:
+    """**A save that reports success and changes nothing is the worst failure.**
+
+    `PropertyUpdate` declared neither `property_type` nor `square_feet`, while
+    the form — which is reused for editing — sent both. Pydantic dropped them
+    and the endpoint answered 200 with the old values. An owner who looked up
+    their square footage and typed it in was told it was saved.
+    """
+
+    def test_square_footage_can_be_added_later(
+        self, client: TestClient, make_user
+    ) -> None:
+        owner = make_user(role="owner")
+        created = _property(client, owner)
+        assert created["square_feet"] is None
+
+        resp = client.patch(
+            f"/api/properties/{created['id']}",
+            json={"square_feet": 1450},
+            headers=owner["auth"],
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["square_feet"] == 1450, (
+            "the endpoint reported success and kept the old value"
+        )
+
+    def test_a_property_can_be_reclassified(
+        self, client: TestClient, make_user
+    ) -> None:
+        """**Every property that predates the type column is labelled a rental**,
+        whether or not it is one. Without this, they could never be corrected.
+        """
+        owner = make_user(role="owner")
+        created = _property(client, owner)
+        assert created["property_type"] == "short_term_rental"
+
+        resp = client.patch(
+            f"/api/properties/{created['id']}",
+            json={"property_type": "residential"},
+            headers=owner["auth"],
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["property_type"] == "residential"
+
+    def test_reclassifying_is_refused_while_work_is_scheduled(
+        self, client: TestClient, make_user
+    ) -> None:
+        """Flipping the type under live jobs would strand them.
+
+        A rental's turnovers carry `service_type=turnover`, which a home is not
+        allowed to have — so the jobs would become ones that could never have
+        been posted, on a screen asking about guests for a house somebody lives
+        in. Refused while anything is live; finish or cancel them first.
+        """
+        owner = make_user(role="owner")
+        rental = _property(client, owner)
+        _post_job(client, owner, rental["id"])
+
+        resp = client.patch(
+            f"/api/properties/{rental['id']}",
+            json={"property_type": "residential"},
+            headers=owner["auth"],
+        )
+        assert resp.status_code == 409
+        assert "still scheduled" in resp.json()["detail"]
+
+    def test_an_unrelated_edit_is_unaffected_by_the_guard(
+        self, client: TestClient, make_user
+    ) -> None:
+        """The guard is about *changing* the type. Renaming a property with
+        live jobs must still work."""
+        owner = make_user(role="owner")
+        rental = _property(client, owner)
+        _post_job(client, owner, rental["id"])
+
+        resp = client.patch(
+            f"/api/properties/{rental['id']}",
+            json={"nickname": "The Cottage"},
+            headers=owner["auth"],
+        )
+        assert resp.status_code == 200, resp.text
+
+    def test_resending_the_same_type_is_not_a_change(
+        self, client: TestClient, make_user
+    ) -> None:
+        """The form submits every field. Sending the type it already has must
+        not trip a guard about changing it."""
+        owner = make_user(role="owner")
+        rental = _property(client, owner)
+        _post_job(client, owner, rental["id"])
+
+        resp = client.patch(
+            f"/api/properties/{rental['id']}",
+            json={"property_type": "short_term_rental", "nickname": "Same type"},
+            headers=owner["auth"],
+        )
+        assert resp.status_code == 200, resp.text
+
+
+class TestTheEmailReadsRight:
+    def test_a_home_is_not_described_as_a_turnover(
+        self, client: TestClient, make_user, make_cleaner, db: Session
+    ) -> None:
+        """**The fields are not merely empty — they are the wrong question.**
+
+        A cleaner reading "next checkin: none booked yet" about somebody's
+        house is being told it is an empty rental between guests.
+        """
+        from app.models.notification import Notification
+        from app.models.enums import NotificationEvent
+        from sqlalchemy import select
+
+        make_cleaner(cleared=True)
+        owner = make_user(role="owner")
+        home = _property(client, owner, property_type="residential")
+        _post_job(client, owner, home["id"], service_type="deep")
+
+        posted = db.execute(
+            select(Notification).where(
+                Notification.event == NotificationEvent.TURNOVER_POSTED
+            )
+        ).scalars().all()
+        assert posted, "nobody was told about a job in their area"
+
+        body = posted[0].body
+        assert "checkin" not in body.lower()
+        assert "Scheduled for:" in body
+        assert "deep clean" in body
+        assert "turnover" not in posted[0].subject.lower()
+
+    def test_a_rental_still_reads_as_a_turnover(
+        self, client: TestClient, make_user, make_cleaner, db: Session
+    ) -> None:
+        from app.models.notification import Notification
+        from app.models.enums import NotificationEvent
+        from sqlalchemy import select
+
+        make_cleaner(cleared=True)
+        owner = make_user(role="owner")
+        rental = _property(client, owner)
+        _post_job(client, owner, rental["id"])
+
+        posted = db.execute(
+            select(Notification).where(
+                Notification.event == NotificationEvent.TURNOVER_POSTED
+            )
+        ).scalars().all()
+        body = posted[0].body
+        assert "Checkout:" in body
+        assert "checkin" in body.lower()
+        assert "turnover" in posted[0].subject.lower()
