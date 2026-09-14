@@ -362,6 +362,8 @@ def _as_date(value: object) -> date | None:
     property's policy, not the calendar — see the module docstring.
     """
     if isinstance(value, datetime):
+        if value.tzinfo is not None:
+            return value.astimezone(region_timezone()).date()
         return value.date()
     if isinstance(value, date):
         return value

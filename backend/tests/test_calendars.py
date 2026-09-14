@@ -1429,3 +1429,37 @@ class TestEligibilityIsReadFresh:
         db.rollback()
         db.expire_all()
         assert db.execute(select(Turnover)).scalars().all() == []
+
+
+class TestADayIsARegionDay:
+    def test_a_utc_timestamp_late_at_night_is_not_read_as_tomorrow(self) -> None:
+        """**The repo's own rule, applied where the day enters the system.**
+
+        A day is answered in `REGION_TIMEZONE`, never UTC — that is what the
+        urgency ladder already lives by. `2026-09-15T02:00Z` is the evening of
+        the 14th in Portland, so reading the day straight off the UTC timestamp
+        schedules the clean a day late, against a checkout time taken from the
+        property's local policy.
+        """
+        feed = _ics(
+            "BEGIN:VEVENT\n"
+            "DTSTART:20260910T150000Z\n"
+            "DTEND:20260915T020000Z\n"
+            "UID:aware\n"
+            "SUMMARY:Reserved\n"
+            "END:VEVENT"
+        )
+        booking = calendars.parse(feed)[0]
+        assert booking.departs_on == date(2026, 9, 14)
+
+    def test_a_floating_time_keeps_the_day_it_was_written_with(self) -> None:
+        """No zone to convert from, and its literal date is what was meant."""
+        feed = _ics(
+            "BEGIN:VEVENT\n"
+            "DTSTART:20260910T150000\n"
+            "DTEND:20260915T020000\n"
+            "UID:floating\n"
+            "SUMMARY:Reserved\n"
+            "END:VEVENT"
+        )
+        assert calendars.parse(feed)[0].departs_on == date(2026, 9, 15)
