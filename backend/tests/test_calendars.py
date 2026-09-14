@@ -2068,3 +2068,115 @@ class TestTheSuccessPathSurvivesTheFeedVanishing:
         )
         assert resp.status_code == 409, resp.text
         assert "removed" in resp.json()["detail"]
+
+
+# --------------------------------------------------------------------------
+# Round eight — identity across a reconnect, and freshness across an overlap
+# --------------------------------------------------------------------------
+
+
+class TestAJobKeepsItsIdentityAcrossAReconnect:
+    def test_re_adding_the_same_feed_adopts_its_jobs_rather_than_duplicating(
+        self, client: TestClient, make_user, db: Session
+    ) -> None:
+        """**On the documented flow, not an exotic one.**
+
+        The feed URL is deliberately not editable in place, so removing and
+        re-adding *is* how an owner changes it. Removal is `ON DELETE SET NULL`
+        because a job outlives the calendar that proposed it — but that erases
+        the calendar half of its identity, so the replacement feed found nothing
+        and proposed every booking again. One stay, two jobs.
+        """
+        owner = make_user(role="owner")
+        prop = _property(client, owner)
+        feed = _feed_for(10)
+
+        first = _calendar(db, prop["id"])
+        assert calendars.sync(db, first, client=_fake_client(feed)).created == 1
+
+        db.delete(first)
+        db.commit()
+        db.expire_all()
+        orphan = db.execute(select(Turnover)).scalars().one()
+        assert orphan.source_calendar_id is None, "the job outlives its calendar"
+
+        second = _calendar(db, prop["id"], url="https://example.test/b.ics")
+        result = calendars.sync(db, second, client=_fake_client(feed))
+
+        assert result.created == 0
+        assert result.adopted == 1
+
+        db.expire_all()
+        turnovers = db.execute(select(Turnover)).scalars().all()
+        assert len(turnovers) == 1, "one booking is one job"
+        assert turnovers[0].source_calendar_id == second.id
+
+    def test_adoption_does_not_reach_across_properties(
+        self, client: TestClient, make_user, db: Session
+    ) -> None:
+        """Identity is scoped: another owner's orphan with a colliding event id
+        is not this feed's to claim."""
+        owner = make_user(role="owner")
+        mine = _property(client, owner)
+        theirs = _property(client, owner)
+        feed = _feed_for(10)
+
+        elsewhere = _calendar(db, theirs["id"], url="https://example.test/t.ics")
+        calendars.sync(db, elsewhere, client=_fake_client(feed))
+        db.delete(elsewhere)
+        db.commit()
+
+        ours = _calendar(db, mine["id"])
+        result = calendars.sync(db, ours, client=_fake_client(feed))
+        assert result.adopted == 0
+        assert result.created == 1
+
+
+class TestTheNewerReadWins:
+    def test_a_slow_fetch_cannot_overwrite_a_newer_one(
+        self, client: TestClient, make_user, db: Session
+    ) -> None:
+        """**The lock serialises the writes; it does not make a snapshot
+        current.** A manual sync and the scheduled pass can overlap, and the
+        slower fetch finishes second holding *older* bookings — reconciling
+        those would recreate a draft the newer pass correctly removed, or put
+        moved dates back.
+
+        The newer sync runs *inside* the slow one's fetch, which is what makes
+        this the real ordering rather than two calls in sequence.
+        """
+        from app.db import SessionLocal
+
+        owner = make_user(role="owner")
+        prop = _property(client, owner)
+        calendar = _calendar(db, prop["id"])
+        calendar_id = calendar.id
+
+        calendars.sync(db, calendar, client=_fake_client(_feed_for(10)))
+        db.expire_all()
+        assert len(db.execute(select(Turnover)).scalars().all()) == 1
+
+        def slow_handler(request: httpx.Request) -> httpx.Response:
+            # While we are "still reading", a newer pass reads the feed, finds
+            # the guest has cancelled, and commits that.
+            elsewhere = SessionLocal()
+            try:
+                fresh = elsewhere.get(PropertyCalendar, calendar_id)
+                calendars.sync(
+                    elsewhere,
+                    fresh,
+                    client=_fake_client(_ics(_event("other", "20990101", "20990104"))),
+                )
+            finally:
+                elsewhere.close()
+            # ...and only now does our older snapshot come back.
+            return httpx.Response(200, text=_feed_for(10))
+
+        stale = httpx.Client(transport=httpx.MockTransport(slow_handler))
+        result = calendars.sync(db, calendar, client=stale)
+
+        assert result.created == 0, "a stale snapshot must not recreate the draft"
+        db.expire_all()
+        assert db.execute(select(Turnover)).scalars().all() == [], (
+            "the newer read said the booking is gone, and it stays gone"
+        )

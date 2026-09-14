@@ -242,6 +242,9 @@ class SyncResult:
     #: because somebody had already acted on them. The number an owner needs to
     #: see: a guest cancelled and a cleaner may still be coming.
     stale_but_kept: int = 0
+    #: Jobs from a previously removed feed that this one has taken back over,
+    #: rather than proposing a second time. See `reconcile`.
+    adopted: int = 0
 
 
 # --------------------------------------------------------------------------
@@ -671,6 +674,31 @@ def reconcile(
         turnover = existing.pop(job.external_ref, None)
 
         if turnover is None:
+            # **A job outlives the calendar that proposed it, and so should its
+            # identity.** Removing a feed is `ON DELETE SET NULL`, deliberately:
+            # the turnovers stay. But that erases the calendar half of their
+            # identity, so re-adding the same feed — which is the *documented*
+            # way to change a feed's URL, since the URL is not editable in
+            # place — found nothing and proposed every booking again. One stay,
+            # two jobs, and the owner deletes the difference by hand.
+            #
+            # Scoped to the same property and the same event id, and only rows
+            # no calendar currently claims.
+            turnover = db.execute(
+                select(Turnover)
+                .where(
+                    Turnover.property_id == prop.id,
+                    Turnover.source_calendar_id.is_(None),
+                    Turnover.external_ref == job.external_ref,
+                )
+                .with_for_update(key_share=True)
+                .execution_options(populate_existing=True)
+            ).scalars().first()
+            if turnover is not None:
+                turnover.source_calendar_id = calendar.id
+                result.adopted += 1
+
+        if turnover is None:
             turnover = Turnover(
                 property_id=prop.id,
                 checkout_at=job.checkout_at,
@@ -930,6 +958,8 @@ def sync(
             raise CalendarError("That property no longer exists.")
         _gate(calendar, prop)
 
+        # When the fetch began, so a slow read cannot overwrite a fast one.
+        began = datetime.now(tz=region_timezone())
         text = _fetch_within(calendar.url, client=client, seconds=MAX_FEED_SECONDS)
         bookings = parse(text)
 
@@ -940,6 +970,20 @@ def sync(
             raise CalendarError("That property no longer exists.")
         calendar = calendar_locked
         _gate(calendar, prop)
+
+        # **The lock serialises the writes; it does not make this snapshot
+        # current.** A manual sync and the scheduled pass can overlap, and the
+        # slower fetch finishes second holding *older* bookings — reconciling
+        # those would recreate a draft the newer pass correctly removed, or put
+        # moved dates back. Whoever read the feed most recently wins, which is
+        # the only ordering that means anything here.
+        if calendar.last_synced_at is not None and calendar.last_synced_at > began:
+            logger.info(
+                "calendar %s: discarding a snapshot older than the last sync",
+                calendar.id,
+            )
+            db.commit()
+            return SyncResult()
 
         result = reconcile(
             db, calendar, jobs_for(bookings, prop, now=moment), now=moment

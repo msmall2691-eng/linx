@@ -306,7 +306,12 @@ one sentence: **linx owns the turnover; the listing site owns the booking.**
    goes, because nothing was staffed for it. A posted or awarded job stays and
    is *reported* — a guest cancelling does not get to cancel a cleaner.
 4. **Identity is the event's UID *and* its RECURRENCE-ID, not its dates** —
-   unique on `(source_calendar_id, external_ref)`. A booking whose dates move is
+   unique on `(source_calendar_id, external_ref)`. **It survives the calendar
+   being removed**: deleting a feed is `ON DELETE SET NULL` because a job
+   outlives the calendar that proposed it, and re-adding the same feed is the
+   *documented* way to change its URL — so `reconcile` adopts an orphan on the
+   same property carrying the same event id rather than proposing the booking a
+   second time. Without that, remove-and-re-add turned one stay into two jobs. A booking whose dates move is
    one booking; without that it becomes a second job while the first sits
    orphaned. The RECURRENCE-ID half is iCalendar's own rule rather than a
    workaround: an overridden occurrence legitimately repeats its parent's UID,
@@ -426,6 +431,13 @@ already in the session's identity map, *with its old attribute values* — so
 without it the row is locked and then read stale, which is the whole failure.
 Property first, then calendar, always: a consistent lock order is what stops two
 paths that take both from deadlocking. `update_property` takes the same row lock.
+
+**The newest read wins, and the lock does not decide that.** A lock serialises
+writes; it says nothing about which snapshot is current. A manual sync and the
+scheduled pass can overlap, and the slower fetch commits second holding *older*
+bookings — which would recreate a draft the newer pass correctly removed, or put
+moved dates back. `sync` records when its fetch began and discards a snapshot
+older than the calendar's last successful read.
 
 **Every `CalendarError` out of `sync` leaves its reason on the row**, from any
 step, via one handler that rolls back first. A gate refusal once escaped the
