@@ -31,6 +31,7 @@ from app.models import (
     Turnover,
     TurnoverStatus,
 )
+from app.db import SessionLocal
 from app.services import delivery, notifications
 from app.tasks import scheduled
 
@@ -129,6 +130,42 @@ class TestTheEventsThatHaveTriggers:
 
         client.post(f"/api/turnovers/{created['id']}/publish", headers=owner["auth"])
         assert cleaner["user"]["email"] in _to(db, NotificationEvent.TURNOVER_POSTED)
+
+    def test_a_job_that_comes_back_on_the_bench_is_posted_again(
+        self, client: TestClient, make_cleaner, make_open_turnover, db: Session
+    ) -> None:
+        """The re-post half of the cancellation policy, as a notification.
+
+        Flipping the status back to OPEN puts the job on the board; it does not
+        put it in front of anybody. A cleaner who was told when it was first
+        posted — and who did not take it — must hear about it again, because the
+        turnover-id-only dedupe key would otherwise swallow the one posting that
+        cannot wait for somebody to refresh a page.
+        """
+        winner = make_cleaner(cleared=True)
+        bystander = make_cleaner(cleared=True)
+        job = make_open_turnover()
+
+        # The bystander is told when it is first posted, and does not bid.
+        assert bystander["user"]["email"] in _to(db, NotificationEvent.TURNOVER_POSTED)
+        first_time = len(_rows(db, NotificationEvent.TURNOVER_POSTED))
+
+        bid = _bid(client, winner, job["turnover"]["id"])
+        client.post(
+            f"/api/turnovers/{job['turnover']['id']}/bids/{bid['id']}/accept",
+            headers=job["owner"]["auth"],
+        )
+        # And then the cleaner backs out.
+        client.post(
+            f"/api/board/jobs/{job['turnover']['id']}/cancel",
+            json={"reason": "Cannot make it after all."},
+            headers=winner["auth"],
+        )
+
+        rows = _rows(db, NotificationEvent.TURNOVER_POSTED)
+        assert len(rows) > first_time, "the re-post reached nobody"
+        assert bystander["user"]["email"] in _to(db, NotificationEvent.TURNOVER_POSTED)
+        assert len({row.dedupe_key for row in rows}) == len(rows)
 
     def test_a_bid_tells_the_owner(
         self, client: TestClient, make_cleaner, make_open_turnover, db: Session
@@ -354,6 +391,87 @@ class TestTheOutbox:
 
         assert _rows(db, NotificationEvent.BID_ACCEPTED)[0].status is NotificationStatus.SENT
         assert _rows(db, NotificationEvent.BID_DECLINED)[0].status is NotificationStatus.FAILED
+
+    def test_two_drains_at_once_do_not_send_the_same_thing_twice(
+        self, client: TestClient, make_cleaner, make_open_turnover, db: Session, monkeypatch
+    ) -> None:
+        """The dedupe key makes the row unique; it does not make the send once.
+
+        Every request drains the outbox now, so two drains overlapping is the
+        ordinary case — an owner accepting a bid while somebody else places one.
+        Without the claim both drains select the same pending rows and both send
+        them, and the person gets the same email twice.
+
+        Two real connections, because one session cannot race itself: the first
+        claims the row and has not sent it yet; the second must find nothing.
+        """
+        job = make_open_turnover()
+        cleaner = make_cleaner(cleared=True)
+        _bid(client, cleaner, job["turnover"]["id"])
+
+        row = _rows(db, NotificationEvent.BID_RECEIVED)[0]
+        row.status = NotificationStatus.PENDING
+        row.attempted_at = None
+        row.failure_message = None
+        db.commit()
+
+        sent: list[delivery.Outgoing] = []
+
+        class Working(delivery.Sender):
+            delivers = True
+
+            def send(self, message: delivery.Outgoing) -> None:
+                sent.append(message)
+
+        monkeypatch.setattr(delivery, "get_sender", lambda: Working())
+
+        first, second = SessionLocal(), SessionLocal()
+        try:
+            claimed = notifications._claim(first, 100)
+            assert len(claimed) == 1, "the first drain did not take the row"
+
+            # The second drain arrives while the first is still mid-send.
+            assert notifications.deliver_pending(second) == 0
+        finally:
+            first.close()
+            second.close()
+
+        assert sent == [], "the second drain sent a row the first had claimed"
+
+    def test_a_send_that_died_mid_flight_is_not_blindly_resent(
+        self, client: TestClient, make_cleaner, make_open_turnover, db: Session, monkeypatch
+    ) -> None:
+        """Guardrail 2's rule, applied to a send.
+
+        An attempted row with no outcome is not assumed failed any more than it
+        is assumed successful. Assuming failure is how somebody gets the same
+        message twice, and the row is left visibly attempted for a person to
+        look at instead.
+        """
+        job = make_open_turnover()
+        cleaner = make_cleaner(cleared=True)
+        _bid(client, cleaner, job["turnover"]["id"])
+
+        row = _rows(db, NotificationEvent.BID_RECEIVED)[0]
+        row.status = NotificationStatus.PENDING
+        row.attempted_at = datetime.now(timezone.utc)
+        row.failure_message = None
+        db.commit()
+
+        sent: list[delivery.Outgoing] = []
+
+        class Working(delivery.Sender):
+            delivers = True
+
+            def send(self, message: delivery.Outgoing) -> None:
+                sent.append(message)
+
+        monkeypatch.setattr(delivery, "get_sender", lambda: Working())
+        assert notifications.deliver_pending(db) == 0
+        assert sent == []
+
+        row = _rows(db, NotificationEvent.BID_RECEIVED)[0]
+        assert row.status is NotificationStatus.PENDING, "still visible for review"
 
     def test_the_scheduled_job_drains_what_a_request_left_behind(
         self, client: TestClient, make_cleaner, make_open_turnover, db: Session, monkeypatch

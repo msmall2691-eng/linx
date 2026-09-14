@@ -35,7 +35,7 @@ import logging
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import Float, cast, select
+from sqlalchemy import Float, cast, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -127,6 +127,30 @@ def cleaners_in_range(db: Session, prop: Property) -> list[User]:
 # --------------------------------------------------------------------------
 
 
+#: Postgres SQLSTATE for a unique-constraint violation.
+_UNIQUE_VIOLATION = "23505"
+
+#: The only unique constraint on `notifications` — the dedupe key.
+_DEDUPE_CONSTRAINT = "uq_notifications_dedupe_key"
+
+
+def _is_already_queued(error: IntegrityError) -> bool:
+    """True only when the dedupe key is doing its job.
+
+    Any other `IntegrityError` means a notification was **lost**, not
+    suppressed, and the two must never look the same. "Duplicates are as bad as
+    misses" cuts both ways, and a miss that logs nothing is the worse half —
+    it is precisely the failure this module exists to prevent.
+    """
+    orig = error.orig
+    if getattr(orig, "sqlstate", None) != _UNIQUE_VIOLATION:
+        return False
+    constraint = getattr(getattr(orig, "diag", None), "constraint_name", None)
+    # A driver that does not surface the constraint name still leaves only one
+    # possibility: it is the sole unique constraint on the table.
+    return constraint in (None, _DEDUPE_CONSTRAINT)
+
+
 def queue(
     db: Session,
     event: NotificationEvent,
@@ -148,6 +172,14 @@ def queue(
     each insert gets its own savepoint, so one already-queued recipient cannot
     roll back the others or the caller's own work.
     """
+    # Flush the caller's own pending work *before* the first savepoint opens.
+    # Otherwise the caller's un-flushed INSERTs and UPDATEs — the award being
+    # cancelled, the turnover being reopened — go out inside that savepoint, and
+    # the handler below, which exists to swallow a duplicate notification, would
+    # quietly roll back part of the state change this notification is about. The
+    # savepoint must contain the notification row and nothing else.
+    db.flush()
+
     queued: list[Notification] = []
     for user in recipients:
         if not user.email:
@@ -169,43 +201,101 @@ def queue(
             with db.begin_nested():
                 db.add(row)
                 db.flush()
-        except IntegrityError:
-            # Already queued. That is the dedupe working, not a failure.
+        except IntegrityError as clash:
+            if not _is_already_queued(clash):
+                # Not the dedupe constraint, so this person will not be told and
+                # will not know they were not. Loud, and the state change still
+                # stands: a notification row that will not insert is not a
+                # reason to refuse a cancellation somebody already made.
+                logger.error(
+                    "could not queue %s for recipient %s: %s",
+                    event.value,
+                    user.id,
+                    clash,
+                )
             continue
         queued.append(row)
 
     return queued
 
 
-def deliver_pending(db: Session, *, limit: int = DRAIN_LIMIT) -> int:
-    """Drain the outbox. Call **after** the commit that queued the rows.
+def _claim(db: Session, limit: int) -> list[Notification]:
+    """Take exclusive ownership of up to `limit` unsent rows, and commit that.
 
-    Returns how many were delivered. Each row is marked attempted and committed
-    *before* its send, so a process that dies mid-send leaves a row that is
-    visibly attempted rather than one that looks untouched — the same rule
-    guardrail 2 applies to a Stripe call, for the same reason: an unknown
-    outcome must never read as a success.
+    **This is what makes a delivery happen once.** The `dedupe_key` makes the
+    *row* unique per transition; it does nothing about two drains picking the
+    same row up and both sending it. Every request drains now, so two at once is
+    the ordinary case rather than the rare one — an owner accepting a bid while
+    somebody else places one is enough.
+
+    One statement does it: the claim is an `UPDATE ... WHERE id IN (SELECT ...
+    FOR UPDATE SKIP LOCKED)`, so a second drain steps over what the first has
+    taken instead of queueing behind it or duplicating it, and the claim is
+    committed before any network call.
+
+    That ordering is guardrail 2's rule applied to a send. A process that dies
+    mid-send leaves a row visibly attempted, and such a row is deliberately
+    **not** picked up again: an unknown outcome may not be assumed failed any
+    more than it may be assumed successful, and assuming failure is how somebody
+    gets the same message twice. A row that was queued and never attempted still
+    has `attempted_at IS NULL`, so the genuinely-abandoned ones are still drained
+    by the next pass.
     """
-    pending = list(
+    claimed_ids = (
         db.execute(
-            select(Notification)
-            .where(Notification.status == NotificationStatus.PENDING)
-            .order_by(Notification.created_at)
-            .limit(limit)
+            update(Notification)
+            .where(
+                Notification.id.in_(
+                    select(Notification.id)
+                    .where(
+                        Notification.status == NotificationStatus.PENDING,
+                        Notification.attempted_at.is_(None),
+                    )
+                    .order_by(Notification.created_at)
+                    .limit(limit)
+                    .with_for_update(skip_locked=True)
+                    .scalar_subquery()
+                )
+            )
+            .values(attempted_at=datetime.now(timezone.utc))
+            .returning(Notification.id)
+            .execution_options(synchronize_session=False)
         )
         .scalars()
         .all()
     )
-    if not pending:
+    db.commit()
+    if not claimed_ids:
+        return []
+
+    return list(
+        db.execute(
+            select(Notification)
+            .where(Notification.id.in_(claimed_ids))
+            .order_by(Notification.created_at)
+        )
+        .scalars()
+        .all()
+    )
+
+
+def deliver_pending(db: Session, *, limit: int = DRAIN_LIMIT) -> int:
+    """Drain the outbox. Call **after** the commit that queued the rows.
+
+    Returns how many were delivered. Rows are claimed and the claim committed
+    *before* any send, so a process that dies mid-send leaves a row that is
+    visibly attempted rather than one that looks untouched — the same rule
+    guardrail 2 applies to a Stripe call, for the same reason: an unknown
+    outcome must never read as a success.
+    """
+    claimed = _claim(db, limit)
+    if not claimed:
         return 0
 
     sender = delivery.get_sender()
     delivered = 0
 
-    for row in pending:
-        row.attempted_at = datetime.now(timezone.utc)
-        db.commit()
-
+    for row in claimed:
         try:
             sender.send(
                 delivery.Outgoing(
@@ -226,7 +316,10 @@ def deliver_pending(db: Session, *, limit: int = DRAIN_LIMIT) -> int:
         else:
             # The logging sender. The row stays pending with an attempt on it,
             # because nothing was actually delivered and saying otherwise would
-            # make the record lie.
+            # make the record lie. The attempt also means the next drain steps
+            # over it rather than re-logging the same hundred rows forever —
+            # which is what was happening before the claim existed, and it kept
+            # anything past DRAIN_LIMIT permanently out of reach.
             row.failure_message = "no SMTP host configured; logged only"
         db.commit()
 
@@ -248,7 +341,15 @@ def _when(moment: datetime) -> str:
 
 
 def _money(cents: int) -> str:
-    return f"${cents / 100:,.2f}"
+    """Integer cents to a string, without ever becoming a float.
+
+    Display-only, and `:.2f` would have hidden the artifact at any price this
+    product sees — but "no floats, anywhere, ever" is worth keeping literally
+    true in the module phase 6 will copy a fee calculation out of.
+    """
+    dollars, remainder = divmod(abs(cents), 100)
+    sign = "-" if cents < 0 else ""
+    return f"{sign}${dollars:,}.{remainder:02d}"
 
 
 def _where(prop: Property) -> str:
@@ -258,6 +359,13 @@ def _where(prop: Property) -> str:
 # --------------------------------------------------------------------------
 # The events
 # --------------------------------------------------------------------------
+
+
+def _posting_scope(turnover: Turnover) -> str:
+    """What identifies *this posting* of a turnover, not just the turnover."""
+    if turnover.reopened_at is None:
+        return str(turnover.id)
+    return f"{turnover.id}:reopened:{turnover.reopened_at.isoformat()}"
 
 
 def turnover_posted(db: Session, turnover: Turnover, prop: Property) -> list[Notification]:
@@ -284,7 +392,14 @@ def turnover_posted(db: Session, turnover: Turnover, prop: Property) -> list[Not
             )
             + "\nOpen your board to see it and name a price."
         ),
-        dedupe_scope=str(turnover.id),
+        # The turnover *and* the reopen that produced this posting. A job that
+        # came back on the bench is a new posting to a cleaner who did not take
+        # it the first time, and keying on the turnover alone would make the
+        # re-post a silent no-op for exactly the people who were told when it
+        # was first posted — the dedupe constraint doing its job invisibly, on
+        # the one posting that is urgent. Same reasoning as folding the price
+        # into a bid's key.
+        dedupe_scope=_posting_scope(turnover),
         turnover_id=turnover.id,
     )
 

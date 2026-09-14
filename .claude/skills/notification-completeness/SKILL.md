@@ -59,6 +59,12 @@ The mechanics, each one load-bearing:
 - **The outbox is drained twice over**: by the request that queued the rows, and
   by the scheduled pass, so a process that died between commit and send does not
   lose the notification.
+- **A drain claims its rows before sending them** — one `UPDATE ... FOR UPDATE
+  SKIP LOCKED`, committed before the network call. The dedupe key makes the row
+  unique per transition; it does nothing about two overlapping drains both
+  sending it, and since every request drains, overlapping is the ordinary case.
+  A row attempted with no outcome is not retried: assuming failure is how
+  somebody gets the same message twice.
 
 `app/services/alerts.py` is gone. Its two callers in `app/services/awards.py` now
 call `notifications.award_cancelled`, and `tests/test_cancellation.py` asserts on

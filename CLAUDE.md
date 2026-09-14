@@ -362,6 +362,14 @@ Phase 4's `app/services/alerts.py` is gone, replaced by it.
   reports it delivered; a failure writes `failed` with the reason and stays
   visible. Without `SMTP_HOST` the logging sender runs, and it reports
   `delivers=False` — the row stays `pending`, because nothing was sent.
+- **The send is claimed before it is made.** The dedupe key makes the *row*
+  unique per transition; it says nothing about two drains picking the same row
+  up and both sending it, and every request drains now. `deliver_pending()`
+  therefore claims its rows in one `UPDATE ... FOR UPDATE SKIP LOCKED` and
+  commits that claim *before* the network call — guardrail 2's ordering applied
+  to a send. A row attempted with no outcome is deliberately not retried: an
+  unknown outcome may not be assumed failed any more than successful, and
+  assuming failure is how somebody gets the same message twice.
 
 Two events hang off the clock rather than off something a person did: the day-of
 reminder and the unclaimed alarm. `app/tasks/scheduled.py` is their entry point

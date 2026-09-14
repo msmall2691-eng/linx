@@ -265,6 +265,15 @@ def cancel_award(
         late=late,
     )
 
+    if reopen:
+        # "Re-posts the job to the bench" has to mean somebody hears about it.
+        # Flipping the status back to OPEN puts it on the board; it does not put
+        # it in front of anyone, and a job that lost its cleaner near checkout is
+        # the one posting that cannot wait for a cleaner to refresh a page. This
+        # is the first entry on the fixed list — a turnover posted inside a
+        # cleaner's service radius — reaching it by the second route.
+        notifications.turnover_posted(db, turnover, prop)
+
     db.commit()
 
     notifications.deliver_pending(db)

@@ -46,7 +46,7 @@ What works today:
 - The full v1 database schema — eleven tables — built by Alembic migrations.
   Tables belonging to later phases exist and are empty on purpose.
 - A single-container deploy: the backend serves the built frontend.
-- 265 tests against real PostgreSQL, plus 7 browser click-throughs.
+- 268 tests against real PostgreSQL, plus 7 browser click-throughs.
 
 Payments and reviews are **not** built yet. Each is its own phase, reviewed
 before the next begins — see the phase table in [`CLAUDE.md`](CLAUDE.md).

@@ -265,7 +265,12 @@ class TestACleanerBacksOut:
 
 class TestANoShow:
     def test_the_booking_ends_flagged_and_the_job_reopens(
-        self, client: TestClient, make_cleaner, make_open_turnover, db: Session
+        self,
+        client: TestClient,
+        make_cleaner,
+        make_open_turnover,
+        admin_user,
+        db: Session,
     ) -> None:
         job = _award_a_job(client, make_cleaner, make_open_turnover)
 
@@ -286,7 +291,14 @@ class TestANoShow:
         assert award.cancelled_at is not None
         assert award.cancellation_reason == "Nobody came, no message."
 
-        assert _notified(db, "cleaner_no_show"), "nobody was told about the no-show"
+        # The flavour this whole policy was written for. An owner standing in an
+        # uncleaned house is the case where "nobody finds out by showing up"
+        # has already happened once — so all three are named explicitly here,
+        # not just "somebody was told".
+        told = _recipients(db, "cleaner_no_show")
+        assert job["owner"]["user"]["email"] in told, "the owner was not told"
+        assert job["cleaner"]["user"]["email"] in told, "the cleaner has no record of it"
+        assert admin_user["user"].email in told, "no admin was told about a no-show"
 
     def test_a_no_show_needs_a_reason(
         self, client: TestClient, make_cleaner, make_open_turnover
