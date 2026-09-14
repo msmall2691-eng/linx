@@ -30,7 +30,7 @@ import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.api.deps import require_role
@@ -279,6 +279,12 @@ def update_turnover(
     # The schedule may have moved, so the ladder is recomputed — never carried
     # over from the old times.
     apply_derived_fields(turnover)
+
+    # **A person changed this, so the feed stops maintaining it.** Marked here,
+    # explicitly, rather than inferred from `updated_at` — the read paths write
+    # too (`refresh_urgency`), and inferring would hand a synced draft to nobody
+    # the first time somebody merely looked at the list.
+    turnover.owner_edited_at = func.now()
 
     db.commit()
     db.refresh(turnover)

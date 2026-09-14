@@ -289,12 +289,19 @@ one sentence: **linx owns the turnover; the listing site owns the booking.**
 1. **A booking becomes a draft, never a live job.** An owner who wanted ten jobs
    posted can do that in a minute; an owner who did not cannot unsend the
    alerts, the bids, or the apology.
-2. **A row a person has touched is theirs.** Sync updates a draft it wrote and
-   nothing else. `turnovers.source_synced_at` against `updated_at` is the test,
-   and **both come from the database clock** (`func.now()`, which is
-   transaction-start time) so the comparison is exact rather than approximate.
-   An earlier version allowed a second of slack and would have silently
-   reverted an edit made just after a sync.
+2. **A row a person has touched is theirs.** Sync updates a *draft* it wrote and
+   nothing else; `calendars._belongs_to_the_feed` is both halves of that in one
+   place, so the status test and the person test cannot drift apart.
+
+   The person test is **`turnovers.owner_edited_at`, an explicit marker written
+   where people edit** — not a comparison against `updated_at`. That comparison
+   was the first design and it was wrong for a reason worth keeping written
+   down: `updated_at` moves for *any* write, and the read paths write.
+   `refresh_urgency` persists a standing vacancy's climb up the urgency ladder,
+   which is exactly what a synced draft with no next guest is — so merely
+   opening the turnover list stamped the draft as edited, and from then on the
+   feed could neither correct its dates nor withdraw it when the guest
+   cancelled. Rule 2 switched off by a page view, with nothing failing to say so.
 3. **Vanishing from the feed is not permission to delete.** An untouched draft
    goes, because nothing was staffed for it. A posted or awarded job stays and
    is *reported* — a guest cancelling does not get to cancel a cleaner.
@@ -311,6 +318,16 @@ Two things the feed cannot tell us, and where they come from instead:
   and the urgency ladder is measured in hours. `properties.default_checkout_time`
   and `default_checkin_time` are the house's own policy, which the owner knows
   and the calendar does not.
+- **Which arrival is *this* clean's checkin.** Only one close enough behind the
+  departure to be the job — `NEXT_STAY_WITHIN`, which *is* `SOON_WITHIN` rather
+  than a number of its own so the rule and the ladder it feeds cannot drift.
+  A stay three weeks later would otherwise make a checkout twelve hours away
+  read `standard`, because the measure becomes the length of a three-week window
+  instead of how soon the job is.
+- **Which departures are still jobs.** Exports keep their history and the
+  horizon only bounded the future, so there is a floor as well
+  (`PAST_TOLERANCE`): without one, connecting a calendar proposes an overdue,
+  `urgent` draft for every stay the listing ever had.
 - **Whether an event is a stay.** Airbnb sends the owner's blocked dates through
   the same feed. `calendars.BLOCK_MARKERS` is a substring heuristic and is
   labelled as one; it is allowed to be a heuristic because its failure mode is a
@@ -322,6 +339,33 @@ or admin shape, and there is a test that it appears nowhere in a board response.
 The URL is also not editable in place: changing it would keep the calendar's id
 while pointing it at different bookings, so every turnover keyed to it would
 claim a source it never came from.
+
+**It is also a place this server connects to**, which makes the field a request
+forgery primitive unless it is guarded. Two rules, both in `calendars.py`:
+
+- **Every hop is checked, not just the URL the owner typed.** The guard lives in
+  the HTTP transport (`_PublicOnlyTransport`), because a perfectly public host
+  answering `302` to `http://169.254.169.254/` is the whole attack rather than
+  an edge case. Anything that does not resolve to a global address is refused —
+  and the residual DNS-rebind window is named in the code rather than papered
+  over.
+- **`MAX_FEED_BYTES` is enforced while the body streams**, never on
+  `len(response.content)` — reading the whole thing before measuring it is not a
+  limit at all, and this path runs unattended for every owner on every pass.
+
+**A booking that vanishes from a job somebody is already on is reported, and the
+report is stored.** `property_calendars.last_stale_kept` holds it, because the
+pass that normally finds it is the scheduled one, which has no screen to answer
+— a number returned only to a button nobody pressed is a warning the product
+promised and then dropped. Whether it should also *notify* is a genuine open
+question rather than an oversight: `NotificationEvent` is a closed list, and
+opening it is meant to be a decision somebody makes out loud.
+
+**A feed is only polled while its property is still a live short-term rental.**
+An owner may archive a property or reclassify it as residential once its live
+work is finished; `reconcile` writes `service_type=turnover`, which is a
+category error on a home and refused everywhere else, so `active_calendars`
+joins the property rather than trusting the calendar's own flag.
 
 ---
 

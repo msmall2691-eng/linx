@@ -43,7 +43,9 @@ function Feed({ feed, propertyId, onChanged, timeZone }) {
   return (
     <li
       className={`rounded-lg border p-3 ${
-        feed.last_error ? 'border-amber-300 bg-amber-50' : 'border-slate-200'
+        feed.last_error || feed.last_stale_kept > 0
+          ? 'border-amber-300 bg-amber-50'
+          : 'border-slate-200'
       }`}
       data-testid="calendar-feed"
     >
@@ -97,6 +99,20 @@ function Feed({ feed, propertyId, onChanged, timeZone }) {
       {feed.last_error && (
         <p className="mt-2 text-sm text-amber-800" data-testid="calendar-error">
           {feed.last_error}
+        </p>
+      )}
+
+      {/* A booking vanished from a job somebody is already on. This is the one
+          number on the row that needs a decision rather than a glance, and it
+          is read from the stored value so the scheduled sync — the one nobody
+          is watching — can raise it just as loudly as the button can. */}
+      {feed.last_stale_kept > 0 && (
+        <p className="mt-2 text-sm text-amber-800" data-testid="calendar-stale">
+          {feed.last_stale_kept} job{feed.last_stale_kept === 1 ? '' : 's'} here no
+          longer {feed.last_stale_kept === 1 ? 'has a booking' : 'have bookings'} in
+          the calendar, but {feed.last_stale_kept === 1 ? 'it is' : 'they are'}{' '}
+          already posted or booked — check whether you still need{' '}
+          {feed.last_stale_kept === 1 ? 'that clean' : 'those cleans'}.
         </p>
       )}
 

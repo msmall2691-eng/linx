@@ -155,31 +155,52 @@ def place_unmapped_properties(db: Session) -> int:
     return len(rows)
 
 
-def sync_calendars(db: Session) -> int:
-    """Read every connected booking feed. Returns how many drafts it created.
+def sync_calendars(db: Session) -> tuple[int, int]:
+    """Read every connected booking feed. Returns (drafts created, stale kept).
 
     **One feed failing must not stop the rest.** Each gets its own try: a
     listing site having a bad afternoon, or one owner's expired link, is exactly
     the situation where every other calendar most needs to keep working. The
     reason is recorded on the failing row where its owner can see it, and this
     pass moves on.
+
+    **`stale_but_kept` is carried out of here, not dropped.** It counts jobs
+    whose booking has vanished but which somebody had already acted on — a
+    guest cancelled and a cleaner may still be coming. This is the pass that
+    normally finds it, because it is the one that runs without anybody
+    watching; taking only `.created` was how the product promised the owner a
+    warning and then discarded it. `sync` also writes the number onto the
+    calendar row, which is where the owner's own screen reads it from.
     """
     created = 0
+    stale = 0
     for calendar in calendars.active_calendars(db):
         try:
-            created += calendars.sync(db, calendar).created
+            result = calendars.sync(db, calendar)
         except calendars.CalendarError as error:
             logger.info("calendar %s could not be read: %s", calendar.id, error.detail)
+            continue
         except Exception:  # noqa: BLE001 - one bad feed must not end the pass
             logger.exception("calendar %s failed unexpectedly", calendar.id)
             db.rollback()
-    return created
+            continue
+
+        created += result.created
+        stale += result.stale_but_kept
+        if result.stale_but_kept:
+            logger.warning(
+                "calendar %s: %d job(s) whose booking is gone were kept because "
+                "somebody is already on them",
+                calendar.id,
+                result.stale_but_kept,
+            )
+    return created, stale
 
 
 def run(db: Session, *, now: datetime | None = None) -> dict[str, int]:
     """One pass. Queue what is due, then send everything owed."""
     placed = place_unmapped_properties(db)
-    synced = sync_calendars(db)
+    synced, stale_bookings = sync_calendars(db)
     reminders = send_reminders(db, now=now)
     unclaimed = alert_unclaimed(db, now=now)
     revealed = reveal_reviews(db, now=now)
@@ -187,6 +208,7 @@ def run(db: Session, *, now: datetime | None = None) -> dict[str, int]:
     return {
         "placed": placed,
         "synced": synced,
+        "stale_bookings": stale_bookings,
         "reminders": reminders,
         "unclaimed": unclaimed,
         "revealed": revealed,
@@ -205,10 +227,11 @@ def main() -> None:  # pragma: no cover - exercised through run()
         db.close()
     logger.info(
         "scheduled pass: %d properties placed, %d drafts from calendars, "
-        "%d reminders queued, %d unclaimed alerts queued, %d reviews revealed, "
-        "%d delivered",
+        "%d job(s) whose booking vanished, %d reminders queued, %d unclaimed "
+        "alerts queued, %d reviews revealed, %d delivered",
         result["placed"],
         result["synced"],
+        result["stale_bookings"],
         result["reminders"],
         result["unclaimed"],
         result["revealed"],

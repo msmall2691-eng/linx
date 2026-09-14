@@ -19,9 +19,12 @@ Four groups of columns, each with a reason:
   still one booking; the constraint is what makes re-syncing idempotent instead
   of a way to accumulate a duplicate every fifteen minutes.
 
-* **`turnovers.source_synced_at`** — compared against `updated_at` to answer the
+* **`turnovers.source_synced_at` / `owner_edited_at`** — the two halves of the
   only question a re-sync needs to ask: has a person touched this since we wrote
-  it? If they have, the feed does not get to argue with them.
+  it? If they have, the feed does not get to argue with them. Two columns rather
+  than a comparison against `updated_at`, because `updated_at` also moves for
+  system maintenance — the read paths persist a standing vacancy's climb up the
+  urgency ladder, so viewing a list would otherwise mark a synced draft edited.
 
 * **`properties.default_checkout_time` / `default_checkin_time`** — what an
   all-day calendar cannot tell us. Airbnb and VRBO export whole days: a guest
@@ -69,6 +72,9 @@ def upgrade() -> None:
         sa.Column("last_synced_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("last_error", sa.Text(), nullable=True),
         sa.Column("last_booking_count", sa.Integer(), nullable=True),
+        # The warning the scheduled pass would otherwise only ever log: a
+        # booking vanished from a job somebody is already on.
+        sa.Column("last_stale_kept", sa.Integer(), nullable=True),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
@@ -125,6 +131,16 @@ def upgrade() -> None:
         "turnovers",
         sa.Column("source_synced_at", sa.DateTime(timezone=True), nullable=True),
     )
+    # **A separate column from `updated_at` on purpose.** `updated_at` moves on
+    # any write, and the read paths write — `refresh_urgency` persists a
+    # standing vacancy climbing the urgency ladder. Using it to mean "a person
+    # edited this" would let a page view hand a synced draft to nobody: the
+    # feed could no longer correct its dates or withdraw it, and nothing would
+    # fail to say so.
+    op.add_column(
+        "turnovers",
+        sa.Column("owner_edited_at", sa.DateTime(timezone=True), nullable=True),
+    )
 
     op.add_column(
         "properties",
@@ -148,6 +164,7 @@ def downgrade() -> None:
     op.drop_column("properties", "default_checkout_time")
 
     op.drop_constraint("uq_turnovers_source_event", "turnovers", type_="unique")
+    op.drop_column("turnovers", "owner_edited_at")
     op.drop_column("turnovers", "source_synced_at")
     op.drop_column("turnovers", "external_ref")
     op.drop_constraint("fk_turnovers_source_calendar_id", "turnovers", type_="foreignkey")

@@ -98,6 +98,15 @@ class PropertyCalendar(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     #: answer and a suspicious one, which is why it is a number rather than a
     #: boolean.
     last_booking_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    #: Jobs the feed no longer has a booking for, which were **kept** because
+    #: somebody had already acted on them — posted, bid on, awarded.
+    #:
+    #: This is the number that says *a guest cancelled and a cleaner may still
+    #: be coming*, and it is persisted rather than merely returned because the
+    #: run that finds it is usually the unattended one. A count that only
+    #: existed in the reply to a button nobody pressed is a warning the product
+    #: promised and never delivered.
+    last_stale_kept: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     property: Mapped["Property"] = relationship(back_populates="calendars")
 

@@ -79,6 +79,11 @@ class CalendarOut(BaseModel):
     #: a suspicious one** — a number rather than a boolean so an owner can tell
     #: "nothing booked" from "this stopped working".
     last_booking_count: int | None
+    #: Jobs whose booking has vanished but which somebody is already on. **The
+    #: one number here that needs a person**, and the reason it is stored on the
+    #: row rather than only returned by a sync: the pass that usually finds it
+    #: is the scheduled one, which has no screen to answer.
+    last_stale_kept: int | None
 
     created_at: datetime
     updated_at: datetime

@@ -126,10 +126,23 @@ class Turnover(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     #: the same booking, and without this it would become a second job while
     #: the first sat orphaned.
     external_ref: Mapped[str | None] = mapped_column(String(500), nullable=True)
-    #: When sync last wrote this row. Compared against `updated_at` to answer
-    #: the only question that matters on a re-sync: **has a person touched this
-    #: since?** If they have, the feed does not get to argue with them.
+    #: When sync last wrote this row. A row with this set and `owner_edited_at`
+    #: still null is a draft the feed owns and may keep up to date.
     source_synced_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    #: When a **person** last changed this job, as opposed to the system
+    #: maintaining it. This is the answer to the only question a re-sync asks:
+    #: has somebody touched this? If they have, the feed does not get to argue.
+    #:
+    #: **It is its own column because `updated_at` answers a different
+    #: question.** `updated_at` moves for any write at all, and the read paths
+    #: write: `refresh_urgency` persists a standing vacancy's climb up the
+    #: ladder, so merely *looking* at a turnover list could stamp a synced draft
+    #: as edited. From then on the feed could neither move its dates nor remove
+    #: it when the guest cancelled — rule 2 silently switched off by a page
+    #: view, with nothing failing to say so.
+    owner_edited_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
 

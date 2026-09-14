@@ -32,10 +32,11 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.calendar import PropertyCalendar
-from app.models.enums import TurnoverStatus
+from app.models.enums import PropertyType, TurnoverStatus, TurnoverUrgency
 from app.models.property import Property
 from app.models.turnover import Turnover
 from app.services import calendars
+from app.services.turnovers import refresh_urgency
 
 # --------------------------------------------------------------------------
 # Feeds, in the shape the real ones arrive in
@@ -610,9 +611,384 @@ class TestTheScheduledPass:
             return real_sync(session, calendar, client=_fake_client(_feed_for(10)))
 
         monkeypatch.setattr(calendars, "sync", fake_sync)
-        assert scheduled.sync_calendars(db) == 1
+        assert scheduled.sync_calendars(db) == (1, 0)
 
         db.expire_all()
         turnovers = db.execute(select(Turnover)).scalars().all()
         assert len(turnovers) == 1
         assert turnovers[0].source_calendar_id == working.id
+
+
+# --------------------------------------------------------------------------
+# The review findings, each with the failure it would have caused
+#
+# Eight of these came from an automated review of the first version of this
+# module, and every one was real. They are gathered here rather than scattered
+# because they share a shape worth naming: each was a rule the module's own
+# docstring already claimed, enforced on one path and not another, or inferred
+# from something that happened to correlate until it stopped.
+# --------------------------------------------------------------------------
+
+
+class TestTheServerIsNotAProxy:
+    """A URL an owner types is a place *our server* connects to.
+
+    Without a guard the export-link field is a request-forgery primitive: the
+    cloud metadata service, this app's own loopback port, anything else on the
+    network. Scheme-checking in the schema is not enough, because a redirect
+    never passes through a schema.
+    """
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "http://127.0.0.1:8000/api/admin/ledger",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://localhost/a.ics",
+            "http://[::1]/a.ics",
+        ],
+    )
+    def test_a_private_address_is_refused(self, url: str) -> None:
+        with pytest.raises(calendars.CalendarError) as refused:
+            calendars._refuse_private_address(url)
+        assert "private network" in refused.value.detail or "not a web address" in (
+            refused.value.detail
+        )
+
+    def test_the_guard_runs_on_every_redirect_hop_not_just_the_first(self) -> None:
+        """**The whole trick, in one test.**
+
+        A perfectly public host answers 302 to somewhere private. A check made
+        once, on the URL the owner typed, is satisfied by the first hop and
+        never sees the second — which is why the guard lives in the transport
+        every hop passes through rather than in `fetch`.
+        """
+        seen: list[str] = []
+
+        class _RecordingTransport(calendars._PublicOnlyTransport):
+            def handle_request(self, request: httpx.Request) -> httpx.Response:
+                seen.append(str(request.url))
+                # Run the real guard, then answer without a socket.
+                calendars._refuse_private_address(request.url)
+                return httpx.Response(200, text="unreachable")
+
+        transport = _RecordingTransport()
+        request = httpx.Request("GET", "http://169.254.169.254/latest/meta-data/")
+        with pytest.raises(calendars.CalendarError):
+            transport.handle_request(request)
+        assert seen == ["http://169.254.169.254/latest/meta-data/"]
+
+    def test_a_public_address_is_allowed(self) -> None:
+        """The guard has to let the actual product work."""
+        calendars._refuse_private_address("https://www.airbnb.com/calendar/ical/1.ics")
+
+    def test_the_client_this_module_builds_carries_the_guard(self) -> None:
+        """A guard nothing is wired to is a guard that does not run."""
+        with calendars._default_client() as client:
+            assert isinstance(client._transport, calendars._PublicOnlyTransport)
+
+
+class TestTheSizeLimitIsARealLimit:
+    def test_an_oversized_body_is_cut_off_rather_than_buffered(self) -> None:
+        """`len(response.content)` reads the whole thing before measuring it.
+
+        That is not a limit — a host that streams on holds a worker and its
+        memory for as long as it likes, on every scheduled pass. The cap has to
+        apply *as the bytes arrive*, so what this asserts is not that the error
+        is raised but that the bytes **stopped being read**.
+
+        Deliberately a finite body rather than an endless one: a test that hangs
+        when the fix is reverted reports a regression as a stuck CI job, which
+        is a worse way to find out than a red assertion.
+        """
+        produced = 0
+        chunk = b"x" * 64_000
+        limit = calendars.MAX_FEED_BYTES * 4
+
+        def body():
+            nonlocal produced
+            while produced < limit:
+                produced += len(chunk)
+                yield chunk
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=body())
+
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        with pytest.raises(calendars.CalendarError) as refused:
+            calendars.fetch("https://example.test/a.ics", client=client)
+
+        assert "too large" in refused.value.detail
+        # Generous slack for chunk boundaries, and still nowhere near having
+        # read the whole thing — which is the claim.
+        assert produced < calendars.MAX_FEED_BYTES * 2
+
+
+class TestWhichArrivalIsThisCleansCheckin:
+    def test_a_stay_weeks_later_is_not_this_turnovers_checkin(
+        self, client: TestClient, make_user, db: Session
+    ) -> None:
+        """`jobs_for` has always claimed "only the very next thing" and did not
+        enforce it.
+
+        The consequence is not cosmetic: with a far-off arrival attached, the
+        job is measured on the *length of that window* instead of on how soon
+        it is, so an imminent checkout reads `standard`.
+        """
+        owner = make_user(role="owner")
+        prop = db.get(Property, uuid.UUID(_property(client, owner)["id"]))
+
+        out = date.today() + timedelta(days=1)
+        much_later = out + timedelta(days=21)
+        bookings = calendars.parse(
+            _ics(
+                _event("a", (out - timedelta(days=2)).strftime("%Y%m%d"), out.strftime("%Y%m%d")),
+                _event(
+                    "b",
+                    much_later.strftime("%Y%m%d"),
+                    (much_later + timedelta(days=2)).strftime("%Y%m%d"),
+                ),
+            )
+        )
+        jobs = {job.external_ref: job for job in calendars.jobs_for(bookings, prop)}
+        assert jobs["a"].checkin_at is None
+
+    def test_the_genuine_next_guest_still_is(
+        self, client: TestClient, make_user, db: Session
+    ) -> None:
+        """The bound must not throw away the case the whole ladder is built on:
+        one guest out, the next one in behind them."""
+        owner = make_user(role="owner")
+        prop = db.get(Property, uuid.UUID(_property(client, owner)["id"]))
+
+        out = date.today() + timedelta(days=5)
+        bookings = calendars.parse(
+            _ics(
+                _event("a", (out - timedelta(days=2)).strftime("%Y%m%d"), out.strftime("%Y%m%d")),
+                _event("b", out.strftime("%Y%m%d"), (out + timedelta(days=2)).strftime("%Y%m%d")),
+            )
+        )
+        jobs = {job.external_ref: job for job in calendars.jobs_for(bookings, prop)}
+        assert jobs["a"].checkin_at is not None
+        assert jobs["a"].checkin_at.date() == out
+
+
+class TestHistoryIsNotAJob:
+    def test_past_departures_are_not_proposed(
+        self, client: TestClient, make_user, db: Session
+    ) -> None:
+        """Exports keep their history, and the horizon only bounded the future.
+
+        Connecting a calendar would have proposed a draft for every stay the
+        listing ever had — each one overdue and therefore `urgent`, so the
+        owner's first experience of the feature is deleting a year of them.
+        """
+        owner = make_user(role="owner")
+        prop = db.get(Property, uuid.UUID(_property(client, owner)["id"]))
+
+        long_ago = date.today() - timedelta(days=90)
+        soon = date.today() + timedelta(days=4)
+        bookings = calendars.parse(
+            _ics(
+                _event(
+                    "old",
+                    long_ago.strftime("%Y%m%d"),
+                    (long_ago + timedelta(days=2)).strftime("%Y%m%d"),
+                ),
+                _event("new", soon.strftime("%Y%m%d"), (soon + timedelta(days=2)).strftime("%Y%m%d")),
+            )
+        )
+        refs = {job.external_ref for job in calendars.jobs_for(bookings, prop)}
+        assert refs == {"new"}
+
+
+class TestMaintenanceIsNotAnEdit:
+    def test_refreshing_urgency_does_not_hand_a_draft_to_nobody(
+        self, client: TestClient, make_user, db: Session
+    ) -> None:
+        """**The finding with the quietest failure of the eight.**
+
+        `refresh_urgency` persists a standing vacancy's climb up the ladder, and
+        the read paths call it. While "a person touched this" meant
+        `updated_at > source_synced_at`, merely *viewing the turnover list* was
+        enough to mark a synced draft as edited — after which the feed could
+        neither correct its dates nor withdraw it when the guest cancelled, and
+        nothing failed to say so.
+        """
+        owner = make_user(role="owner")
+        prop = _property(client, owner)
+        calendar = _calendar(db, prop["id"])
+
+        calendars.sync(db, calendar, client=_fake_client(_feed_for(10)))
+        turnover = db.execute(select(Turnover)).scalars().one()
+
+        # A synced draft with no next guest is a standing vacancy, so its rung
+        # is measured against *now* and climbs as checkout approaches. Far out,
+        # it is `standard`.
+        assert turnover.checkin_at is None
+        assert turnover.urgency is TurnoverUrgency.STANDARD
+        was_synced_at = turnover.source_synced_at
+
+        # Exactly what a read path does when somebody opens the list twelve
+        # hours before checkout: the rung has changed, so it is persisted.
+        refresh_urgency(db, [turnover], now=turnover.checkout_at - timedelta(hours=12))
+
+        db.expire_all()
+        turnover = db.execute(select(Turnover)).scalars().one()
+        assert turnover.urgency is TurnoverUrgency.URGENT, "the write has to be real"
+        # The write happened, and it moved the generic timestamp — which is the
+        # whole trap: this is a row no person has been anywhere near.
+        assert turnover.updated_at > was_synced_at
+
+        assert turnover.owner_edited_at is None
+        assert not calendars._touched_by_a_person(turnover)
+
+        # And the feed can still do its job: move the booking, and the draft moves.
+        calendars.sync(db, calendar, client=_fake_client(_feed_for(20)))
+        db.expire_all()
+        moved = db.execute(select(Turnover)).scalars().one()
+        assert moved.checkout_at.date() == date.today() + timedelta(days=23)
+
+    def test_an_actual_owner_edit_still_stops_the_feed(
+        self, client: TestClient, make_user, db: Session
+    ) -> None:
+        """The marker has to be set where a person really does edit, or the fix
+        above would simply switch rule 2 off in the other direction."""
+        owner = make_user(role="owner")
+        prop = _property(client, owner)
+        calendar = _calendar(db, prop["id"])
+        calendars.sync(db, calendar, client=_fake_client(_feed_for(10)))
+
+        turnover = db.execute(select(Turnover)).scalars().one()
+        resp = client.patch(
+            f"/api/turnovers/{turnover.id}",
+            json={"notes": "Key is with the neighbour"},
+            headers=owner["auth"],
+        )
+        assert resp.status_code == 200, resp.text
+
+        db.expire_all()
+        edited = db.execute(select(Turnover)).scalars().one()
+        assert edited.owner_edited_at is not None
+        assert calendars._touched_by_a_person(edited)
+
+    def test_a_posted_job_is_not_the_feeds_to_move(
+        self, client: TestClient, make_user, db: Session
+    ) -> None:
+        """**A seam that used to hold by accident.**
+
+        While the person-test was `updated_at`, publishing a draft satisfied it
+        as a side effect of the status write. With an explicit edit marker that
+        coincidence is gone, so "only a draft" is written down — otherwise the
+        feed could move the dates of a job already on the bench with bids on it.
+        """
+        owner = make_user(role="owner")
+        prop = _property(client, owner)
+        calendar = _calendar(db, prop["id"])
+        calendars.sync(db, calendar, client=_fake_client(_feed_for(10)))
+
+        turnover = db.execute(select(Turnover)).scalars().one()
+        was = turnover.checkout_at
+        assert (
+            client.post(
+                f"/api/turnovers/{turnover.id}/publish", headers=owner["auth"]
+            ).status_code
+            == 200
+        )
+
+        calendars.sync(db, calendar, client=_fake_client(_feed_for(20)))
+        db.expire_all()
+        after = db.execute(select(Turnover)).scalars().one()
+        assert after.checkout_at == was
+
+
+class TestAVanishedBookingIsReportedNotLogged:
+    def test_the_scheduled_pass_carries_the_warning_out(
+        self, client: TestClient, make_user, db: Session, monkeypatch
+    ) -> None:
+        """The unattended pass is the one that normally finds this, and it was
+        keeping only `.created` — so the product promised the owner a warning
+        and then dropped it on the floor."""
+        from app.tasks import scheduled
+
+        owner = make_user(role="owner")
+        prop = _property(client, owner)
+        calendar = _calendar(db, prop["id"])
+        calendars.sync(db, calendar, client=_fake_client(_feed_for(10)))
+
+        turnover = db.execute(select(Turnover)).scalars().one()
+        assert (
+            client.post(
+                f"/api/turnovers/{turnover.id}/publish", headers=owner["auth"]
+            ).status_code
+            == 200
+        )
+
+        # The guest cancels: the booking is gone from the feed entirely.
+        empty = _ics(_event("other", "20990101", "20990104"))
+        real_sync = calendars.sync
+        monkeypatch.setattr(
+            calendars,
+            "sync",
+            lambda session, cal, **kw: real_sync(session, cal, client=_fake_client(empty)),
+        )
+
+        created, stale = scheduled.sync_calendars(db)
+        assert stale == 1, "the vanished booking has to survive the trip out"
+
+    def test_the_number_lands_on_the_owners_own_screen(
+        self, client: TestClient, make_user, db: Session
+    ) -> None:
+        """Returned is not the same as recorded. The scheduled pass has no reply
+        to put a number in, so it goes on the row the owner's panel reads."""
+        owner = make_user(role="owner")
+        prop = _property(client, owner)
+        calendar = _calendar(db, prop["id"])
+        calendars.sync(db, calendar, client=_fake_client(_feed_for(10)))
+
+        turnover = db.execute(select(Turnover)).scalars().one()
+        client.post(f"/api/turnovers/{turnover.id}/publish", headers=owner["auth"])
+
+        calendars.sync(
+            db, calendar, client=_fake_client(_ics(_event("other", "20990101", "20990104")))
+        )
+
+        resp = client.get(
+            f"/api/properties/{prop['id']}/calendars", headers=owner["auth"]
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()[0]["last_stale_kept"] == 1
+
+
+class TestAFeedOnlyBelongsToARental:
+    def test_an_archived_property_stops_being_polled(
+        self, client: TestClient, make_user, db: Session
+    ) -> None:
+        owner = make_user(role="owner")
+        prop = _property(client, owner)
+        _calendar(db, prop["id"])
+        assert len(calendars.active_calendars(db)) == 1
+
+        row = db.get(Property, uuid.UUID(prop["id"]))
+        row.is_active = False
+        db.commit()
+
+        assert calendars.active_calendars(db) == []
+
+    def test_a_property_turned_into_a_home_stops_being_polled(
+        self, client: TestClient, make_user, db: Session
+    ) -> None:
+        """**A category error waiting to happen.** `reconcile` writes
+        `service_type=turnover`, which a home is refused everywhere else in the
+        product — and the owner's screen no longer even shows the calendar
+        panel, so the jobs would arrive from a feature they cannot see.
+        """
+        owner = make_user(role="owner")
+        prop = _property(client, owner)
+        _calendar(db, prop["id"])
+
+        row = db.get(Property, uuid.UUID(prop["id"]))
+        row.property_type = PropertyType.RESIDENTIAL
+        db.commit()
+
+        assert calendars.active_calendars(db) == []
