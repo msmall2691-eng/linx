@@ -116,6 +116,14 @@ class Settings(BaseSettings):
     # ---------------------------------------------------------------------
     review_reveal_after_days: int = Field(default=14, ge=1, le=90)
 
+    #: Google Places / Geocoding key. **Optional, and the product works without
+    #: it**: address autocomplete is the precise path, and the region's own
+    #: town table (`app/services/places.py`) is the fallback that keeps every
+    #: property on the map. Same posture as Checkr and SMTP — a missing key
+    #: costs precision, not function — and deliberately unlike Stripe, where
+    #: nothing stands in for money.
+    google_maps_api_key: str | None = None
+
     platform_fee_bps: int = Field(
         default=1500,
         ge=0,

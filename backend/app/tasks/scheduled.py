@@ -41,7 +41,7 @@ from app.models.award import Award
 from app.models.enums import TurnoverStatus
 from app.models.property import Property
 from app.models.turnover import Turnover
-from app.services import awards, notifications, reviews
+from app.services import awards, geocoding, notifications, reviews
 
 logger = logging.getLogger("linx.scheduled")
 
@@ -120,13 +120,50 @@ def reveal_reviews(db: Session, *, now: datetime | None = None) -> int:
     return reviews.reveal_overdue(db, now=now)
 
 
+def place_unmapped_properties(db: Session) -> int:
+    """Give coordinates to any property that has none. **Repairs a silent hole.**
+
+    The bench board's radius query requires `Property.lat IS NOT NULL`, and
+    until phase 8 nothing in the application ever set those columns — only the
+    browser tests did, straight into the database. Every property created
+    through the real site was therefore invisible to every cleaner, on screens
+    that looked entirely normal to its owner.
+
+    New properties are placed on save. This is for the ones already saved:
+    it runs on every scheduled pass, costs one indexed query when there is
+    nothing to do, and needs nobody to remember to run a script.
+    """
+    rows = db.execute(
+        select(Property).where(
+            (Property.lat.is_(None)) | (Property.lng.is_(None))
+        )
+    ).scalars().all()
+
+    for prop in rows:
+        fix = geocoding.locate(postal_code=prop.postal_code, city=prop.city)
+        prop.lat, prop.lng = fix.lat, fix.lng
+        logger.info(
+            "placed property %s from its %s: %.4f, %.4f",
+            prop.id,
+            fix.source,
+            fix.lat,
+            fix.lng,
+        )
+
+    if rows:
+        db.commit()
+    return len(rows)
+
+
 def run(db: Session, *, now: datetime | None = None) -> dict[str, int]:
     """One pass. Queue what is due, then send everything owed."""
+    placed = place_unmapped_properties(db)
     reminders = send_reminders(db, now=now)
     unclaimed = alert_unclaimed(db, now=now)
     revealed = reveal_reviews(db, now=now)
     delivered = notifications.deliver_pending(db, limit=SCHEDULED_DRAIN_LIMIT)
     return {
+        "placed": placed,
         "reminders": reminders,
         "unclaimed": unclaimed,
         "revealed": revealed,
@@ -144,8 +181,9 @@ def main() -> None:  # pragma: no cover - exercised through run()
     finally:
         db.close()
     logger.info(
-        "scheduled pass: %d reminders queued, %d unclaimed alerts queued, "
-        "%d reviews revealed, %d delivered",
+        "scheduled pass: %d properties placed, %d reminders queued, "
+        "%d unclaimed alerts queued, %d reviews revealed, %d delivered",
+        result["placed"],
         result["reminders"],
         result["unclaimed"],
         result["revealed"],

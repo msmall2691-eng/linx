@@ -7,10 +7,14 @@ bid. Everything else is ordering and bookkeeping.
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy.orm import Session
+
+from app.models.property import Property
 
 PORTLAND_ME = (43.6591, -70.2568)
 OLD_ORCHARD_BEACH = (43.5148, -70.3778)  # ~12 mi from Portland
@@ -214,9 +218,22 @@ class TestTheRadius:
         assert client.get("/api/board", headers=cleaner["auth"]).json() == []
 
     def test_a_property_without_coordinates_is_not_shown(
-        self, client: TestClient, make_cleaner, make_user
+        self, client: TestClient, make_cleaner, make_user, db: Session
     ) -> None:
-        """It cannot be placed in a radius, so it must not be silently included."""
+        """It cannot be placed in a radius, so it must not be silently included.
+
+        **This test used to pass for the wrong reason, and that is worth
+        recording.** Its setup created a property through the API and expected
+        no coordinates — because nothing in the application ever set them. The
+        rule it was written to guard (an unplaceable property stays off the
+        board) was never actually exercised; what it really asserted was that
+        *every* property was unplaceable, which is the bug that made the
+        marketplace match nothing at all.
+
+        The rule is still right, so the test stays. It now has to null the
+        columns deliberately, because that state can no longer be reached
+        through the API — see `tests/test_property_placement.py`.
+        """
         cleaner = make_cleaner(cleared=True)
         owner = make_user(role="owner")
         prop = client.post(
@@ -230,6 +247,11 @@ class TestTheRadius:
             },
             headers=owner["auth"],
         ).json()
+
+        row = db.get(Property, uuid.UUID(prop["id"]))
+        row.lat = row.lng = None
+        db.commit()
+
         client.post(
             "/api/turnovers",
             json={

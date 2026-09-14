@@ -24,6 +24,7 @@ from app.models.property import Property
 from app.models.turnover import Turnover
 from app.models.user import User
 from app.schemas.property import PropertyCreate, PropertyOut, PropertyUpdate
+from app.services import geocoding
 
 router = APIRouter(prefix="/properties", tags=["properties"])
 
@@ -60,10 +61,32 @@ def create_property(
     owner: User = Depends(require_role(UserRole.OWNER)),
 ) -> Property:
     prop = Property(owner_id=owner.id, **payload.model_dump())
+    _place(prop)
     db.add(prop)
     db.commit()
     db.refresh(prop)
     return prop
+
+
+def _place(prop: Property) -> None:
+    """Give the property coordinates. **Never leave it without them.**
+
+    The bench board's radius query requires `Property.lat IS NOT NULL`, so a
+    property with null coordinates is invisible to every cleaner — on a screen
+    that looks completely normal to its owner, who posts a turnover and watches
+    nobody bid. Nothing in the app used to set these columns at all; only the
+    browser tests did, straight into the database.
+
+    `geocoding.locate` cannot return nothing, which is the point: the failure
+    it replaces was a silent null, not a bad guess.
+    """
+    fix = geocoding.locate(
+        lat=prop.lat,
+        lng=prop.lng,
+        postal_code=prop.postal_code,
+        city=prop.city,
+    )
+    prop.lat, prop.lng = fix.lat, fix.lng
 
 
 @router.get("", response_model=list[PropertyOut])
@@ -99,8 +122,22 @@ def update_property(
 
     # exclude_unset so an omitted field keeps its value; a PATCH that sent
     # every default would blank out notes the owner never touched.
-    for field, value in payload.model_dump(exclude_unset=True).items():
+    fields = payload.model_dump(exclude_unset=True)
+    for field, value in fields.items():
         setattr(prop, field, value)
+
+    # Re-place it whenever the address moved, or whenever it somehow has no
+    # coordinates — which is every property created before this rule existed.
+    address_moved = {"postal_code", "city", "state", "address_line1"} & set(fields)
+    sent_coordinates = {"lat", "lng"} & set(fields)
+    if address_moved and not sent_coordinates:
+        # The address changed and nothing new came with it, so whatever is on
+        # the row describes where this property used to be. Keeping it would
+        # leave a job advertised at the previous house — worse than a coarse
+        # match, because it is confidently wrong.
+        prop.lat = prop.lng = None
+    if address_moved or sent_coordinates or prop.lat is None or prop.lng is None:
+        _place(prop)
 
     db.commit()
     db.refresh(prop)

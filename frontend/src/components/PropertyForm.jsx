@@ -1,5 +1,6 @@
-import { useState } from 'react'
+import { useCallback, useState } from 'react'
 
+import AddressFields from './AddressFields.jsx'
 import Alert from './Alert.jsx'
 
 const BLANK = {
@@ -23,6 +24,16 @@ export default function PropertyForm({ initial, onSubmit, submitLabel, error }) 
     return (event) => setForm((prev) => ({ ...prev, [field]: event.target.value }))
   }
 
+  // An address picked from autocomplete brings the building's own coordinates
+  // with it, which is the best answer there is: the server's fallback can only
+  // place a property at the centre of its town. Wrapped in useCallback because
+  // the Places widget is set up in an effect that depends on this identity —
+  // a new function every render would tear the widget down and rebuild it on
+  // every keystroke.
+  const pickAddress = useCallback((parts) => {
+    setForm((prev) => ({ ...prev, ...parts }))
+  }, [])
+
   async function handleSubmit(event) {
     event.preventDefault()
     setSubmitting(true)
@@ -32,6 +43,11 @@ export default function PropertyForm({ initial, onSubmit, submitLabel, error }) 
         bedrooms: Number(form.bedrooms),
         bathrooms: String(form.bathrooms),
         address_line2: form.address_line2 || null,
+        // Only sent when autocomplete provided them. Absent, the server places
+        // the property from its ZIP — never nothing, because a property with no
+        // coordinates is invisible to every cleaner.
+        lat: form.lat == null ? undefined : String(form.lat),
+        lng: form.lng == null ? undefined : String(form.lng),
         access_notes: form.access_notes || null,
         cleaning_notes: form.cleaning_notes || null,
       })
@@ -59,73 +75,9 @@ export default function PropertyForm({ initial, onSubmit, submitLabel, error }) 
         />
       </div>
 
-      <div>
-        <label htmlFor="address_line1" className="field-label">
-          Street address
-        </label>
-        <input
-          id="address_line1"
-          required
-          value={form.address_line1}
-          onChange={update('address_line1')}
-          className="field-input"
-        />
-      </div>
-
-      <div>
-        <label htmlFor="address_line2" className="field-label">
-          Unit <span className="font-normal text-slate-400">(optional)</span>
-        </label>
-        <input
-          id="address_line2"
-          value={form.address_line2 ?? ''}
-          onChange={update('address_line2')}
-          className="field-input"
-        />
-      </div>
+      <AddressFields form={form} onChange={update} onPick={pickAddress} />
 
       <div className="grid gap-4 sm:grid-cols-3">
-        <div className="sm:col-span-2">
-          <label htmlFor="city" className="field-label">
-            City
-          </label>
-          <input
-            id="city"
-            required
-            value={form.city}
-            onChange={update('city')}
-            className="field-input"
-          />
-        </div>
-        <div>
-          <label htmlFor="state" className="field-label">
-            State
-          </label>
-          <input
-            id="state"
-            required
-            maxLength={2}
-            value={form.state}
-            onChange={update('state')}
-            placeholder="ME"
-            className="field-input uppercase"
-          />
-        </div>
-      </div>
-
-      <div className="grid gap-4 sm:grid-cols-3">
-        <div>
-          <label htmlFor="postal_code" className="field-label">
-            ZIP
-          </label>
-          <input
-            id="postal_code"
-            required
-            value={form.postal_code}
-            onChange={update('postal_code')}
-            className="field-input"
-          />
-        </div>
         <div>
           <label htmlFor="bedrooms" className="field-label">
             Bedrooms
