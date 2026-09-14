@@ -1319,3 +1319,143 @@ class TestTheAdminLedger:
             == body["total_paid_out_cents"] + body["total_platform_fee_cents"]
         )
         assert body["total_drift_cents"] == 0
+
+    def test_a_checkout_in_flight_is_not_money_collected(
+        self, client: TestClient, make_cleaner, make_open_turnover, db: Session,
+        admin_user, stripe,
+    ) -> None:
+        """**A payment is only true when Stripe says so** (CLAUDE.md).
+
+        Starting a checkout writes a `PaymentIn` with the intended amount and
+        no payout. Reconciled as though it had settled, that reports the whole
+        cleaner share as drift and counts money as collected that Stripe has
+        not told us about — the console's financial alarm firing for every
+        ordinary payment in flight, on the one screen whose job is saying what
+        actually moved. An alarm that is usually wrong is one nobody reads.
+        """
+        job = _completed_job(
+            client, make_cleaner, make_open_turnover, db, price_cents=20_000
+        )
+        started = client.post(
+            f"/api/turnovers/{job['turnover']['id']}/pay",
+            headers=job["owner"]["auth"],
+        )
+        assert started.status_code == 200, started.text
+        # Deliberately no webhook: this is the window between the owner opening
+        # Stripe's page and the money actually moving.
+
+        body = client.get("/api/admin/ledger", headers=admin_user["auth"]).json()
+        row = next(r for r in body["rows"] if r["turnover_id"] == job["turnover"]["id"])
+
+        assert row["status"] in {"pending", "processing"}, row["status"]
+        assert row["collected_cents"] == 0
+        assert row["drift_cents"] == 0
+        assert row["awaiting_cents"] == 20_000, (
+            "the intended amount is still worth showing — it just is not a "
+            "collection"
+        )
+        assert body["total_collected_cents"] == 0
+        assert body["total_drift_cents"] == 0
+        assert body["total_awaiting_cents"] == 20_000
+
+    def test_a_failed_payment_is_not_drift(
+        self, client: TestClient, make_cleaner, make_open_turnover, db: Session,
+        admin_user, stripe,
+    ) -> None:
+        """Nothing was collected, so nothing is out of balance."""
+        job = _completed_job(
+            client, make_cleaner, make_open_turnover, db, price_cents=15_000
+        )
+        client.post(
+            f"/api/turnovers/{job['turnover']['id']}/pay", headers=job["owner"]["auth"]
+        )
+
+        row = db.execute(
+            select(PaymentIn).where(
+                PaymentIn.turnover_id == uuid.UUID(job["turnover"]["id"])
+            )
+        ).scalars().one()
+        row.status = PaymentStatus.FAILED
+        row.failure_message = "card_declined"
+        db.commit()
+
+        body = client.get("/api/admin/ledger", headers=admin_user["auth"]).json()
+        assert body["total_collected_cents"] == 0
+        assert body["total_drift_cents"] == 0
+        assert body["total_awaiting_cents"] == 0
+
+    def test_an_unknown_outcome_is_counted_as_neither(
+        self, client: TestClient, make_cleaner, make_open_turnover, db: Session,
+        admin_user, stripe,
+    ) -> None:
+        """**Guardrail 2's flag, reported rather than resolved.**
+
+        `requires_review` is written before the network call so a process that
+        dies mid-charge leaves a visible row. Counting it as collected claims
+        money nobody has confirmed; counting it as zero quietly writes off
+        money that may well have moved. It gets its own number and a person
+        decides.
+        """
+        job = _completed_job(
+            client, make_cleaner, make_open_turnover, db, price_cents=18_000
+        )
+        client.post(
+            f"/api/turnovers/{job['turnover']['id']}/pay", headers=job["owner"]["auth"]
+        )
+
+        row = db.execute(
+            select(PaymentIn).where(
+                PaymentIn.turnover_id == uuid.UUID(job["turnover"]["id"])
+            )
+        ).scalars().one()
+        row.status = PaymentStatus.REQUIRES_REVIEW
+        db.commit()
+
+        body = client.get("/api/admin/ledger", headers=admin_user["auth"]).json()
+        assert body["total_collected_cents"] == 0
+        assert body["total_drift_cents"] == 0
+        assert body["total_awaiting_cents"] == 0, (
+            "an unknown outcome is not the same as one in flight"
+        )
+        assert body["total_unknown_cents"] == 18_000
+
+    def test_a_payout_against_an_unsettled_payment_still_alarms(
+        self, client: TestClient, make_cleaner, make_open_turnover, db: Session,
+        admin_user, stripe,
+    ) -> None:
+        """**Zeroing the row must not zero the alarm.**
+
+        Money out with nothing in is exactly what drift is for. Suppressing
+        unsettled rows entirely would hide the one case worth shouting about,
+        so collected is zero rather than absent and the subtraction still runs.
+        """
+        job = _completed_job(
+            client, make_cleaner, make_open_turnover, db, price_cents=12_000
+        )
+        client.post(
+            f"/api/turnovers/{job['turnover']['id']}/pay", headers=job["owner"]["auth"]
+        )
+
+        turnover_id = uuid.UUID(job["turnover"]["id"])
+        payment = db.execute(
+            select(PaymentIn).where(PaymentIn.turnover_id == turnover_id)
+        ).scalars().one()
+        payment.status = PaymentStatus.FAILED
+        award = db.execute(
+            select(Award).where(Award.turnover_id == turnover_id)
+        ).scalars().first()
+        db.add(
+            Payout(
+                turnover_id=turnover_id,
+                cleaner_id=award.cleaner_id,
+                amount_cents=11_000,
+                status=PaymentStatus.SUCCEEDED,
+            )
+        )
+        db.commit()
+
+        body = client.get("/api/admin/ledger", headers=admin_user["auth"]).json()
+        assert body["total_drift_cents"] == -11_000, (
+            "a cleaner was paid for a payment that never succeeded, and the "
+            "ledger said nothing"
+        )

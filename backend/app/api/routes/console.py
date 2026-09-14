@@ -51,6 +51,7 @@ from app.schemas.console import (
 )
 from app.schemas.dispute import AdminDisputeOut, DisputePartyOut, DisputeResolution
 from app.services import disputes, payments, turnovers
+from app.services.turnovers import refresh_urgency
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -280,6 +281,16 @@ def unclaimed(
     if not rows:
         return []
 
+    # **The one screen that must not show a stale rung.** A standing vacancy's
+    # urgency is measured against *now*, so it climbs as checkout approaches —
+    # and a turnover nobody has claimed is very often exactly that, because a
+    # cancellation re-posts it with `reopened_at` set. Read straight from the
+    # column, a job created days ago and never opened on the board since still
+    # says `standard` while checkout is hours away, on the queue whose whole
+    # purpose is to sort out what is most urgent. Every other read path calls
+    # this; the newest one was the only one that did not.
+    refresh_urgency(db, [turnover for turnover, _ in rows])
+
     turnover_ids = [turnover.id for turnover, _ in rows]
     # **Only bids the owner could actually accept right now.** Counting every
     # historical row made the alarm lie in the direction that matters: a job
@@ -346,7 +357,14 @@ def _ledger_rows(db: Session) -> list[LedgerRowOut]:
     out: list[LedgerRowOut] = []
     for payment, turnover, prop in rows:
         payout = payments.payout_for(db, turnover.id)
-        figures = payments.reconcile(payment, payout)
+        # **Status-aware, because `reconcile` is settled-payment arithmetic.**
+        # An ordinary checkout waiting on its webhook has an amount and no
+        # payout, so reconciling it reported the whole cleaner share as drift —
+        # the console's financial alarm going off for every payment in flight,
+        # which is how an alarm becomes something people scroll past. Worse, it
+        # claimed money as collected that Stripe has not told us about, on the
+        # one screen whose job is saying what actually moved.
+        figures = payments.ledger_figures(payment, payout)
 
         owner = db.get(User, prop.owner_id)
         award = db.execute(
@@ -367,6 +385,8 @@ def _ledger_rows(db: Session) -> list[LedgerRowOut]:
                 paid_out_cents=figures["paid_out_cents"],
                 platform_fee_cents=figures["platform_fee_cents"],
                 drift_cents=figures["drift_cents"],
+                awaiting_cents=figures["awaiting_cents"],
+                unknown_cents=figures["unknown_cents"],
                 refunded_amount_cents=payment.refunded_amount_cents,
                 failure_message=payment.failure_message,
                 created_at=payment.created_at,
@@ -395,4 +415,8 @@ def ledger(
         total_paid_out_cents=sum(row.paid_out_cents for row in rows),
         total_platform_fee_cents=sum(row.platform_fee_cents for row in rows),
         total_drift_cents=sum(row.drift_cents for row in rows),
+        # Carried separately and never added into the three above: one is money
+        # in flight, the other is money whose fate nobody knows yet.
+        total_awaiting_cents=sum(row.awaiting_cents for row in rows),
+        total_unknown_cents=sum(row.unknown_cents for row in rows),
     )

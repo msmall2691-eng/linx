@@ -25,7 +25,7 @@ import uuid
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app.main import app
@@ -869,4 +869,52 @@ class TestTheUnclaimedAlarmCountsOffers:
         assert mine["bid_count"] == 0, (
             "the accepted-then-cancelled bid was counted as an offer the owner "
             "could still choose"
+        )
+
+
+class TestTheUnclaimedQueueShowsTheRealRung:
+    def test_urgency_is_refreshed_before_the_queue_is_rendered(
+        self, client: TestClient, make_open_turnover, admin_user, db: Session
+    ) -> None:
+        """**The one screen that must not show a stale rung.**
+
+        A standing vacancy's urgency is measured against *now*, so it climbs as
+        checkout approaches. `urgency` is a stored column precisely so the board
+        can sort on it, which means it goes stale unless a read path refreshes
+        it — every other one does. A job posted days ago and not opened since
+        still said `standard` while checkout was hours away, on the queue whose
+        whole purpose is sorting out what is most urgent.
+        """
+        from datetime import datetime, timedelta, timezone as tz
+
+        from app.models.enums import TurnoverUrgency
+        from app.models.turnover import Turnover
+
+        job = make_open_turnover()
+        turnover_id = uuid.UUID(job["turnover"]["id"])
+
+        # Posted far out, so it was written `standard`, with no next guest —
+        # which is what a re-posted job looks like.
+        row = db.get(Turnover, turnover_id)
+        row.checkin_at = None
+        row.checkout_at = datetime.now(tz.utc) + timedelta(days=30)
+        row.urgency = TurnoverUrgency.STANDARD
+        row.is_same_day = False
+        db.commit()
+
+        # Time passes and checkout comes close. Nothing reads the board, so
+        # nothing rewrites the column.
+        db.execute(
+            update(Turnover)
+            .where(Turnover.id == turnover_id)
+            .values(checkout_at=datetime.now(tz.utc) + timedelta(hours=3))
+        )
+        db.commit()
+        assert db.get(Turnover, turnover_id).urgency is TurnoverUrgency.STANDARD
+
+        rows = client.get("/api/admin/unclaimed", headers=admin_user["auth"]).json()
+        mine = next(r for r in rows if r["turnover_id"] == str(turnover_id))
+        assert mine["urgency"] == "urgent", (
+            "the operational queue showed the rung the column happened to be "
+            "left at, not the one the ladder says today"
         )

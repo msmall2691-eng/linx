@@ -101,6 +101,45 @@ def split_for(agreed_price_cents: int, *, fee_bps: int | None = None) -> Split:
     )
 
 
+#: The statuses where **Stripe has told us the money moved**, and
+#: `amount_cents` therefore describes something that happened rather than
+#: something intended. `refunded` belongs here: the money was collected and
+#: then some of it given back, which is two facts `reconcile` already knows how
+#: to add up.
+SETTLED_STATUSES = frozenset({PaymentStatus.SUCCEEDED, PaymentStatus.REFUNDED})
+
+#: **Attempted, outcome unknown.** Guardrail 2 writes this before the network
+#: call so a process that dies mid-charge leaves the row visibly flagged. It is
+#: the one status that must never be folded into a total in either direction:
+#: counting it as collected claims money we have not been told about, and
+#: counting it as zero quietly writes off money that may well have moved. It
+#: gets its own number and a person looks at it.
+UNKNOWN_STATUSES = frozenset({PaymentStatus.REQUIRES_REVIEW})
+
+#: **On its way, and nothing has gone wrong yet.** The owner has a checkout
+#: open, or it is done and the webhook has not arrived. Worth showing an admin
+#: as a number, and worth keeping well away from "collected".
+#:
+#: `failed` is deliberately in none of these three sets. It is not settled, it
+#: is not in flight, and its outcome is not unknown — we were told it did not
+#: happen. The honest report is zero in every column, which is what falling
+#: through to neither set produces.
+IN_FLIGHT_STATUSES = frozenset({PaymentStatus.PENDING, PaymentStatus.PROCESSING})
+
+
+def settled(payment: PaymentIn) -> bool:
+    """Whether this row's amounts describe money that actually moved.
+
+    **One author for "has this been collected".** `amount_cents` on a `pending`
+    or `processing` row is an intention — the checkout the owner has not
+    finished, or the webhook that has not arrived — and on a `failed` one it is
+    an intention that is now known not to have happened. Reading it as
+    collected is the same mistake the webhook design exists to prevent: a
+    payment is only true when Stripe says so.
+    """
+    return payment.status in SETTLED_STATUSES
+
+
 def reconcile(payment: PaymentIn, payout: Payout | None) -> dict[str, int]:
     """Collected, minus what was refunded, equals paid out plus the fee kept.
 
@@ -108,6 +147,14 @@ def reconcile(payment: PaymentIn, payout: Payout | None) -> dict[str, int]:
     note so a test can assert it and a future ledger screen can read it. A
     non-zero `drift` means something moved that this code did not account for —
     the number to alarm on, not to paper over.
+
+    **This is settled-payment arithmetic**, and applying it to an unsettled row
+    is not a rounding problem, it is a false statement. An ordinary checkout
+    waiting on its webhook has `amount_cents` set and no payout, so this would
+    report the whole cleaner share as drift — the console's financial alarm
+    going off for every payment in flight, which is how an alarm becomes
+    something people scroll past. Ask `settled()` first; `ledger_figures()`
+    does.
     """
     collected = payment.amount_cents - payment.refunded_amount_cents
     paid_out = 0
@@ -125,6 +172,45 @@ def reconcile(payment: PaymentIn, payout: Payout | None) -> dict[str, int]:
         "paid_out_cents": paid_out,
         "platform_fee_cents": fee_kept,
         "drift_cents": collected - paid_out - fee_kept,
+    }
+
+
+def ledger_figures(payment: PaymentIn, payout: Payout | None) -> dict[str, int]:
+    """What a ledger row may claim about this payment, whatever its status.
+
+    Settled rows get `reconcile`. Everything else contributes **nothing** to
+    collected, paid out or the fee — but still reports drift honestly, because
+    a payout against a payment that never succeeded is exactly the thing drift
+    is for: money out with nothing in. Collected is zero there rather than
+    absent, so the subtraction still happens and still alarms.
+
+    `awaiting_cents` and `unknown_cents` carry the intended amounts out
+    separately, so a screen can show them without their ever touching a total
+    that is supposed to mean "money that moved".
+    """
+    if settled(payment):
+        figures = reconcile(payment, payout)
+        figures["awaiting_cents"] = 0
+        figures["unknown_cents"] = 0
+        return figures
+
+    paid_out = 0
+    if payout is not None:
+        paid_out = payout.amount_cents - payout.reversed_amount_cents
+
+    return {
+        "collected_cents": 0,
+        "paid_out_cents": paid_out,
+        "platform_fee_cents": 0,
+        # 0 - paid_out - 0. Normally zero; non-zero exactly when somebody has
+        # been paid for a payment that did not settle, which is worth a shout.
+        "drift_cents": -paid_out,
+        "awaiting_cents": (
+            payment.amount_cents if payment.status in IN_FLIGHT_STATUSES else 0
+        ),
+        "unknown_cents": (
+            payment.amount_cents if payment.status in UNKNOWN_STATUSES else 0
+        ),
     }
 
 

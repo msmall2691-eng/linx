@@ -294,9 +294,48 @@ function LedgerTable({ ledger, onRefund, timeZone }) {
             </dd>
           </div>
         </dl>
+        {/* **Shown, and kept out of the four above.** Money a checkout is in
+            the middle of collecting is an intention, not a fact, and money
+            whose fate nobody knows is neither collected nor lost. Folding
+            either into "collected" would put the drift alarm into the red for
+            every ordinary payment in flight, which is how an alarm becomes
+            something people scroll past. */}
+        {(ledger.total_awaiting_cents > 0 || ledger.total_unknown_cents > 0) && (
+          <dl className="mt-4 grid gap-4 border-t border-slate-200 pt-4 sm:grid-cols-2">
+            {ledger.total_awaiting_cents > 0 && (
+              <div>
+                <dt className="text-xs font-medium uppercase tracking-wide text-slate-500">
+                  In flight
+                </dt>
+                <dd className="mt-1 font-semibold" data-testid="total-awaiting">
+                  {formatCents(ledger.total_awaiting_cents)}
+                </dd>
+                <p className="mt-1 text-xs text-slate-500">
+                  Checkouts started and not yet confirmed by Stripe. Not collected.
+                </p>
+              </div>
+            )}
+            {ledger.total_unknown_cents > 0 && (
+              <div>
+                <dt className="text-xs font-medium uppercase tracking-wide text-slate-500">
+                  Needs a person
+                </dt>
+                <dd className="mt-1 font-semibold text-amber-700" data-testid="total-unknown">
+                  {formatCents(ledger.total_unknown_cents)}
+                </dd>
+                <p className="mt-1 text-xs text-slate-500">
+                  A charge was attempted and the outcome was never recorded. Check
+                  Stripe before doing anything else with these.
+                </p>
+              </div>
+            )}
+          </dl>
+        )}
+
         <p className="mt-3 text-xs text-slate-500">
           Collected minus paid out minus the fee is drift, and drift is zero or something
-          moved that this system cannot account for.
+          moved that this system cannot account for. Money still in flight is counted in
+          none of those.
         </p>
       </div>
 

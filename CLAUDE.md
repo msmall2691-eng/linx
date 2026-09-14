@@ -916,6 +916,12 @@ become untrustworthy and there is no way to tell which is lying.
   scheduled alarm makes, moved out of `app/tasks/scheduled.py` so the two
   cannot drift. `UNCLAIMED_LOOKBACK` moved with it and is re-exported from its
   old home, because a name that moves silently is a name somebody still imports.
+  It calls `refresh_urgency` before serialising, like every other read path: a
+  standing vacancy's rung is measured against *now* and climbs as checkout
+  approaches, and an unclaimed job is very often exactly that, because a
+  cancellation re-posts it. Read straight from the column, the queue whose
+  purpose is sorting out what is most urgent showed whatever rung the job was
+  last written at.
   Its bid count is `BidStatus.SUBMITTED` only: a job re-posted after a
   cancellation still carries the accepted bid and every declined one, so
   counting them all made the alarm read "3 bids, none accepted" — an owner
@@ -931,6 +937,29 @@ become untrustworthy and there is no way to tell which is lying.
   carries `total_drift_cents` from `payments.reconcile`. Two queries that could
   disagree about the same money is how a reconciliation screen ends up
   reassuring somebody about a number it did not check.
+- **It reads `payments.ledger_figures`, not `reconcile` directly, because
+  `reconcile` is settled-payment arithmetic.** `amount_cents` on a `pending` or
+  `processing` row is an intention — the checkout the owner has not finished,
+  or the webhook that has not arrived — and on a `failed` one it is an
+  intention now known not to have happened. Reconciled anyway, an ordinary
+  payment in flight has an amount and no payout, so the whole cleaner share
+  read as drift: the financial alarm in the red for every normal checkout,
+  which is how an alarm becomes something people scroll past. It also claimed
+  money as collected that Stripe had not confirmed, on the one screen whose job
+  is saying what actually moved.
+
+  `payments.settled()` is the single author for "has this been collected", and
+  four buckets fall out of it, each meaning something different: **settled**
+  (`succeeded`/`refunded`) gets the reconcile arithmetic; **in flight**
+  (`pending`/`processing`) is carried as `awaiting_cents`, shown and never
+  totalled as collected; **unknown** (`requires_review` — guardrail 2's flag,
+  written before the network call) is carried as `unknown_cents`, because
+  counting it as collected claims money nobody confirmed and counting it as
+  zero writes off money that may well have moved; and **failed** is in none of
+  them, reporting zero everywhere, because we were told it did not happen.
+  Drift is still computed on unsettled rows rather than suppressed — a payout
+  against a payment that never succeeded is money out with nothing in, which is
+  exactly what drift is for.
 
 ## Working in this repo
 

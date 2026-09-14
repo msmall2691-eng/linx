@@ -87,7 +87,15 @@ class LedgerRowOut(BaseModel):
     #: The platform's share. Zero after a full refund, which gives it back.
     platform_fee_cents: int
     #: `collected - paid_out - platform_fee`. **Alarm on anything but zero.**
+    #: Zero on an unsettled row rather than the cleaner's whole share, because
+    #: nothing has been collected there to be out of balance with.
     drift_cents: int
+    #: This row's intended amount while a checkout is still in flight. Never
+    #: added to `collected_cents`; a payment is only true when Stripe says so.
+    awaiting_cents: int = 0
+    #: This row's amount when the outcome is unknown (`requires_review`).
+    #: Neither collected nor written off — a person decides which.
+    unknown_cents: int = 0
 
     refunded_amount_cents: int
     #: The reason a refund was issued, or why a payment failed.
@@ -109,3 +117,12 @@ class LedgerOut(BaseModel):
     total_platform_fee_cents: int
     #: The sum of every row's drift. Zero, or somebody has work to do.
     total_drift_cents: int
+    #: Money a checkout is in the middle of collecting — an intention, not a
+    #: fact. Deliberately outside the three totals above and outside drift: a
+    #: payment is only true when Stripe says so, and an alarm that fires for
+    #: every payment in flight is one nobody reads.
+    total_awaiting_cents: int = 0
+    #: Money whose fate nobody knows — guardrail 2's `requires_review`, written
+    #: before the network call so a crash leaves a visible flag. Counted as
+    #: neither collected nor lost, because an unknown outcome is neither.
+    total_unknown_cents: int = 0
