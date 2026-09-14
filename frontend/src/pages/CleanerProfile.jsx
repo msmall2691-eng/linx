@@ -4,6 +4,7 @@ import Alert from '../components/Alert.jsx'
 import DocumentList from '../components/DocumentList.jsx'
 import PayoutPanel from '../components/PayoutPanel.jsx'
 import Rating from '../components/Rating.jsx'
+import ServiceAreaPicker from '../components/ServiceAreaPicker.jsx'
 import VettingPanel from '../components/VettingPanel.jsx'
 import { apiFetch } from '../lib/api.js'
 import { useConfig } from '../lib/config.jsx'
@@ -145,53 +146,40 @@ export default function CleanerProfile() {
             />
           </div>
 
-          <div className="grid gap-4 sm:grid-cols-3">
-            <div>
-              <label htmlFor="service_lat" className="field-label">
-                Latitude
-              </label>
-              <input
-                id="service_lat"
-                inputMode="decimal"
-                value={form.service_lat}
-                onChange={update('service_lat')}
-                placeholder="43.6591"
-                className="field-input"
-              />
-            </div>
-            <div>
-              <label htmlFor="service_lng" className="field-label">
-                Longitude
-              </label>
-              <input
-                id="service_lng"
-                inputMode="decimal"
-                value={form.service_lng}
-                onChange={update('service_lng')}
-                placeholder="-70.2568"
-                className="field-input"
-              />
-            </div>
-            <div>
-              <label htmlFor="service_radius_miles" className="field-label">
-                Radius (miles)
-              </label>
+          {/* The coordinates are still what the matching runs on and still what
+              the API takes. They are just no longer something a person is asked
+              to type: nobody knows their own latitude, and a signup form that
+              opens with two decimal fields is a signup form people close. */}
+          <ServiceAreaPicker
+            lat={form.service_lat}
+            lng={form.service_lng}
+            radiusMiles={form.service_radius_miles}
+            onChange={({ lat, lng }) =>
+              setForm((current) => ({ ...current, service_lat: lat, service_lng: lng }))
+            }
+          />
+
+          <div>
+            <label htmlFor="service_radius_miles" className="field-label">
+              How far will you travel?
+            </label>
+            <div className="flex items-center gap-3">
               <input
                 id="service_radius_miles"
-                type="number"
+                type="range"
                 min={1}
-                max={200}
+                max={60}
                 required
                 value={form.service_radius_miles}
                 onChange={update('service_radius_miles')}
-                className="field-input"
+                className="w-full accent-brand-600"
               />
+              <span className="w-20 shrink-0 text-sm font-medium text-slate-700">
+                {form.service_radius_miles} mi
+              </span>
             </div>
+            <p className="mt-1 text-xs text-slate-500">We serve {regionName}.</p>
           </div>
-          <p className="text-xs text-slate-500">
-            Turnovers show up on your board when they fall inside this circle. We serve{' '}
-            {regionName}.
-          </p>
 
           <button type="submit" disabled={saving} className="btn-primary w-full">
             {saving ? 'Saving…' : profile.isNew ? 'Create profile' : 'Save changes'}
