@@ -2279,3 +2279,59 @@ class TestAFailedReadIsNotASnapshot:
         assert db.get(PropertyCalendar, calendar_id).last_error is None, (
             "the calendar is fine; the failure that lost the race says otherwise"
         )
+
+
+class TestTheEpochIsTheWholeConcurrencyStory:
+    """Three rounds of review went into doing this with timestamps — which one
+    to store, which one to compare, whether a failure counts — and each answer
+    produced the next question. An epoch has one value that means one thing."""
+
+    def test_a_successful_read_advances_it_and_a_failure_does_not(
+        self, client: TestClient, make_user, db: Session
+    ) -> None:
+        owner = make_user(role="owner")
+        calendar = _calendar(db, _property(client, owner)["id"])
+        assert calendar.sync_epoch == 0
+
+        calendars.sync(db, calendar, client=_fake_client(_feed_for(10)))
+        db.expire_all()
+        assert db.get(PropertyCalendar, calendar.id).sync_epoch == 1
+
+        with pytest.raises(calendars.CalendarError):
+            calendars.sync(db, calendar, client=_fake_client(status=503))
+        db.expire_all()
+        assert db.get(PropertyCalendar, calendar.id).sync_epoch == 1, (
+            "a read that produced nothing is not a newer snapshot"
+        )
+
+    def test_a_discarded_snapshot_does_not_advance_it_either(
+        self, client: TestClient, make_user, db: Session
+    ) -> None:
+        """Otherwise the loser of the race would look like the winner to the
+        next reader."""
+        from app.db import SessionLocal
+
+        owner = make_user(role="owner")
+        prop = _property(client, owner)
+        calendar = _calendar(db, prop["id"])
+        calendar_id = calendar.id
+
+        calendars.sync(db, calendar, client=_fake_client(_feed_for(10)))
+
+        def overtaken(request: httpx.Request) -> httpx.Response:
+            elsewhere = SessionLocal()
+            try:
+                fresh = elsewhere.get(PropertyCalendar, calendar_id)
+                calendars.sync(elsewhere, fresh, client=_fake_client(_feed_for(20)))
+            finally:
+                elsewhere.close()
+            return httpx.Response(200, text=_feed_for(10))
+
+        result = calendars.sync(
+            db, calendar, client=httpx.Client(transport=httpx.MockTransport(overtaken))
+        )
+        assert result.created == 0
+
+        db.expire_all()
+        # The newer read took it to 2; the discarded one must not have touched it.
+        assert db.get(PropertyCalendar, calendar_id).sync_epoch == 2

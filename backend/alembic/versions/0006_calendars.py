@@ -75,10 +75,13 @@ def upgrade() -> None:
         # The warning the scheduled pass would otherwise only ever log: a
         # booking vanished from a job somebody is already on.
         sa.Column("last_stale_kept", sa.Integer(), nullable=True),
-        # "Last attempt" and "last good snapshot" are different questions: the
-        # owner's panel wants the first, and the check that stops a slow read
-        # overwriting a fast one wants the second.
-        sa.Column("last_success_at", sa.DateTime(timezone=True), nullable=True),
+        # Optimistic concurrency for overlapping reads of one feed: a reader
+        # notes this before fetching and, under the lock, commits only if it is
+        # unchanged. An integer rather than a clock, because "has anything
+        # happened since I looked?" is not a question about time.
+        sa.Column(
+            "sync_epoch", sa.Integer(), nullable=False, server_default="0"
+        ),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),

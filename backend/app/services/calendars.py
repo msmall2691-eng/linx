@@ -969,6 +969,9 @@ def sync(
     legitimately deletes drafts.
     """
     moment = now or datetime.now(tz=region_timezone())
+    # The epoch as it stood when this attempt started. Everything about
+    # overlapping reads is decided by comparing this against the locked row.
+    epoch = calendar.sync_epoch
 
     try:
         prop = db.get(Property, calendar.property_id)
@@ -976,8 +979,6 @@ def sync(
             raise CalendarError("That property no longer exists.")
         _gate(calendar, prop)
 
-        # When the fetch began, so a slow read cannot overwrite a fast one.
-        began = datetime.now(tz=region_timezone())
         text = _fetch_within(calendar.url, client=client, seconds=MAX_FEED_SECONDS)
         bookings = parse(text)
 
@@ -995,10 +996,17 @@ def sync(
         # those would recreate a draft the newer pass correctly removed, or put
         # moved dates back. Whoever read the feed most recently wins, which is
         # the only ordering that means anything here.
-        if calendar.last_success_at is not None and calendar.last_success_at > began:
+        # **Has anything happened since we looked?** Under the lock, and as an
+        # equality rather than a comparison of two clocks — see
+        # `PropertyCalendar.sync_epoch`. If another read has succeeded while we
+        # were on the network, our bookings are old news, and applying them
+        # would recreate a draft it correctly removed or put moved dates back.
+        if calendar.sync_epoch != epoch:
             logger.info(
-                "calendar %s: discarding a snapshot older than the last sync",
+                "calendar %s: discarding a snapshot from epoch %d, now at %d",
                 calendar.id,
+                epoch,
+                calendar.sync_epoch,
             )
             db.commit()
             return SyncResult()
@@ -1009,9 +1017,9 @@ def sync(
 
         calendar.last_error = None
         calendar.last_synced_at = moment
-        # The watermark the freshness check reads, advanced only by a read that
-        # actually produced bookings — see `PropertyCalendar.last_success_at`.
-        calendar.last_success_at = moment
+        # Bumped under the same lock that just verified it, which is what makes
+        # the check above mean anything.
+        calendar.sync_epoch = epoch + 1
         calendar.last_booking_count = len(bookings)
         # **Persisted, not just returned.** The scheduled pass is the one that
         # usually finds this, and it has nobody to hand a return value to — see
@@ -1019,7 +1027,7 @@ def sync(
         calendar.last_stale_kept = result.stale_but_kept
         db.commit()
     except CalendarError as error:
-        _record_failure(db, calendar.id, error, moment)
+        _record_failure(db, calendar.id, error, moment, epoch)
         raise
 
     logger.info(
@@ -1035,7 +1043,11 @@ def sync(
 
 
 def _record_failure(
-    db: Session, calendar_id: uuid.UUID, error: CalendarError, moment: datetime
+    db: Session,
+    calendar_id: uuid.UUID,
+    error: CalendarError,
+    moment: datetime,
+    epoch: int,
 ) -> None:
     """Leave the reason where the owner will see it, and change nothing else.
 
@@ -1043,25 +1055,44 @@ def _record_failure(
     too: a failure partway through must not commit half a sync alongside its own
     error message.
 
-    `moment` is when *this* attempt began, which is what makes the ordering
-    check below meaningful.
+    `epoch` is what the feed's `sync_epoch` was when this attempt started, and
+    **the row is locked before it is compared**. Checking on an unlocked read
+    and then writing is check-then-write — the shape guardrail 1 exists to
+    forbid — and a successful sync committing in that gap would be buried by
+    this failure.
+
+    **That lock has no test, and it is worth saying so rather than implying
+    otherwise.** Three attempts at one all passed with the lock removed: the
+    re-read is not what it buys (the `rollback` above already expires the
+    session), and the `UPDATE` blocks on a held row either way, so the
+    observable outcome came out the same each time. The lock is kept because
+    check-then-write is wrong regardless of whether this environment can be
+    made to show it — but the epoch comparison below is what the tests cover.
     """
     db.rollback()
-    calendar = db.get(PropertyCalendar, calendar_id)
+    calendar = db.execute(
+        select(PropertyCalendar)
+        .where(PropertyCalendar.id == calendar_id)
+        .with_for_update(key_share=True)
+        .execution_options(populate_existing=True)
+    ).scalar_one_or_none()
     if calendar is None:
         # The feed was deleted underneath us. Nothing to write the reason on,
         # and nothing that needs it.
+        db.commit()
         return
-    if calendar.last_success_at is not None and calendar.last_success_at > moment:
-        # **An older failure does not get to bury a newer success.** Two reads
-        # can overlap, and this one began before a read that has since worked;
-        # writing its error now would put a stale "could not be read" on a
-        # calendar that is currently fine, and the owner would go looking for a
-        # problem that is already over.
+    if calendar.sync_epoch != epoch:
+        # **An older failure does not get to bury a newer success.** A read has
+        # succeeded since this one started, so writing this error now would put
+        # a stale "could not be read" on a calendar that is currently fine, and
+        # send the owner looking for a problem already over.
         logger.info(
-            "calendar %s: not recording a failure older than the last success",
+            "calendar %s: not recording a failure from epoch %d, now at %d",
             calendar_id,
+            epoch,
+            calendar.sync_epoch,
         )
+        db.commit()
         return
     calendar.last_error = error.detail
     calendar.last_synced_at = moment

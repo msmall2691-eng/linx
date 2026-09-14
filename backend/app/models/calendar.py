@@ -93,13 +93,22 @@ class PropertyCalendar(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     last_synced_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
-    #: The last attempt that actually produced bookings. **Separate from
-    #: `last_synced_at` on purpose**: the freshness check that stops a slow
-    #: fetch overwriting a fast one compares against this, and a *failed* read
-    #: advancing the watermark would discard a good snapshot that was merely
-    #: slower — leaving the jobs stale with nothing to say why.
-    last_success_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
+    #: How many times this feed has been read successfully. **The whole of the
+    #: concurrency story**, and an integer rather than a clock on purpose.
+    #:
+    #: Two reads of one feed can overlap, and the slower one must not commit an
+    #: older snapshot over a newer one. Three rounds of review went into doing
+    #: that with timestamps — which one to store, which one to compare, whether
+    #: a failed read counts — and each answer produced the next question,
+    #: because wall-clock comparison across two processes is the wrong
+    #: primitive for "has anything happened since I looked?"
+    #:
+    #: This is plain optimistic concurrency instead: a reader notes the epoch
+    #: before fetching, and under the lock either it is unchanged — nothing
+    #: happened, commit and bump it — or it is not, and this snapshot is stale
+    #: by definition. No clocks, no skew, and one value that means one thing.
+    sync_epoch: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
     )
     #: Null when the last run succeeded. A sentence when it did not — shown to
     #: the owner, so it says what to do rather than naming an exception class.

@@ -444,13 +444,15 @@ bookings — which would recreate a draft the newer pass correctly removed, or p
 moved dates back. `sync` records when its fetch began and discards a snapshot
 older than the calendar's last successful read.
 
-**"Last attempt" and "last good snapshot" are two columns on purpose.**
-`last_synced_at` is every attempt, which is what the owner's panel means by
-"Last read". `last_success_at` is only a read that produced bookings, and it is
-what the freshness check compares against — a *failed* read advancing the
-watermark would discard a good snapshot that was merely slower, leaving the jobs
-stale with nothing to say why. The same ordering guards the failure path, so an
-older failure cannot bury a newer success and send the owner looking for a
+**`property_calendars.sync_epoch` is the whole of that**, and it is an integer
+rather than a clock on purpose. Three review rounds went into doing this with
+timestamps — which one to store, which one to compare, whether a failed read
+counts — and each answer produced the next question, because comparing wall
+clocks across two processes is the wrong primitive for "has anything happened
+since I looked?". Plain optimistic concurrency instead: note the epoch before
+fetching, and under the lock either it is unchanged (commit, bump it) or this
+snapshot is stale by definition. The same comparison guards the failure path, so
+an older failure cannot bury a newer success and send the owner looking for a
 problem that is already over.
 
 **Every `CalendarError` out of `sync` leaves its reason on the row**, from any
