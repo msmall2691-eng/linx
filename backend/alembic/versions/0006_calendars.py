@@ -75,6 +75,10 @@ def upgrade() -> None:
         # The warning the scheduled pass would otherwise only ever log: a
         # booking vanished from a job somebody is already on.
         sa.Column("last_stale_kept", sa.Integer(), nullable=True),
+        # "Last attempt" and "last good snapshot" are different questions: the
+        # owner's panel wants the first, and the check that stops a slow read
+        # overwriting a fast one wants the second.
+        sa.Column("last_success_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
@@ -141,6 +145,12 @@ def upgrade() -> None:
         "turnovers",
         sa.Column("owner_edited_at", sa.DateTime(timezone=True), nullable=True),
     )
+    # Which feed proposed this job, as a digest. Removing a calendar nulls
+    # `source_calendar_id`, so without this a reconnecting feed cannot tell its
+    # own orphans from another feed's that happens to reuse an event id.
+    op.add_column(
+        "turnovers", sa.Column("source_feed_key", sa.String(length=64), nullable=True)
+    )
 
     op.add_column(
         "properties",
@@ -164,6 +174,7 @@ def downgrade() -> None:
     op.drop_column("properties", "default_checkout_time")
 
     op.drop_constraint("uq_turnovers_source_event", "turnovers", type_="unique")
+    op.drop_column("turnovers", "source_feed_key")
     op.drop_column("turnovers", "owner_edited_at")
     op.drop_column("turnovers", "source_synced_at")
     op.drop_column("turnovers", "external_ref")

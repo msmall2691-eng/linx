@@ -310,8 +310,13 @@ one sentence: **linx owns the turnover; the listing site owns the booking.**
    being removed**: deleting a feed is `ON DELETE SET NULL` because a job
    outlives the calendar that proposed it, and re-adding the same feed is the
    *documented* way to change its URL — so `reconcile` adopts an orphan on the
-   same property carrying the same event id rather than proposing the booking a
-   second time. Without that, remove-and-re-add turned one stay into two jobs. A booking whose dates move is
+   same property carrying the same event id **and the same
+   `turnovers.source_feed_key`** rather than proposing the booking a second
+   time. Without adoption, remove-and-re-add turned one stay into two jobs;
+   without the feed key, adoption reached too far — UIDs are arbitrary
+   feed-local strings, so two listings on one property whose feeds reuse one
+   would hand each other's jobs over. The key is a digest rather than the URL
+   because the URL is a credential. A booking whose dates move is
    one booking; without that it becomes a second job while the first sits
    orphaned. The RECURRENCE-ID half is iCalendar's own rule rather than a
    workaround: an overridden occurrence legitimately repeats its parent's UID,
@@ -438,6 +443,15 @@ scheduled pass can overlap, and the slower fetch commits second holding *older*
 bookings — which would recreate a draft the newer pass correctly removed, or put
 moved dates back. `sync` records when its fetch began and discards a snapshot
 older than the calendar's last successful read.
+
+**"Last attempt" and "last good snapshot" are two columns on purpose.**
+`last_synced_at` is every attempt, which is what the owner's panel means by
+"Last read". `last_success_at` is only a read that produced bookings, and it is
+what the freshness check compares against — a *failed* read advancing the
+watermark would discard a good snapshot that was merely slower, leaving the jobs
+stale with nothing to say why. The same ordering guards the failure path, so an
+older failure cannot bury a newer success and send the owner looking for a
+problem that is already over.
 
 **Every `CalendarError` out of `sync` leaves its reason on the row**, from any
 step, via one handler that rolls back first. A gate refusal once escaped the

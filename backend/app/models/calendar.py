@@ -88,7 +88,17 @@ class PropertyCalendar(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     # bookings in it. These columns are what makes the difference legible on
     # the owner's own screen rather than in a log nobody reads.
 
+    #: The last **attempt**, successful or not. This is what the owner's panel
+    #: shows as "Last read", because an attempt that failed is still a read.
     last_synced_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    #: The last attempt that actually produced bookings. **Separate from
+    #: `last_synced_at` on purpose**: the freshness check that stops a slow
+    #: fetch overwriting a fast one compares against this, and a *failed* read
+    #: advancing the watermark would discard a good snapshot that was merely
+    #: slower — leaving the jobs stale with nothing to say why.
+    last_success_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
     #: Null when the last run succeeded. A sentence when it did not — shown to

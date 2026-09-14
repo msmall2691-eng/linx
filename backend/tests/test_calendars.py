@@ -2100,7 +2100,9 @@ class TestAJobKeepsItsIdentityAcrossAReconnect:
         orphan = db.execute(select(Turnover)).scalars().one()
         assert orphan.source_calendar_id is None, "the job outlives its calendar"
 
-        second = _calendar(db, prop["id"], url="https://example.test/b.ics")
+        # **The same URL** — this is a reconnect, which is the flow the product
+        # documents. A different URL is a different feed and must not adopt.
+        second = _calendar(db, prop["id"])
         result = calendars.sync(db, second, client=_fake_client(feed))
 
         assert result.created == 0
@@ -2114,8 +2116,8 @@ class TestAJobKeepsItsIdentityAcrossAReconnect:
     def test_adoption_does_not_reach_across_properties(
         self, client: TestClient, make_user, db: Session
     ) -> None:
-        """Identity is scoped: another owner's orphan with a colliding event id
-        is not this feed's to claim."""
+        """Identity is scoped: another property's orphan with a colliding event
+        id is not this feed's to claim."""
         owner = make_user(role="owner")
         mine = _property(client, owner)
         theirs = _property(client, owner)
@@ -2128,6 +2130,31 @@ class TestAJobKeepsItsIdentityAcrossAReconnect:
 
         ours = _calendar(db, mine["id"])
         result = calendars.sync(db, ours, client=_fake_client(feed))
+        assert result.adopted == 0
+        assert result.created == 1
+
+    def test_a_different_feed_does_not_adopt_a_colliding_event_id(
+        self, client: TestClient, make_user, db: Session
+    ) -> None:
+        """**The same property is not the same feed.** UIDs are arbitrary
+        feed-local strings, so two listings whose feeds reuse one would hand
+        each other's jobs over — an untouched draft silently re-dated, or a
+        posted job suppressing the real booking entirely. Adoption therefore
+        checks which feed proposed the orphan, not just where it lives."""
+        owner = make_user(role="owner")
+        prop = _property(client, owner)
+        feed = _feed_for(10)
+
+        first = _calendar(db, prop["id"], url="https://example.test/listing-one.ics")
+        calendars.sync(db, first, client=_fake_client(feed))
+        db.delete(first)
+        db.commit()
+
+        # A different listing on the same property, whose feed happens to use
+        # the same event id.
+        second = _calendar(db, prop["id"], url="https://example.test/listing-two.ics")
+        result = calendars.sync(db, second, client=_fake_client(feed))
+
         assert result.adopted == 0
         assert result.created == 1
 
@@ -2179,4 +2206,76 @@ class TestTheNewerReadWins:
         db.expire_all()
         assert db.execute(select(Turnover)).scalars().all() == [], (
             "the newer read said the booking is gone, and it stays gone"
+        )
+
+
+class TestAFailedReadIsNotASnapshot:
+    def test_a_quick_failure_does_not_discard_a_slower_good_read(
+        self, client: TestClient, make_user, db: Session
+    ) -> None:
+        """**The watermark is "last good snapshot", not "last attempt".**
+
+        A slow valid fetch starts first; a later overlapping fetch fails fast.
+        If the failure advanced the watermark, the good snapshot would then be
+        discarded as older — leaving the jobs stale, with nothing to say why.
+        """
+        from app.db import SessionLocal
+
+        owner = make_user(role="owner")
+        prop = _property(client, owner)
+        calendar = _calendar(db, prop["id"])
+        calendar_id = calendar.id
+
+        def slow_but_good(request: httpx.Request) -> httpx.Response:
+            # While we read, a later attempt fails quickly.
+            elsewhere = SessionLocal()
+            try:
+                fresh = elsewhere.get(PropertyCalendar, calendar_id)
+                with pytest.raises(calendars.CalendarError):
+                    calendars.sync(elsewhere, fresh, client=_fake_client(status=503))
+            finally:
+                elsewhere.close()
+            return httpx.Response(200, text=_feed_for(10))
+
+        result = calendars.sync(
+            db, calendar, client=httpx.Client(transport=httpx.MockTransport(slow_but_good))
+        )
+        assert result.created == 1, "a failure is not a newer snapshot"
+
+        db.expire_all()
+        assert len(db.execute(select(Turnover)).scalars().all()) == 1
+
+    def test_an_older_failure_does_not_bury_a_newer_success(
+        self, client: TestClient, make_user, db: Session
+    ) -> None:
+        """The converse. Writing a stale "could not be read" onto a calendar
+        that is currently fine sends the owner looking for a problem that is
+        already over."""
+        from app.db import SessionLocal
+
+        owner = make_user(role="owner")
+        prop = _property(client, owner)
+        calendar = _calendar(db, prop["id"])
+        calendar_id = calendar.id
+
+        def failing_but_overtaken(request: httpx.Request) -> httpx.Response:
+            # A newer read succeeds while this older one is still going.
+            elsewhere = SessionLocal()
+            try:
+                fresh = elsewhere.get(PropertyCalendar, calendar_id)
+                calendars.sync(elsewhere, fresh, client=_fake_client(_feed_for(10)))
+            finally:
+                elsewhere.close()
+            return httpx.Response(503, text="")
+
+        with pytest.raises(calendars.CalendarError):
+            calendars.sync(
+                db,
+                calendar,
+                client=httpx.Client(transport=httpx.MockTransport(failing_but_overtaken)),
+            )
+
+        db.expire_all()
+        assert db.get(PropertyCalendar, calendar_id).last_error is None, (
+            "the calendar is fine; the failure that lost the race says otherwise"
         )

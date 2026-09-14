@@ -177,6 +177,15 @@ HORIZON = timedelta(days=120)
 #: hashed rather than truncated — see `parse`.
 MAX_EXTERNAL_REF = 500
 
+
+def feed_key(url: str) -> str:
+    """Which feed this is, as a value safe to store beside a job.
+
+    A digest rather than the URL, because the URL is a credential — see
+    `PropertyCalendar.url`. Adoption only ever needs equality.
+    """
+    return sha256(url.encode()).hexdigest()
+
 #: How far *behind* now a departure can be and still be worth proposing.
 #:
 #: Exports keep their history — Airbnb's carries every past stay — and the
@@ -645,6 +654,7 @@ def reconcile(
     """
     moment = now or datetime.now(tz=region_timezone())
     result = SyncResult(bookings_seen=len(proposed))
+    this_feed = feed_key(calendar.url)
 
     prop = db.get(Property, calendar.property_id)
     if prop is None:
@@ -690,6 +700,13 @@ def reconcile(
                     Turnover.property_id == prop.id,
                     Turnover.source_calendar_id.is_(None),
                     Turnover.external_ref == job.external_ref,
+                    # **And it has to have come from this feed.** A matching
+                    # event id on the same property does not prove that: UIDs
+                    # are arbitrary feed-local strings, so two listings whose
+                    # feeds reuse one would hand each other's jobs over — an
+                    # untouched draft silently re-dated, or a posted job
+                    # suppressing the real booking entirely.
+                    Turnover.source_feed_key == this_feed,
                 )
                 .with_for_update(key_share=True)
                 .execution_options(populate_existing=True)
@@ -710,6 +727,7 @@ def reconcile(
                 status=TurnoverStatus.DRAFT,
                 source_calendar_id=calendar.id,
                 external_ref=job.external_ref,
+                source_feed_key=this_feed,
                 # The database's clock, not ours — see `_touched_by_a_person`.
                 source_synced_at=func.now(),
             )
@@ -977,7 +995,7 @@ def sync(
         # those would recreate a draft the newer pass correctly removed, or put
         # moved dates back. Whoever read the feed most recently wins, which is
         # the only ordering that means anything here.
-        if calendar.last_synced_at is not None and calendar.last_synced_at > began:
+        if calendar.last_success_at is not None and calendar.last_success_at > began:
             logger.info(
                 "calendar %s: discarding a snapshot older than the last sync",
                 calendar.id,
@@ -991,6 +1009,9 @@ def sync(
 
         calendar.last_error = None
         calendar.last_synced_at = moment
+        # The watermark the freshness check reads, advanced only by a read that
+        # actually produced bookings — see `PropertyCalendar.last_success_at`.
+        calendar.last_success_at = moment
         calendar.last_booking_count = len(bookings)
         # **Persisted, not just returned.** The scheduled pass is the one that
         # usually finds this, and it has nobody to hand a return value to — see
@@ -1021,12 +1042,26 @@ def _record_failure(
     **Rolls back first**, which matters now that this covers the reconcile step
     too: a failure partway through must not commit half a sync alongside its own
     error message.
+
+    `moment` is when *this* attempt began, which is what makes the ordering
+    check below meaningful.
     """
     db.rollback()
     calendar = db.get(PropertyCalendar, calendar_id)
     if calendar is None:
         # The feed was deleted underneath us. Nothing to write the reason on,
         # and nothing that needs it.
+        return
+    if calendar.last_success_at is not None and calendar.last_success_at > moment:
+        # **An older failure does not get to bury a newer success.** Two reads
+        # can overlap, and this one began before a read that has since worked;
+        # writing its error now would put a stale "could not be read" on a
+        # calendar that is currently fine, and the owner would go looking for a
+        # problem that is already over.
+        logger.info(
+            "calendar %s: not recording a failure older than the last success",
+            calendar_id,
+        )
         return
     calendar.last_error = error.detail
     calendar.last_synced_at = moment
