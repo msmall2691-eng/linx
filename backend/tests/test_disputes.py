@@ -446,3 +446,124 @@ class TestTheConsoleReadsSharedDefinitions:
             "/api/admin/summary", headers=admin_user["auth"]
         ).json()
         assert summary["open_disputes"] == 1
+
+
+# --------------------------------------------------------------------------
+# A dispute is about one booking, and a turnover can have several
+# --------------------------------------------------------------------------
+
+
+def _re_award(client: TestClient, job: dict, make_cleaner) -> dict:
+    """Cancel the live booking and award the re-posted job to somebody else.
+
+    An ordinary supported sequence: `awards.py` puts a cancelled turnover back
+    to `open`, the bench picks it up, and the next accept writes a *second*
+    `Award` row alongside the cancelled first one.
+    """
+    turnover_id = job["turnover"]["id"]
+    cancelled = client.post(
+        f"/api/board/jobs/{turnover_id}/cancel",
+        json={"reason": "Van is off the road."},
+        headers=job["cleaner"]["auth"],
+    )
+    assert cancelled.status_code == 200, cancelled.text
+
+    replacement = make_cleaner(cleared=True)
+    bid = _bid(client, replacement, turnover_id, cents=16_000)
+    accepted = client.post(
+        f"/api/turnovers/{turnover_id}/bids/{bid['id']}/accept",
+        headers=job["owner"]["auth"],
+    )
+    assert accepted.status_code == 200, accepted.text
+    return replacement
+
+
+class TestADisputeStaysWithItsOwnAward:
+    """**The bug this class exists for was silent and pointed at a stranger.**
+
+    `parties` used to answer "the most recent award on this turnover", read
+    fresh every time anything asked. A turnover that had been cancelled and
+    re-awarded therefore handed every existing dispute to the replacement
+    cleaner: the console showed their name and phone number on somebody else's
+    complaint, resolving emailed them about it, and the cleaner who actually
+    raised it got a 404 on their own dispute and no resolution.
+
+    Nothing failed. The rows were all valid; they just described the wrong
+    person.
+    """
+
+    def test_a_superseded_cleaner_can_still_raise_one(
+        self, client: TestClient, make_cleaner, make_open_turnover
+    ) -> None:
+        job = _awarded_job(client, make_cleaner, make_open_turnover)
+        first = job["cleaner"]
+        _re_award(client, job, make_cleaner)
+
+        # They were booked for this job and lost it. That is the complaint.
+        resp = _raise(client, first, job["turnover"]["id"])
+        assert resp.status_code == 201, resp.text
+
+    def test_it_keeps_naming_the_cleaner_it_was_raised_against(
+        self, client: TestClient, make_cleaner, make_open_turnover, admin_user
+    ) -> None:
+        job = _awarded_job(client, make_cleaner, make_open_turnover)
+        first = job["cleaner"]
+        raised = _raised(client, job["owner"], job["turnover"]["id"])
+
+        replacement = _re_award(client, job, make_cleaner)
+
+        admin = admin_user
+        inbox = client.get("/api/admin/disputes", headers=admin["auth"])
+        assert inbox.status_code == 200, inbox.text
+        row = next(d for d in inbox.json() if d["id"] == raised["id"])
+
+        assert row["cleaner"]["email"] == first["user"]["email"], (
+            "the console showed the replacement cleaner's identity and contact "
+            "details on a complaint that was not about them"
+        )
+        assert row["cleaner"]["email"] != replacement["user"]["email"]
+
+    def test_resolving_tells_the_cleaner_it_was_about(
+        self, client: TestClient, make_cleaner, make_open_turnover, admin_user,
+        db: Session,
+    ) -> None:
+        job = _awarded_job(client, make_cleaner, make_open_turnover)
+        first = job["cleaner"]
+        raised = _raised(client, job["owner"], job["turnover"]["id"])
+
+        replacement = _re_award(client, job, make_cleaner)
+
+        admin = admin_user
+        resolved = client.post(
+            f"/api/admin/disputes/{raised['id']}/resolve",
+            json={"notes": "Spoke to both."},
+            headers=admin["auth"],
+        )
+        assert resolved.status_code == 200, resolved.text
+
+        told = {
+            n.destination
+            for n in _events(db, NotificationEvent.DISPUTE_RESOLVED)
+        }
+        assert first["user"]["email"] in told
+        assert replacement["user"]["email"] not in told, (
+            "an uninvolved cleaner was emailed about somebody else's dispute"
+        )
+
+    def test_the_raiser_keeps_reading_their_own_dispute(
+        self, client: TestClient, make_cleaner, make_open_turnover
+    ) -> None:
+        job = _awarded_job(client, make_cleaner, make_open_turnover)
+        first = job["cleaner"]
+        raised = _raised(client, first, job["turnover"]["id"])
+
+        _re_award(client, job, make_cleaner)
+
+        mine = client.get(
+            f"/api/turnovers/{job['turnover']['id']}/disputes",
+            headers=first["auth"],
+        )
+        assert mine.status_code == 200, mine.text
+        assert [d["id"] for d in mine.json()["mine"]] == [raised["id"]], (
+            "the cleaner who raised it was locked out of their own complaint"
+        )

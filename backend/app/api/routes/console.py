@@ -120,7 +120,12 @@ def _admin_dispute(db: Session, dispute: Dispute) -> AdminDisputeOut | None:
     turnover = db.get(Turnover, dispute.turnover_id)
     if turnover is None:
         return None
-    people = disputes.parties(db, turnover)
+    # **The award this dispute was filed against**, not whoever holds the job
+    # now. This screen is the one place in the product that shows the owner's
+    # identity and both sides' phone numbers; reading the turnover's latest
+    # award here put a replacement cleaner's contact details on somebody else's
+    # complaint.
+    people = disputes.parties_of_dispute(db, dispute)
     prop = db.get(Property, turnover.property_id)
     if people is None or prop is None:
         return None

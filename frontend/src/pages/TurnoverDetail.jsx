@@ -289,12 +289,19 @@ export default function TurnoverDetail() {
         <ReviewPanel turnoverId={turnoverId} side="owner" />
       )}
 
-      {/* **Not gated on completion**, unlike the review beside it. A review is
+      {/* **Not gated on anything**, unlike the review beside it. A review is
           about how a finished job went; a dispute is about something going
           wrong, and the jobs most worth complaining about are the ones that
-          did not finish — which is why `disputes.parties` reads the most
-          recent award whether it was cancelled or not. */}
-      {turnover.award && <DisputePanel turnoverId={turnoverId} />}
+          did not finish — which is why `disputes.award_for` reads an award
+          whether it was cancelled or not.
+
+          It was gated on `turnover.award`, and that was the same bug one layer
+          up: `award` aliases `live_award`, so it is null the moment a booking
+          is cancelled. The panel disappeared exactly after a no-show or a
+          cancellation — the cases the backend went out of its way to allow.
+          It self-hides when the server says there is nobody to dispute with,
+          so the server decides and this does not second-guess it. */}
+      <DisputePanel turnoverId={turnoverId} />
 
       {turnover.award && (
         <div

@@ -54,6 +54,14 @@ function Stat({ label, value, tone = 'normal', to }) {
   )
 }
 
+/**
+ * **Nothing here links to `/turnovers/:id`.** That route is wrapped in
+ * `OwnerRoute` and its endpoint is owner-only, so an admin clicking one was
+ * bounced to `/dashboard` — the console offered three drill-downs that no
+ * console user could open. The names are rendered as plain text until there is
+ * an admin-readable detail view to point them at; a link that cannot be
+ * followed is worse than no link, because it reads as a screen that exists.
+ */
 function DisputeRow({ dispute, onChange, timeZone }) {
   const [notes, setNotes] = useState('')
   const [resolving, setResolving] = useState(false)
@@ -91,9 +99,7 @@ function DisputeRow({ dispute, onChange, timeZone }) {
             </span>
           </p>
           <p className="mt-1 text-sm text-slate-600">
-            <Link to={`/turnovers/${dispute.turnover_id}`} className="underline">
-              {dispute.property_nickname}
-            </Link>{' '}
+            <span className="font-medium">{dispute.property_nickname}</span>{' '}
             — {dispute.property_city}, {dispute.property_state} · checkout{' '}
             {formatDateTime(dispute.checkout_at, timeZone)}
           </p>
@@ -311,9 +317,7 @@ function LedgerTable({ ledger, onRefund, timeZone }) {
             {ledger.rows.map((row) => (
               <tr key={row.turnover_id} className="border-t border-slate-200" data-testid="ledger-row">
                 <td className="py-2 pr-3">
-                  <Link to={`/turnovers/${row.turnover_id}`} className="underline">
-                    {row.property_nickname}
-                  </Link>
+                  <span className="font-medium">{row.property_nickname}</span>
                   <span className="block text-xs text-slate-500">
                     {formatDateTime(row.checkout_at, timeZone)} · {row.cleaner_name}
                   </span>
@@ -431,9 +435,15 @@ export default function AdminConsole() {
   }, [load])
 
   function replaceDispute(updated) {
-    setDisputes((current) =>
-      (current ?? []).map((d) => (d.id === updated.id ? updated : d)),
-    )
+    setDisputes((current) => {
+      const rows = (current ?? []).map((d) => (d.id === updated.id ? updated : d))
+      // **A queue of unresolved disputes must not keep showing a resolved
+      // one.** Splicing the row back in regardless left the "Show resolved"
+      // filter saying one thing and its own list another — while the summary
+      // below decremented, so the two halves of the console disagreed until
+      // somebody reloaded. The list is what the filter says it is.
+      return showResolved ? rows : rows.filter((d) => d.status !== 'resolved')
+    })
     // The counts move when a dispute does, and a summary that disagrees with
     // the list under it is worse than no summary.
     apiFetch('/admin/summary').then(setSummary).catch(() => {})
@@ -466,6 +476,7 @@ export default function AdminConsole() {
               checked={showResolved}
               onChange={(e) => setShowResolved(e.target.checked)}
               className="rounded border-slate-300 text-brand-600 focus:ring-brand-500"
+              data-testid="show-resolved"
             />
             Show resolved
           </label>
@@ -512,9 +523,7 @@ export default function AdminConsole() {
                 data-testid="unclaimed-row"
               >
                 <div>
-                  <Link to={`/turnovers/${job.turnover_id}`} className="font-medium underline">
-                    {job.property_nickname}
-                  </Link>
+                  <span className="font-medium">{job.property_nickname}</span>
                   <p className="mt-1 text-sm text-slate-600">
                     {job.property_city}, {job.property_state} · checkout{' '}
                     {formatDateTime(job.checkout_at, timeZone)}

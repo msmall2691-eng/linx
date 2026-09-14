@@ -210,29 +210,31 @@ function Job({ job, timeZone, onCancel, onStart, onComplete, busy }) {
   )
 }
 
+//: The endpoint has always taken this; nothing ever passed it. Without it a
+//: cleaner's cancelled bookings are unreachable from the site — and with them
+//: the dispute panel on the card, which is the one place a cleaner can
+//: complain about a job that went wrong. The backend accepts a dispute on a
+//: cancelled award and the screen offered no way to file one.
+const WITH_CANCELLED = '/board/jobs?include_finished=true'
+
 export default function CleanerJobs() {
   const timeZone = useTimeZone()
   const [jobs, setJobs] = useState(null)
   const [error, setError] = useState(null)
   const [busy, setBusy] = useState(false)
+  const [showCancelled, setShowCancelled] = useState(false)
 
-  async function load() {
-    try {
-      setJobs(await apiFetch('/board/jobs'))
-    } catch (err) {
-      setError(err.message)
-    }
-  }
+  const path = showCancelled ? WITH_CANCELLED : '/board/jobs'
 
   useEffect(() => {
     let cancelled = false
-    apiFetch('/board/jobs')
+    apiFetch(path)
       .then((loaded) => !cancelled && setJobs(loaded))
       .catch((err) => !cancelled && setError(err.message))
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [path])
 
   async function act(turnoverId, action) {
     setError(null)
@@ -262,9 +264,13 @@ export default function CleanerJobs() {
         method: 'POST',
         body: { reason },
       })
-      // Re-read rather than splicing the answer in: the job is no longer a
-      // live booking, so it drops off this list entirely.
-      await load()
+      // **Switch the list on rather than letting the job vanish.** A cancelled
+      // booking is not a live one, so the default list drops it — and with it
+      // the only route to the dispute panel, at the exact moment somebody most
+      // likely wants it. Re-read, showing cancelled work, so the card stays
+      // where they left it.
+      setShowCancelled(true)
+      setJobs(await apiFetch(WITH_CANCELLED))
     } catch (err) {
       setError(err.message)
     } finally {
@@ -278,6 +284,17 @@ export default function CleanerJobs() {
       <p className="mt-1 text-sm text-slate-600">
         Work you have been hired for, soonest first.
       </p>
+
+      <label className="mt-4 flex items-center gap-2 text-sm text-slate-600">
+        <input
+          type="checkbox"
+          checked={showCancelled}
+          onChange={(e) => setShowCancelled(e.target.checked)}
+          className="rounded border-slate-300 text-brand-600 focus:ring-brand-500"
+          data-testid="show-cancelled-jobs"
+        />
+        Include cancelled bookings
+      </label>
 
       <div className="mt-4">
         <Alert>{error}</Alert>

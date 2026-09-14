@@ -43,7 +43,7 @@ def _answer(db: Session, turnover: Turnover, user: User) -> DisputesOut:
     about is a decision a person makes when they work the queue, and a count on
     this screen would make it for them.
     """
-    people = disputes.parties(db, turnover)
+    people = disputes.parties(db, turnover, user)
     if people is None:
         blocker = (
             "Nobody was ever booked for this turnover, so there is no one to "
@@ -96,8 +96,11 @@ def _readable_turnover(db: Session, turnover_id: uuid.UUID, user: User) -> Turno
     if prop is not None and prop.owner_id == user.id:
         return turnover
 
-    people = disputes.parties(db, turnover)
-    if people is None or disputes.role_for(people, user) is None:
+    # Resolved **per person**: a cleaner whose booking was cancelled and whose
+    # turnover has since been re-awarded to somebody else is still party to the
+    # job they were booked for, and must not lose sight of their own dispute
+    # about it.
+    if disputes.award_for(db, turnover, user) is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Turnover not found"
         )

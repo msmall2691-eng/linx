@@ -34,6 +34,7 @@ from app.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
 from app.models.enums import DisputeReason, DisputeStatus, UserRole
 
 if TYPE_CHECKING:
+    from app.models.award import Award
     from app.models.turnover import Turnover
     from app.models.user import User
 
@@ -55,6 +56,21 @@ class Dispute(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     turnover_id: Mapped[uuid.UUID] = mapped_column(
         PGUUID(as_uuid=True),
         ForeignKey("turnovers.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    #: **Which booking this is about, frozen at filing time.** A turnover can
+    #: carry several awards over its life: a cancellation re-posts it to the
+    #: bench and the next accept writes a second `Award`. Read back through
+    #: "the award on this turnover" — which is what this used to do — every
+    #: existing dispute silently re-pointed at the replacement cleaner, so the
+    #: console showed an uninvolved person's contact details, resolving
+    #: notified them about somebody else's complaint, and the cleaner who
+    #: actually raised it got a 404 on their own dispute.
+    award_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("awards.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
     )
@@ -111,6 +127,7 @@ class Dispute(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     resolution_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     turnover: Mapped["Turnover"] = relationship()
+    award: Mapped["Award"] = relationship()
     raised_by: Mapped["User"] = relationship(foreign_keys=[raised_by_id])
 
     @property

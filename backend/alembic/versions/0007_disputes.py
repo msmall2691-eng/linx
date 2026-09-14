@@ -70,6 +70,15 @@ def upgrade() -> None:
         sa.Column(
             "raised_by_id", sa.dialects.postgresql.UUID(as_uuid=True), nullable=False
         ),
+        # **Which booking this is about, frozen when it is filed.** A turnover
+        # can carry several awards over its life — a cancellation re-posts it
+        # to the bench and the next accept writes a second row — so "the award
+        # on this turnover" is a question with a different answer next week.
+        # Recomputed at read time it silently re-pointed every existing dispute
+        # at the replacement cleaner.
+        sa.Column(
+            "award_id", sa.dialects.postgresql.UUID(as_uuid=True), nullable=False
+        ),
         # Stored rather than read back through the user, because a role can
         # change and "who was complaining, as what" is the historical fact a
         # dispute is read with.
@@ -129,6 +138,13 @@ def upgrade() -> None:
             ["raised_by_id"], ["users.id"],
             name=op.f("fk_disputes_raised_by_id_users"), ondelete="CASCADE",
         ),
+        # Cascades for the same reason `turnover_id` does: a complaint about a
+        # booking that no longer exists has no subject. Awards are cancelled
+        # rather than deleted, so in practice this never fires.
+        sa.ForeignKeyConstraint(
+            ["award_id"], ["awards.id"],
+            name=op.f("fk_disputes_award_id_awards"), ondelete="CASCADE",
+        ),
         sa.ForeignKeyConstraint(
             ["acknowledged_by_id"], ["users.id"],
             name=op.f("fk_disputes_acknowledged_by_id_users"), ondelete="SET NULL",
@@ -141,6 +157,7 @@ def upgrade() -> None:
     )
     op.create_index(op.f("ix_disputes_turnover_id"), "disputes", ["turnover_id"])
     op.create_index(op.f("ix_disputes_raised_by_id"), "disputes", ["raised_by_id"])
+    op.create_index(op.f("ix_disputes_award_id"), "disputes", ["award_id"])
     # The inbox's own query: open first, oldest first.
     op.create_index("ix_disputes_status_created_at", "disputes", ["status", "created_at"])
 
@@ -153,6 +170,7 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.drop_index("ix_disputes_status_created_at", table_name="disputes")
+    op.drop_index(op.f("ix_disputes_award_id"), table_name="disputes")
     op.drop_index(op.f("ix_disputes_raised_by_id"), table_name="disputes")
     op.drop_index(op.f("ix_disputes_turnover_id"), table_name="disputes")
     op.drop_table("disputes")
@@ -164,10 +182,19 @@ def downgrade() -> None:
     # without the two. Any row still carrying one would fail the cast, which is
     # the right outcome: a notification that cannot be described is not one to
     # silently discard.
+    # **Every value 0006 had, and only the two this revision added are
+    # dropped.** The first version of this list omitted `cleaner_no_show` and
+    # `owner_cancelled_awarded` — which phase 4 added and the application still
+    # emits — so a downgrade would fail the cast on any database that had ever
+    # recorded one, and on an empty database would silently leave 0006 with a
+    # type that cannot represent its own events. A rebuilt enum has to be
+    # *the parent revision's* enum; anything else is a schema this project
+    # never had.
     remaining = [
         "turnover_posted", "bid_received", "bid_accepted", "bid_declined",
-        "turnover_reminder", "cleaner_cancelled", "turnover_unclaimed",
-        "job_completed", "payment_receipt", "payout_notice", "review_received",
+        "turnover_reminder", "cleaner_cancelled", "cleaner_no_show",
+        "owner_cancelled_awarded", "turnover_unclaimed", "job_completed",
+        "payment_receipt", "payout_notice", "review_received",
     ]
     values = ", ".join(f"'{v}'" for v in remaining)
     op.execute("ALTER TYPE notification_event RENAME TO notification_event_old")

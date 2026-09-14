@@ -618,11 +618,32 @@ relying on it.
   - **Filing one changes nothing about the money or the booking.** No refund,
     no cancellation, no rating moves. That is the policy, not a gap.
   - **Either party may raise one on a job that went wrong**, including a
-    cancelled award — `disputes.parties` reads the most recent award whether it
-    is live or not, where `reviews.participants` insists on a completed one.
-    The jobs most worth complaining about are the ones that did not finish,
-    which is also why the panel is not gated on completion the way the review
-    beside it is.
+    cancelled award — `disputes.award_for` reads an award whether it is live or
+    not, where `reviews.participants` insists on a completed one. The jobs most
+    worth complaining about are the ones that did not finish, which is also why
+    neither panel is gated on completion the way the review beside it is.
+
+    That reachability is a rule in its own right, because it was broken on both
+    screens at once and neither looked broken. The owner's panel was gated on
+    `turnover.award`, which aliases `live_award` and so is null the moment a
+    booking is cancelled; the cleaner's list does not ask for cancelled
+    bookings, so the card carrying their panel vanished as they backed out.
+    Both now mount unconditionally and let the server decide — the panel
+    self-hides when there is nobody to dispute with — and a browser test raises
+    a dispute from each side of a cancelled booking.
+  - **A dispute is bound to one award, written when it is filed**
+    (`disputes.award_id`), and `parties_of_dispute` is the only reader of it.
+    "The award on this turnover" is a question with a different answer next
+    week: a cancellation re-posts the job and the next accept writes a second
+    `Award`. Recomputed at read time — which is how this was first built — every
+    existing dispute silently re-pointed at the replacement cleaner, so the
+    console showed an uninvolved person's name and phone number on somebody
+    else's complaint, resolving emailed them about it, and the cleaner who
+    raised it got a 404 on their own dispute. Nothing failed; the rows were all
+    valid and described the wrong person. `award_for` therefore resolves the
+    party **per person** — a cleaner is party to their own awards and nobody
+    else's, the owner to the most recent — so a superseded cleaner can still
+    complain about the job they lost.
   - The duplicate guard is **a courtesy, not an invariant**, and says so: two
     simultaneous submissions could both pass it, and the cost is one extra card
     in a queue a human closes. It deliberately takes no row lock, because a lock
@@ -873,6 +894,11 @@ become untrustworthy and there is no way to tell which is lying.
   scheduled alarm makes, moved out of `app/tasks/scheduled.py` so the two
   cannot drift. `UNCLAIMED_LOOKBACK` moved with it and is re-exported from its
   old home, because a name that moves silently is a name somebody still imports.
+- Nothing on it links to `/turnovers/:id`. That route is `OwnerRoute`-wrapped
+  and its endpoint is owner-only, so an admin clicking one was bounced to
+  `/dashboard`; the console offered three drill-downs no console user could
+  open. The names are plain text until there is an admin-readable detail view,
+  because a link that cannot be followed reads as a screen that exists.
 - The ledger sums its own rows rather than querying totals separately, and
   carries `total_drift_cents` from `payments.reconcile`. Two queries that could
   disagree about the same money is how a reconciliation screen ends up

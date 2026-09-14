@@ -110,6 +110,22 @@ export default function DisputePanel({ turnoverId }) {
     }
   }
 
+  // **A failure to load is not the same as nothing to show.** Returning null
+  // on `!state` alone made a network or server error look exactly like a
+  // turnover with no dispute feature: the error was stored and then rendered
+  // nowhere, so somebody whose complaint failed to load was told nothing at
+  // all, on the one screen in the product for telling somebody something went
+  // wrong.
+  if (!state && error) {
+    return (
+      <div className="mt-6 card" data-testid="dispute-panel">
+        <h2 className="font-semibold">Something go wrong?</h2>
+        <div className="mt-3">
+          <Alert>{error}</Alert>
+        </div>
+      </div>
+    )
+  }
   if (!state) return null
   // Nothing raised and nothing raisable — no reason to take up the screen.
   if (!state.can_raise && state.mine.length === 0) return null

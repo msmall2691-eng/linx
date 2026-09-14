@@ -8,8 +8,10 @@ cleaner marked job-ready without being vetted.
 
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 from sqlalchemy import inspect, select
@@ -22,6 +24,7 @@ from app.models import (
     Base,
     Bid,
     CleanerProfile,
+    NotificationEvent,
     Property,
     Review,
     Turnover,
@@ -502,3 +505,38 @@ class TestReviewsStayHiddenByDefault:
         with pytest.raises(IntegrityError):
             db.commit()
         db.rollback()
+
+
+def test_a_rebuilt_enum_keeps_every_value_its_parent_revision_had() -> None:
+    """**A downgrade must land on the schema the parent revision actually had.**
+
+    `0007_disputes` cannot remove a value from `notification_event` — Postgres
+    has no such operation — so it rebuilds the type without the two it added.
+    The first version of that list was written from memory and omitted
+    `cleaner_no_show` and `owner_cancelled_awarded`, which phase 4 added and the
+    application still emits. The downgrade then failed the cast on any database
+    that had ever recorded one, and on an empty database succeeded while
+    leaving 0006 with a type that could not represent its own events.
+
+    Checked by arithmetic rather than by listing the values a second time: a
+    list here that had to be kept in step with the migration's list would be
+    the same mistake with an extra place to make it.
+    """
+    import importlib.util
+
+    path = Path(__file__).resolve().parents[1] / "alembic" / "versions" / "0007_disputes.py"
+    spec = importlib.util.spec_from_file_location("_m0007", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    source = path.read_text()
+    remaining = set(re.findall(r'"([a-z_]+)"', source.split("remaining = [")[1].split("]")[0]))
+    added = set(module.NEW_EVENTS)
+    today = {event.value for event in NotificationEvent}
+
+    assert added <= today, "the migration adds an event the enum does not have"
+    assert remaining == today - added, (
+        "the rebuilt type is not the parent revision's type: "
+        f"missing {sorted(today - added - remaining)}, "
+        f"unexpected {sorted(remaining - (today - added))}"
+    )

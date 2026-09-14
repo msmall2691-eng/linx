@@ -58,22 +58,54 @@ class Parties:
     award: Award
 
 
-def parties(db: Session, turnover: Turnover) -> Parties | None:
-    """Who may raise a dispute about this turnover, or None if nobody may.
+def award_for(db: Session, turnover: Turnover, user: User) -> Award | None:
+    """The award on this turnover that **this person** is a party to.
 
-    Deliberately reads the **most recent award, cancelled or not**, where
+    Not "the award on this turnover" — that is a question with a different
+    answer next week. A turnover can carry several awards over its life: a
+    cancellation re-posts it to the bench (`awards.py` sets it back to `open`)
+    and the next accept writes a second row. So the party has to be resolved
+    per person, newest first:
+
+    * a **cleaner** is a party to their own awards, and to nobody else's — a
+      cleaner whose booking was cancelled is still party to the job that went
+      wrong, which is exactly the one worth complaining about;
+    * the **owner** is a party to all of them, so they get the most recent.
+
+    Reading the newest award for everybody, which is what this did first, had
+    two faces of one bug. A cleaner whose award had been superseded was told
+    "you were not part of this turnover" about a job they had been booked for
+    and lost; and every dispute already filed quietly changed which cleaner it
+    was about.
+    """
+    prop = db.get(Property, turnover.property_id)
+    if prop is None:
+        return None
+
+    awards = db.execute(
+        select(Award)
+        .where(Award.turnover_id == turnover.id)
+        # `id` breaks the tie: two awards can share a timestamp, and an
+        # ordering that is not total picks a different row on a different day.
+        .order_by(Award.awarded_at.desc(), Award.id.desc())
+    ).scalars().all()
+
+    if prop.owner_id == user.id:
+        return awards[0] if awards else None
+    return next((award for award in awards if award.cleaner_id == user.id), None)
+
+
+def parties_of(db: Session, award: Award) -> Parties | None:
+    """The two people one specific award is between.
+
+    Deliberately reads an award **cancelled or not**, where
     `reviews.participants` insists on a live, completed one. The difference is
     the point: the jobs most worth complaining about are the ones that went
     wrong, and a cancelled award is the record of exactly that.
     """
-    award = db.execute(
-        select(Award)
-        .where(Award.turnover_id == turnover.id)
-        .order_by(Award.awarded_at.desc())
-    ).scalars().first()
-    if award is None:
+    turnover = db.get(Turnover, award.turnover_id)
+    if turnover is None:
         return None
-
     prop = db.get(Property, turnover.property_id)
     if prop is None:
         return None
@@ -83,6 +115,22 @@ def parties(db: Session, turnover: Turnover) -> Parties | None:
         return None
 
     return Parties(owner=owner, cleaner=cleaner, award=award)
+
+
+def parties_of_dispute(db: Session, dispute: Dispute) -> Parties | None:
+    """The two people a filed dispute is between — from **its own** award.
+
+    The single reader of `dispute.award_id`, so nothing anywhere re-derives
+    "which booking was this about" from the turnover's current state.
+    """
+    award = db.get(Award, dispute.award_id)
+    return None if award is None else parties_of(db, award)
+
+
+def parties(db: Session, turnover: Turnover, user: User) -> Parties | None:
+    """The award this person could raise a dispute under, as its two people."""
+    award = award_for(db, turnover, user)
+    return None if award is None else parties_of(db, award)
 
 
 def role_for(people: Parties, user: User) -> UserRole | None:
@@ -128,7 +176,14 @@ def raise_dispute(
     take a row lock; a lock here would imply an atomicity this path does not
     need and does not have.
     """
-    people = parties(db, turnover)
+    award = award_for(db, turnover, raiser)
+    if award is None:
+        raise DisputeRefused(
+            "Nobody was ever booked for this turnover, so there is no one to "
+            "raise a dispute with. If the problem is the posting itself, "
+            "cancel it instead."
+        )
+    people = parties_of(db, award)
     if people is None:
         raise DisputeRefused(
             "Nobody was ever booked for this turnover, so there is no one to "
@@ -154,6 +209,8 @@ def raise_dispute(
 
     dispute = Dispute(
         turnover_id=turnover.id,
+        # Frozen here, and read back from here everywhere else.
+        award_id=award.id,
         raised_by_id=raiser.id,
         raised_by_role=role,
         reason=reason,
@@ -225,7 +282,11 @@ def resolve(db: Session, dispute: Dispute, admin: User, notes: str) -> Dispute:
     dispute.resolution_notes = text
 
     turnover = db.get(Turnover, dispute.turnover_id)
-    people = parties(db, turnover) if turnover is not None else None
+    # **The dispute's own award**, never the turnover's latest. Recomputed here
+    # a resolution notified whichever cleaner happened to hold the job today
+    # about a complaint that was not theirs, and never reached the one who
+    # raised it.
+    people = parties_of_dispute(db, dispute)
     prop = db.get(Property, turnover.property_id) if turnover is not None else None
     if turnover is not None and people is not None and prop is not None:
         notifications.dispute_resolved(db, turnover, prop, dispute, people)

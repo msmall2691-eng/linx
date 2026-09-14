@@ -84,16 +84,13 @@ def _log_in(page, base_url: str, email: str) -> None:
     page.wait_for_url("**/dashboard")
 
 
-def test_a_dispute_reaches_a_person_and_the_other_side_is_not_told(
-    make_page, live_server, db
-) -> None:
-    base_url = live_server
-    owner_page, cleaner_page, admin_page = make_page(), make_page(), make_page()
-
-    # --- an owner with a job, and a cleaner booked on it ------------------
+def _booked_job(owner_page, cleaner_page, base_url: str, db, *, nickname: str) -> str:
+    """Owner, property, turnover, cleared cleaner, bid, award. Returns the
+    turnover's URL. Shared so a second test about what happens *after* a
+    booking does not restate forty lines of getting one."""
     _sign_up(owner_page, base_url, "owner", "Dispute Owner")
     owner_page.goto(f"{base_url}/properties/new")
-    owner_page.fill("#nickname", "Harbour Flat")
+    owner_page.fill("#nickname", nickname)
     owner_page.fill("#address_line1", "9 Quay St")
     owner_page.fill("#city", "Portland")
     owner_page.fill("#state", "ME")
@@ -138,6 +135,19 @@ def test_a_dispute_reaches_a_person_and_the_other_side_is_not_told(
     owner_page.goto(turnover_url)
     expect(owner_page.get_by_test_id("bid")).to_have_count(1)
     owner_page.get_by_test_id("accept-bid").click()
+    return turnover_url
+
+
+def test_a_dispute_reaches_a_person_and_the_other_side_is_not_told(
+    make_page, live_server, db
+) -> None:
+    base_url = live_server
+    owner_page, cleaner_page, admin_page = make_page(), make_page(), make_page()
+
+    # --- an owner with a job, and a cleaner booked on it ------------------
+    turnover_url = _booked_job(
+        owner_page, cleaner_page, base_url, db, nickname="Harbour Flat"
+    )
 
     # --- the owner raises a dispute --------------------------------------
     owner_page.goto(turnover_url)
@@ -210,15 +220,21 @@ def test_a_dispute_reaches_a_person_and_the_other_side_is_not_told(
     # against a DOM that never re-fetches, so the failure surfaced two steps
     # away from its cause, on the owner's screen, reading like a product bug.
     #
-    # The card's own status is a real synchronisation point: it only says
-    # resolved once the POST has answered and the console has re-rendered from
-    # the answer. It is also a real check — a resolve that 500s now fails here,
-    # naming the resolve, instead of looking like the owner's page not updating.
+    # The queue emptying is a real synchronisation point: it only happens once
+    # the POST has answered and the console has re-rendered from the answer.
+    # It is also a real check — a resolve that 500s renders an alert and leaves
+    # the card sitting there, so this fails at the resolve, naming the resolve,
+    # instead of looking like the owner's page not updating two steps later.
+    expect(admin_page.get_by_test_id("admin-dispute")).to_have_count(0)
+
+    # ...and the queue is a queue of *unresolved* disputes, so it is now empty
+    # rather than still showing the settled one. Ticking the filter brings it
+    # back, with the note the admin wrote on it.
+    expect(admin_page.get_by_text("Nothing to settle")).to_be_visible()
+    admin_page.get_by_test_id("show-resolved").check()
     expect(admin_page.get_by_test_id("admin-dispute-status").first).to_have_text(
         re.compile("resolved", re.I)
     )
-    # And the console keeps rendering after the write, carrying the note.
-    expect(admin_page.get_by_test_id("dispute-inbox")).to_be_visible()
     expect(
         admin_page.get_by_text("Cleaner returning Thursday at no charge.")
     ).to_be_visible()
@@ -229,3 +245,64 @@ def test_a_dispute_reaches_a_person_and_the_other_side_is_not_told(
     expect(owner_page.get_by_test_id("dispute-resolution").first).to_have_text(
         re.compile("Cleaner returning Thursday")
     )
+
+
+def test_a_cancelled_booking_leaves_both_sides_able_to_complain(
+    make_page, live_server, db
+) -> None:
+    """**The jobs worth complaining about are the ones that did not finish.**
+
+    The backend went out of its way to allow a dispute on a cancelled award —
+    `disputes.award_for` reads an award live or not — and both screens then
+    hid the panel exactly then. The owner's was gated on `turnover.award`,
+    which aliases `live_award` and is null once a booking is cancelled; the
+    cleaner's list does not ask for cancelled bookings, so the card carrying
+    the panel vanished the moment they backed out.
+
+    Two screens, one bug, and neither showed as an error: a cleaner who backed
+    out of a job because the lockbox code was wrong had nowhere to say so, and
+    an owner whose cleaner never turned up had nowhere either. This is the test
+    that would have failed.
+    """
+    base_url = live_server
+    owner_page, cleaner_page = make_page(), make_page()
+
+    turnover_url = _booked_job(
+        owner_page, cleaner_page, base_url, db, nickname="Dockside Loft"
+    )
+
+    # --- the cleaner backs out -------------------------------------------
+    cleaner_page.goto(f"{base_url}/jobs")
+    expect(cleaner_page.get_by_test_id("job")).to_have_count(1)
+    cleaner_page.get_by_test_id("cancel-job").click()
+    cleaner_page.get_by_role("textbox").fill("My van is off the road.")
+    cleaner_page.get_by_test_id("confirm-cancel-job").click()
+
+    # The card stays on screen rather than vanishing with the booking — which
+    # is the whole point, because the panel to complain from is on it.
+    expect(cleaner_page.get_by_test_id("job")).to_have_count(1)
+    expect(cleaner_page.get_by_test_id("dispute-panel")).to_be_visible()
+
+    cleaner_page.get_by_test_id("open-dispute-form").click()
+    cleaner_page.get_by_test_id("dispute-reason").select_option("access")
+    cleaner_page.get_by_test_id("dispute-description").fill(
+        "The lockbox code in the notes was wrong and nobody answered."
+    )
+    cleaner_page.get_by_test_id("submit-dispute").click()
+    expect(cleaner_page.get_by_test_id("dispute").first).to_be_visible()
+
+    # --- and the owner, whose booking is now gone, can still raise one ----
+    owner_page.goto(turnover_url)
+    expect(owner_page.get_by_test_id("dispute-panel")).to_be_visible()
+    owner_page.get_by_test_id("open-dispute-form").click()
+    owner_page.get_by_test_id("dispute-reason").select_option("conduct")
+    owner_page.get_by_test_id("dispute-description").fill(
+        "Cancelled on me the night before."
+    )
+    owner_page.get_by_test_id("submit-dispute").click()
+    expect(owner_page.get_by_test_id("dispute").first).to_be_visible()
+
+    # Still nothing about the other side's complaint on either screen — the
+    # privacy rule does not relax because the booking ended badly.
+    assert "lockbox code in the notes" not in owner_page.inner_text("body")
+    assert "Cancelled on me the night before" not in cleaner_page.inner_text("body")
