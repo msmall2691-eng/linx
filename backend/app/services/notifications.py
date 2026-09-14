@@ -52,8 +52,8 @@ from app.models.enums import (
 )
 from app.models.notification import Notification
 from app.models.payment import PaymentIn, Payout
-from app.models.review import Review
 from app.models.property import Property
+from app.models.review import Review
 from app.models.turnover import Turnover
 from app.models.user import User
 from app.services import delivery
