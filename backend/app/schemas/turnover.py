@@ -13,16 +13,24 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from app.models.enums import TurnoverStatus, TurnoverUrgency
+from app.models.enums import ServiceType, TurnoverStatus, TurnoverUrgency
 from app.schemas.award import AwardOut
 from app.schemas.property import PropertyOut
 
 
 class TurnoverCreate(BaseModel):
     property_id: uuid.UUID
+    #: For a rental this is the guest's checkout. For a home it is simply when
+    #: the clean is due — the same column, because the thing both describe is
+    #: "when does this job happen", and the urgency ladder already measures a
+    #: job with no checkin by how soon it arrives.
     checkout_at: datetime
-    #: Null means a standing vacancy — no next guest booked yet.
+    #: Null means a standing vacancy — no next guest booked yet — and is always
+    #: null on a home, which has no next guest to be measured against.
     checkin_at: datetime | None = None
+    #: What sort of clean. Refused if it does not match the property's type:
+    #: `turnover` belongs to rentals, the rest to homes.
+    service_type: ServiceType | None = None
     owner_budget_cents: int | None = Field(default=None, ge=0)
     notes: str | None = None
     #: Post it to the bench immediately, or keep it as a draft.
@@ -87,6 +95,9 @@ class TurnoverOut(BaseModel):
     checkout_at: datetime
     checkin_at: datetime | None
     is_same_day: bool
+    #: What sort of clean. A cleaner prices a deep clean and a turnover very
+    #: differently, so it travels with every shape a job appears in.
+    service_type: ServiceType
     status: TurnoverStatus
     urgency: TurnoverUrgency
     owner_budget_cents: int | None

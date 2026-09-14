@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 
 import Alert from '../components/Alert.jsx'
 import EmptyState from '../components/EmptyState.jsx'
+import { ScopeBadge } from '../components/JobScope.jsx'
 import ReviewPanel from '../components/ReviewPanel.jsx'
 import StatusBadge from '../components/StatusBadge.jsx'
 import UrgencyBadge from '../components/UrgencyBadge.jsx'
@@ -42,6 +43,7 @@ function Job({ job, timeZone, onCancel, onStart, onComplete, busy }) {
         </div>
         <div className="flex gap-2">
           {showsUrgency(job.status) && <UrgencyBadge urgency={job.urgency} />}
+          <ScopeBadge serviceType={job.service_type} />
           <StatusBadge status={job.status} />
         </div>
       </div>

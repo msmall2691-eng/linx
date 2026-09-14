@@ -26,7 +26,13 @@ from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.models.enums import BidStatus, TurnoverStatus, TurnoverUrgency
+from app.models.enums import (
+    BidStatus,
+    PropertyType,
+    ServiceType,
+    TurnoverStatus,
+    TurnoverUrgency,
+)
 
 
 class BoardPropertyOut(BaseModel):
@@ -39,8 +45,15 @@ class BoardPropertyOut(BaseModel):
     city: str
     state: str
     postal_code: str
+    #: A rental or a home. Deliberately shown: a cleaner arriving at somebody's
+    #: house is a different job from an empty rental between guests, and
+    #: knowing which before bidding is part of pricing it.
+    property_type: PropertyType
     bedrooms: int
     bathrooms: Decimal
+    #: Shown when the owner knows it. The single most useful number for
+    #: pricing, and the reason it is asked for at all.
+    square_feet: int | None
     cleaning_notes: str | None
 
 
@@ -64,6 +77,9 @@ class BoardTurnoverOut(BaseModel):
     checkout_at: datetime
     checkin_at: datetime | None
     is_same_day: bool
+    #: Turnover, standard, deep or move-out. The difference between two hours
+    #: and six, which is the difference between a good bid and a bad one.
+    service_type: ServiceType
     status: TurnoverStatus
     urgency: TurnoverUrgency
     owner_budget_cents: int | None
@@ -106,8 +122,12 @@ class AwardedPropertyOut(BaseModel):
     city: str
     state: str
     postal_code: str
+    #: A rental or a home. The awarded cleaner needs it as much as a bidding
+    #: one does — arriving at somebody's occupied house is a different job.
+    property_type: PropertyType
     bedrooms: int
     bathrooms: Decimal
+    square_feet: int | None
     cleaning_notes: str | None
     #: Gate codes, lockbox locations. Released on award, never before.
     access_notes: str | None
@@ -128,6 +148,7 @@ class AwardedJobOut(BaseModel):
     checkout_at: datetime
     checkin_at: datetime | None
     is_same_day: bool
+    service_type: ServiceType
     status: TurnoverStatus
     urgency: TurnoverUrgency
     notes: str | None

@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom'
 
 import Alert from '../components/Alert.jsx'
 import EmptyState from '../components/EmptyState.jsx'
+import { PropertySpecs, ScopeBadge } from '../components/JobScope.jsx'
 import UrgencyBadge from '../components/UrgencyBadge.jsx'
 import { apiFetch } from '../lib/api.js'
 import { useTimeZone } from '../lib/config.jsx'
@@ -192,11 +193,12 @@ export default function Board() {
                   {turnover.property.city}, {turnover.property.state} ·{' '}
                   {turnover.distance_miles} mi away
                 </p>
-                <p className="text-sm text-slate-600">
-                  {turnover.property.bedrooms} bd · {Number(turnover.property.bathrooms)} ba
-                </p>
+                <PropertySpecs property={turnover.property} />
               </div>
-              <UrgencyBadge urgency={turnover.urgency} />
+              <div className="flex shrink-0 flex-col items-end gap-2">
+                <UrgencyBadge urgency={turnover.urgency} />
+                <ScopeBadge serviceType={turnover.service_type} />
+              </div>
             </div>
 
             <dl className="mt-4 grid gap-3 text-sm sm:grid-cols-2">

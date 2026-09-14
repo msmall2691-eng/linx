@@ -24,6 +24,52 @@ class VerificationStatus(str, Enum):
     REJECTED = "rejected"
 
 
+class PropertyType(str, Enum):
+    """What kind of place this is, which decides how its jobs are scheduled.
+
+    A short-term rental's cleaning is defined by the gap between one guest
+    leaving and the next arriving — that window *is* the job, and it is what
+    the whole urgency ladder measures. A home has no such window: the clean
+    happens when the people who live there arranged for it to happen.
+
+    Two types rather than a boolean because the product reads it in a dozen
+    places, and `is_str=False` on a screen reads as a missing feature rather
+    than a deliberate kind of property.
+    """
+
+    SHORT_TERM_RENTAL = "short_term_rental"
+    RESIDENTIAL = "residential"
+
+
+class ServiceType(str, Enum):
+    """The scope of work, so a cleaner can price it before bidding.
+
+    A turnover and a move-out are both "a clean" and are not remotely the same
+    job. Cleaners were previously asked to bid on a number of bedrooms and a
+    free-text note, which prices badly in both directions: too low on the deep
+    cleans, too high on the routine ones, and the ones who guess wrong stop
+    bidding.
+
+    `TURNOVER` belongs to short-term rentals; the other three to homes. The
+    split is enforced where a job is created rather than in the database,
+    because a property that changes type should not orphan its history.
+    """
+
+    TURNOVER = "turnover"
+    STANDARD = "standard"
+    DEEP = "deep"
+    MOVE_OUT = "move_out"
+
+
+class Recurrence(str, Enum):
+    """How often a residential job repeats. `ONCE` is a job, not a schedule."""
+
+    ONCE = "once"
+    WEEKLY = "weekly"
+    FORTNIGHTLY = "fortnightly"
+    MONTHLY = "monthly"
+
+
 class TurnoverStatus(str, Enum):
     DRAFT = "draft"
     OPEN = "open"
