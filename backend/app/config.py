@@ -35,12 +35,31 @@ class Settings(BaseSettings):
 
     # Single region at launch — no multi-region logic anywhere (see CLAUDE.md).
     region_name: str = "Greater Portland, ME"
+    #: IANA timezone for that region. "Same day" and every date a person reads
+    #: are answered in local time; a 4pm checkout and a 10pm checkin are one day
+    #: in Portland and two in UTC.
+    region_timezone: str = "America/New_York"
 
     # Comma-separated list, or "*" in development.
     cors_origins: str = "http://localhost:5173"
 
     # Directory holding the built frontend. Mounted at "/" when it exists.
     frontend_dist: str = "static"
+
+    # Vetting document uploads. On Railway this directory must be a mounted
+    # volume — a container filesystem is replaced on every deploy, so without
+    # one the uploaded IDs disappear while their rows survive.
+    document_storage_dir: str = "var/documents"
+    #: Upload ceiling. A phone photo of an ID is comfortably under this.
+    max_document_bytes: int = 15 * 1024 * 1024
+
+    # Background checks (phase 3). Without a key the manual provider is used
+    # and an admin records the outcome by hand — see
+    # app/services/background_check.py.
+    checkr_api_key: str | None = None
+    checkr_api_base: str = "https://api.checkr.com/v1"
+    #: Checkr package slug to order. Varies by account.
+    checkr_package: str = "tasker_standard"
 
     platform_fee_bps: int = Field(
         default=1500,

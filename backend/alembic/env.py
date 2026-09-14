@@ -18,7 +18,12 @@ config = context.config
 config.set_main_option("sqlalchemy.url", settings.database_url)
 
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # `disable_existing_loggers=False` is not cosmetic. fileConfig defaults to
+    # True, which switches off every logger that already exists — including the
+    # application's own, since anything that runs migrations in-process (the
+    # test suite) has already imported it. The symptom is silence: alerts that
+    # were emitted correctly and logged nowhere.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 target_metadata = Base.metadata
 

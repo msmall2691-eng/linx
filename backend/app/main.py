@@ -14,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.api.routes import auth, health
+from app.api.routes import admin, auth, board, cleaners, health, properties, turnovers
 from app.config import settings
 
 API_PREFIX = "/api"
@@ -36,6 +36,11 @@ app.add_middleware(
 api_router = APIRouter(prefix=API_PREFIX)
 api_router.include_router(health.router)
 api_router.include_router(auth.router)
+api_router.include_router(properties.router)
+api_router.include_router(turnovers.router)
+api_router.include_router(cleaners.router)
+api_router.include_router(board.router)
+api_router.include_router(admin.router)
 app.include_router(api_router)
 
 
@@ -46,7 +51,10 @@ def public_config() -> dict[str, str]:
     One region at launch — the frontend reads the name from here rather than
     hardcoding it, but there is deliberately no region *selection*.
     """
-    return {"region_name": settings.region_name}
+    return {
+        "region_name": settings.region_name,
+        "region_timezone": settings.region_timezone,
+    }
 
 
 def _mount_frontend(application: FastAPI) -> None:

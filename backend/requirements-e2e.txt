@@ -1,0 +1,4 @@
+-r requirements-dev.txt
+# Browser-driven tests. Kept out of requirements-dev.txt so the ordinary test
+# run stays light — these are opt-in (see tests/e2e/conftest.py).
+playwright==1.49.1

@@ -12,18 +12,32 @@ reference to any other codebase.
 
 ---
 
-## Status: phase 1 — scaffolding, auth, and schema
+## Status: phase 3 — the cleaner's side
 
 What works today:
 
 - Signup and login for owners and cleaners, JWT-based, with a role gate
   (`owner` / `cleaner` / `admin`) enforced server-side.
+- **Properties** — owner-scoped create, list, detail, edit, and archive.
+  Archiving is refused while turnovers are still on the schedule.
+- **Turnovers** — post one against a property with a checkout and an optional
+  next checkin, keep it as a draft or put it on the bench, reschedule it, cancel
+  it. The **urgency ladder** is derived server-side from how close checkout is
+  to the next checkin, in region-local time.
+- **Cleaner profiles** — service area as a point and a radius, vetting document
+  uploads (ID / insurance / reference), and a background-check step.
+- **An admin vetting queue** — a human reviews a photo ID and a reference and
+  records the background-check result. Nothing here can override the bidding
+  gate: `can_take_jobs` is computed by Postgres from the two statuses.
+- **The bench board and bidding** — open turnovers inside a cleaner's radius,
+  most urgent first, with the street address and access notes withheld until a
+  job is awarded. A cleared cleaner names a price.
 - The full v1 database schema — all ten tables — created by one Alembic
   migration. Tables belonging to later phases exist and are empty on purpose.
 - A single-container deploy: the backend serves the built frontend.
-- 62 tests, running against real PostgreSQL.
+- 209 tests against real PostgreSQL, plus 5 browser click-throughs.
 
-Bidding, awarding, payments, notifications, and reviews are **not** built yet.
+Awarding, payments, notifications, and reviews are **not** built yet.
 Each is its own phase, reviewed before the next begins — see the phase table in
 [`CLAUDE.md`](CLAUDE.md).
 
@@ -110,6 +124,22 @@ suite also builds its schema by running the real migrations, not
 `create_all`, so a migration that drifts from the models fails in tests instead
 of at deploy.
 
+### Browser tests
+
+`backend/tests/e2e/` drives the real app in a real browser. They catch the bug
+class endpoint tests cannot see: an action that returns 200 while the screen it
+belongs to goes blank. They skip themselves unless you opt in:
+
+```bash
+cd frontend && npm run build          # the backend serves this build
+cd ../backend
+pip install -r requirements-e2e.txt
+playwright install chromium
+LINX_E2E=1 pytest tests/e2e
+```
+
+They run as their own CI job, so a dead screen fails the build.
+
 ---
 
 ## Deploying
@@ -128,6 +158,13 @@ One Railway service, one Postgres, nothing shared with any other project.
    | `ENVIRONMENT` | `production` |
    | `CORS_ORIGINS` | your deployed origin |
    | `REGION_NAME` | the pilot region |
+   | `REGION_TIMEZONE` | its IANA zone, e.g. `America/New_York` |
+   | `DOCUMENT_STORAGE_DIR` | a path on a **mounted volume** — see below |
+
+   **Vetting documents need a Railway volume.** Mount one and point
+   `DOCUMENT_STORAGE_DIR` at it. Without a volume the container filesystem is
+   replaced on every deploy and uploaded IDs disappear while their database rows
+   survive, so the admin queue ends up pointing at files that are gone.
 
    Startup refuses to run with the development `SECRET_KEY` when
    `ENVIRONMENT=production`.
@@ -158,14 +195,23 @@ backend/
     api/routes/        auth, health
     models/            SQLAlchemy models, one file per table
     schemas/           Pydantic request/response shapes
+    services/urgency.py  the one place that decides the urgency ladder
+    services/turnovers.py  the only writes to the derived columns
+    services/vetting.py  the one place that says why a cleaner can or cannot bid
+    services/geo.py      service-radius distance, in Python and in SQL
+    services/storage.py  vetting documents, never on a public path
+    services/background_check.py  Checkr, or manual when no key is set
   alembic/versions/    migrations — one head, always
   tests/               pytest suite, real Postgres
+  tests/e2e/           browser click-throughs, opt-in
 frontend/
   src/
     lib/api.js         the one place that knows about tokens and errors
     lib/auth.jsx       session context
-    components/        nav, route guard
-    pages/             landing, login, signup, dashboard
+    lib/config.jsx     the region's name and timezone, from the server
+    lib/datetime.js    region-local time conversion; money in integer cents
+    components/        nav, route guard, badges, forms
+    pages/             landing, auth, dashboard, properties, turnovers
 ```
 
 ---
