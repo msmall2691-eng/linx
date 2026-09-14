@@ -319,10 +319,11 @@ relying on it.
   - The award row is **cancelled, not deleted** — who backed out is the history
     a dispute is argued from.
 
-## Notification events — named now, built in phase 5
+## Notification events — the fixed list, built in phase 5
 
 Missing and duplicated notifications cost more than missing features. The list
-is fixed before the feature is built:
+was fixed before the feature was built, and it is closed — `NotificationEvent`
+in `app/models/enums.py` holds exactly these and nothing else:
 
 - New turnover posted within a cleaner's service radius
 - Bid received (owner)
@@ -333,12 +334,42 @@ is fixed before the feature is built:
 - Payment receipt (owner) / payout notice (cleaner)
 - Review received (both directions, once visible)
 
-Phase 4 needed the cancellation entries early, since "never silently" is part of
-the policy rather than part of the notification feature. `app/services/alerts.py`
-holds them: it names the event, resolves every recipient (admin is a role, not
-an address), and records the alert. It is deliberately **not** a notification
-system — no templates, no queue, no table. Phase 5 replaces the sink and fills
-in the rest of this list; the call sites already say what happened and to whom.
+Nine of those twelve are live. The last three — payment receipt, payout notice,
+review received — are declared in the enum with no sender, because the state
+transitions that fire them arrive in phases 6 and 7. Declared-and-unwired is
+deliberate and tested as such; it is not the same as forgotten.
+
+`app/services/notifications.py` is the one place that decides any of this.
+Phase 4's `app/services/alerts.py` is gone, replaced by it.
+
+- **Call sites say what happened; the service decides who hears.** `admin` is
+  resolved from the role, never an address — a hardcoded one stops alerting the
+  day somebody new takes over the inbox. Matching cleaners are resolved from
+  service radius **and** `can_take_jobs`, so a cleaner who cannot bid is not told
+  about work they cannot take.
+- **Recorded inside the transaction, delivered after it.** `queue()` writes rows
+  into the caller's open transaction, so a notification can never describe a
+  state change that then rolled back. `deliver_pending()` runs after the commit
+  and is a plain outbox drain: a process that dies between the two leaves rows
+  the next pass picks up, rather than a send nobody can account for.
+- **`dedupe_key` is a unique constraint, not a convention.** Every key is built
+  from the event plus a stable id already in the database — a turnover, a bid, a
+  recipient — never a clock or a random value, for the same reason guardrail 2
+  forbids a fresh idempotency key. "Fires once per transition" is a property of
+  the database. A duplicate insert is caught on a savepoint, so it cannot poison
+  the caller's transaction.
+- **An unknown outcome is never success.** A row is `pending` until a sender
+  reports it delivered; a failure writes `failed` with the reason and stays
+  visible. Without `SMTP_HOST` the logging sender runs, and it reports
+  `delivers=False` — the row stays `pending`, because nothing was sent.
+
+Two events hang off the clock rather than off something a person did: the day-of
+reminder and the unclaimed alarm. `app/tasks/scheduled.py` is their entry point
+(`python -m app.tasks.scheduled`), runs safely as often as you like because of
+the dedupe key, and drains the outbox on the way past. Their two windows
+(`REMINDER_HOURS_BEFORE`, `UNCLAIMED_ALERT_HOURS_BEFORE`) are separate settings
+on purpose — one is a courtesy, the other an operational alarm, and the alarm is
+still deliberately **not** a rung on the urgency ladder.
 
 ---
 
@@ -366,7 +397,7 @@ phase.
 | 2 | Owner side: properties & turnovers, with `urgency` | **done** |
 | 3 | Cleaner side: profile, vetting docs, background check, admin review queue, bidding | **done** |
 | 4 | Award + guardrail-1 concurrency + no-show / cancellation path | **done** |
-| 5 | Notifications (the event list above) | not started |
+| 5 | Notifications (the event list above) | **done** |
 | 6 | Stripe Connect, test mode end to end, refunds, reconciliation | not started |
 | 7 | Mutual delayed-reveal reviews | not started |
 | 8 | Admin console — vetting queue, dispute inbox, unclaimed alerts, ledger | not started |

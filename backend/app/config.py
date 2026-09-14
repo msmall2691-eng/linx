@@ -61,6 +61,26 @@ class Settings(BaseSettings):
     #: Checkr package slug to order. Varies by account.
     checkr_package: str = "tasker_standard"
 
+    # Notifications (phase 5). Without SMTP_HOST the logging sender is used and
+    # every notification is recorded and written to the log instead of sent —
+    # the same launch posture as background checks without a Checkr key. The
+    # row still exists either way, so "did anyone tell them" has an answer
+    # before there is a mail provider.
+    smtp_host: str | None = None
+    smtp_port: int = 587
+    smtp_username: str | None = None
+    smtp_password: str | None = None
+    smtp_use_tls: bool = True
+    #: From address on everything the product sends.
+    email_from: str = "linx <no-reply@linx.local>"
+
+    #: How far ahead of checkout the day-of reminder goes out, and how close to
+    #: checkout an unclaimed turnover becomes an alert. Two separate numbers on
+    #: purpose: one is a courtesy, the other is an operational alarm, and the
+    #: alarm's cutoff is deliberately *not* the urgency ladder (see CLAUDE.md).
+    reminder_hours_before: int = Field(default=24, ge=1, le=168)
+    unclaimed_alert_hours_before: int = Field(default=24, ge=1, le=168)
+
     platform_fee_bps: int = Field(
         default=1500,
         ge=0,

@@ -48,7 +48,7 @@ from app.models.enums import BidStatus, TurnoverStatus
 from app.models.property import Property
 from app.models.turnover import Turnover
 from app.models.user import User
-from app.services import alerts, vetting
+from app.services import notifications, vetting
 from app.services.turnovers import apply_derived_fields
 
 #: A cancellation inside this window of checkout is *late*: too close for the
@@ -155,8 +155,21 @@ def accept_bid(db: Session, *, turnover: Turnover, bid_id: uuid.UUID) -> Award:
     db.add(award)
 
     bid.status = BidStatus.ACCEPTED
-    # Everyone else hears no. Leaving them `submitted` against an awarded job
-    # would show a cleaner a bid that is still pending on work already gone.
+    # Everyone else hears no — read before the update, because they have to be
+    # told, and after the update there is nothing left to identify them by.
+    losing_bids = list(
+        db.execute(
+            select(Bid).where(
+                Bid.turnover_id == turnover.id,
+                Bid.id != bid.id,
+                Bid.status == BidStatus.SUBMITTED,
+            )
+        )
+        .scalars()
+        .all()
+    )
+    # Leaving them `submitted` against an awarded job would show a cleaner a bid
+    # that is still pending on work already gone.
     db.execute(
         update(Bid)
         .where(
@@ -169,7 +182,20 @@ def accept_bid(db: Session, *, turnover: Turnover, bid_id: uuid.UUID) -> Award:
     )
 
     turnover.status = TurnoverStatus.AWARDED
+
+    # Queued inside this transaction, alongside the award itself: the message
+    # and the fact it describes land together or not at all. The flush is so
+    # the award has an id to key the notification on.
+    db.flush()
+    prop = db.execute(
+        select(Property).where(Property.id == turnover.property_id)
+    ).scalar_one()
+    notifications.bid_accepted(db, award, turnover, prop)
+    notifications.bids_declined(db, turnover, prop, losing_bids)
+
     db.commit()
+
+    notifications.deliver_pending(db)
     return award
 
 
@@ -223,64 +249,23 @@ def cancel_award(
     # one function that decides urgency, not a second opinion about it.
     apply_derived_fields(turnover, now=now)
 
+    # Both sides and an admin, queued in the same transaction as the
+    # cancellation itself. Phase 4 emitted this after the commit, which left a
+    # gap where a crash lost the alert entirely; the notification row closes it.
+    prop = db.execute(
+        select(Property).where(Property.id == turnover.property_id)
+    ).scalar_one()
+    notifications.award_cancelled(
+        db,
+        turnover=turnover,
+        prop=prop,
+        award=award,
+        actor=actor,
+        no_show=no_show,
+        late=late,
+    )
+
     db.commit()
 
-    _alert_cancellation(
-        db, turnover=turnover, award=award, actor=actor, no_show=no_show, late=late, reason=reason
-    )
+    notifications.deliver_pending(db)
     return award
-
-
-def _alert_cancellation(
-    db: Session,
-    *,
-    turnover: Turnover,
-    award: Award,
-    actor: User,
-    no_show: bool,
-    late: bool,
-    reason: str | None,
-) -> alerts.Alert:
-    """Tell the people this just happened to. Never conditional on it being late.
-
-    Emitted after the commit, so nobody is told about a cancellation that then
-    rolled back. The gap that leaves — a crash between the commit and this line
-    — closes in phase 5, where the notification is a row written inside the same
-    transaction rather than a log line after it.
-    """
-    owner_email = db.execute(
-        select(User.email)
-        .join(Property, Property.owner_id == User.id)
-        .where(Property.id == turnover.property_id)
-    ).scalar_one_or_none()
-    cleaner_email = db.execute(
-        select(User.email).where(User.id == award.cleaner_id)
-    ).scalar_one_or_none()
-
-    if no_show:
-        event = alerts.AlertEvent.CLEANER_NO_SHOW
-        summary = "The awarded cleaner did not show up. The turnover is back on the bench."
-    elif actor.id == award.cleaner_id:
-        event = alerts.AlertEvent.CLEANER_CANCELLED
-        summary = (
-            f"The awarded cleaner cancelled {'less than 48 hours before' if late else 'ahead of'}"
-            " checkout. The turnover is back on the bench."
-        )
-    else:
-        event = alerts.AlertEvent.OWNER_CANCELLED_AWARDED
-        summary = "The owner cancelled a turnover a cleaner was already booked for."
-
-    return alerts.emit(
-        event,
-        # Both sides of the job, plus an admin. A cancellation that only the
-        # person who caused it knows about is the silent failure here.
-        recipients=[owner_email or "", cleaner_email or "", *alerts.admin_emails(db)],
-        summary=summary,
-        turnover_id=str(turnover.id),
-        award_id=str(award.id),
-        cancelled_by=str(actor.id),
-        was_no_show=no_show,
-        was_late=late,
-        reason=reason,
-        checkout_at=turnover.checkout_at.isoformat(),
-    )

@@ -10,31 +10,31 @@ back where it can be re-staffed, and nobody finds out by showing up:
   because the owner does not want it done),
 * the cleaner never turns up at all.
 
-"Alerted" is checked through the log the alerts service writes, because phase 4
-has no notification delivery — phase 5 does. What phase 4 has to prove is that
-the decision to tell people is made in the code, every time, rather than being
-left to the phase that will do the sending.
+"Alerted" is checked against the `notifications` table. Phase 4 asserted on a log
+line, because it had no delivery; phase 5 gives it a row, which is a stronger
+test of the same promise — a log line proves a decision was made, a row proves
+there is a record somebody can point at a week later when they say nobody told
+them.
 """
 
 from __future__ import annotations
 
-import logging
 import uuid
 from datetime import datetime, timedelta, timezone
 
-import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import Award, Bid, BidStatus, Turnover, TurnoverStatus, TurnoverUrgency
-
-
-@pytest.fixture
-def alert_log(caplog: pytest.LogCaptureFixture):
-    """Capture what the alerts service decided, without a delivery mechanism."""
-    caplog.set_level(logging.INFO, logger="linx.alerts")
-    return caplog
+from app.models import (
+    Award,
+    Bid,
+    BidStatus,
+    Notification,
+    Turnover,
+    TurnoverStatus,
+    TurnoverUrgency,
+)
 
 
 def _award_a_job(client: TestClient, make_cleaner, make_open_turnover, **kwargs) -> dict:
@@ -60,8 +60,20 @@ def _award_a_job(client: TestClient, make_cleaner, make_open_turnover, **kwargs)
     return job
 
 
-def _alerts(alert_log) -> list[str]:
-    return [record.getMessage() for record in alert_log.records]
+def _notified(db: Session, event: str) -> list[Notification]:
+    """Every notification recorded for one event, freshest read from the row."""
+    db.expire_all()
+    return list(
+        db.execute(
+            select(Notification).where(Notification.event == event)
+        )
+        .scalars()
+        .all()
+    )
+
+
+def _recipients(db: Session, event: str) -> set[str]:
+    return {row.destination for row in _notified(db, event)}
 
 
 class TestACleanerBacksOut:
@@ -122,10 +134,9 @@ class TestACleanerBacksOut:
         assert after["status"] == "open"
 
     def test_the_owner_and_an_admin_are_both_told(
-        self, client: TestClient, make_cleaner, make_open_turnover, admin_user, alert_log
+        self, client: TestClient, make_cleaner, make_open_turnover, admin_user, db: Session
     ) -> None:
         job = _award_a_job(client, make_cleaner, make_open_turnover)
-        alert_log.clear()
 
         client.post(
             f"/api/board/jobs/{job['turnover']['id']}/cancel",
@@ -133,12 +144,15 @@ class TestACleanerBacksOut:
             headers=job["cleaner"]["auth"],
         )
 
-        messages = _alerts(alert_log)
-        assert len(messages) == 1, messages
-        alert = messages[0]
-        assert "cleaner_cancelled_awarded_turnover" in alert
-        assert job["owner"]["user"]["email"] in alert, "the owner was not told"
-        assert admin_user["user"].email in alert, "no admin was told"
+        told = _recipients(db, "cleaner_cancelled")
+        assert job["owner"]["user"]["email"] in told, "the owner was not told"
+        assert admin_user["user"].email in told, "no admin was told"
+        assert job["cleaner"]["user"]["email"] in told, "the cleaner has no record of it"
+
+        # And the message says what happened, not just that something did.
+        body = _notified(db, "cleaner_cancelled")[0].body
+        assert "Double booked myself." in body
+        assert "back on the bench" in body
 
     def test_the_job_is_biddable_again_and_can_be_re_awarded(
         self, client: TestClient, make_cleaner, make_open_turnover, db: Session
@@ -251,10 +265,9 @@ class TestACleanerBacksOut:
 
 class TestANoShow:
     def test_the_booking_ends_flagged_and_the_job_reopens(
-        self, client: TestClient, make_cleaner, make_open_turnover, db: Session, alert_log
+        self, client: TestClient, make_cleaner, make_open_turnover, db: Session
     ) -> None:
         job = _award_a_job(client, make_cleaner, make_open_turnover)
-        alert_log.clear()
 
         resp = client.post(
             f"/api/turnovers/{job['turnover']['id']}/no-show",
@@ -273,7 +286,7 @@ class TestANoShow:
         assert award.cancelled_at is not None
         assert award.cancellation_reason == "Nobody came, no message."
 
-        assert "cleaner_no_show" in _alerts(alert_log)[0]
+        assert _notified(db, "cleaner_no_show"), "nobody was told about the no-show"
 
     def test_a_no_show_needs_a_reason(
         self, client: TestClient, make_cleaner, make_open_turnover
@@ -301,12 +314,11 @@ class TestANoShow:
 
 class TestAnOwnerCallsItOff:
     def test_cancelling_an_awarded_turnover_ends_the_booking_and_tells_the_cleaner(
-        self, client: TestClient, make_cleaner, make_open_turnover, admin_user, alert_log
+        self, client: TestClient, make_cleaner, make_open_turnover, admin_user, db: Session
     ) -> None:
         """Phase 2 refused this outright and pointed at the phase that would
         build it. This is that phase: allowed, but never silently."""
         job = _award_a_job(client, make_cleaner, make_open_turnover)
-        alert_log.clear()
 
         resp = client.post(
             f"/api/turnovers/{job['turnover']['id']}/cancel",
@@ -319,10 +331,10 @@ class TestAnOwnerCallsItOff:
         assert body["award"] is None
         assert body["cancellation_reason"] == "The guest cancelled their stay."
 
-        alert = _alerts(alert_log)[0]
-        assert "owner_cancelled_awarded_turnover" in alert
-        assert job["cleaner"]["user"]["email"] in alert, "the cleaner was not told"
-        assert admin_user["user"].email in alert
+        told = _recipients(db, "owner_cancelled_awarded")
+        assert job["cleaner"]["user"]["email"] in told, "the cleaner was not told"
+        assert admin_user["user"].email in told
+        assert "nobody is booked for it" in _notified(db, "owner_cancelled_awarded")[0].body
 
     def test_cancelling_on_a_booked_cleaner_requires_a_reason(
         self, client: TestClient, make_cleaner, make_open_turnover, db: Session

@@ -12,7 +12,7 @@ reference to any other codebase.
 
 ---
 
-## Status: phase 3 — the cleaner's side
+## Status: phase 5 — notifications
 
 What works today:
 
@@ -32,14 +32,24 @@ What works today:
 - **The bench board and bidding** — open turnovers inside a cleaner's radius,
   most urgent first, with the street address and access notes withheld until a
   job is awarded. A cleared cleaner names a price.
-- The full v1 database schema — all ten tables — created by one Alembic
-  migration. Tables belonging to later phases exist and are empty on purpose.
+- **Awarding** — the owner hires one cleaner, under a row lock held across the
+  whole check-then-write, so two simultaneous accepts cannot both win. The
+  address and the access notes open up to the cleaner who got it, and close
+  again the moment the award ends.
+- **Cancellations and no-shows** — an award is cancelled, never deleted; the job
+  goes back on the bench; and the owner, the cleaner and an admin are told every
+  time, never conditional on the cancellation being late.
+- **Notifications** — nine of the twelve events in the fixed list, recorded in
+  the same transaction as the state change and delivered after it, with a unique
+  `dedupe_key` so a retry cannot send twice. Payment, payout and review notices
+  are declared and wait for their phases.
+- The full v1 database schema — eleven tables — built by Alembic migrations.
+  Tables belonging to later phases exist and are empty on purpose.
 - A single-container deploy: the backend serves the built frontend.
-- 209 tests against real PostgreSQL, plus 5 browser click-throughs.
+- 265 tests against real PostgreSQL, plus 7 browser click-throughs.
 
-Awarding, payments, notifications, and reviews are **not** built yet.
-Each is its own phase, reviewed before the next begins — see the phase table in
-[`CLAUDE.md`](CLAUDE.md).
+Payments and reviews are **not** built yet. Each is its own phase, reviewed
+before the next begins — see the phase table in [`CLAUDE.md`](CLAUDE.md).
 
 ---
 
@@ -169,7 +179,20 @@ One Railway service, one Postgres, nothing shared with any other project.
    Startup refuses to run with the development `SECRET_KEY` when
    `ENVIRONMENT=production`.
 
-4. Deploy. The entrypoint runs `alembic upgrade head` before starting the
+4. Add a **cron service** on the same image running
+   `python -m app.tasks.scheduled`. Two notifications hang off the clock rather
+   than off a request — the day-of reminder and the unclaimed-turnover alarm —
+   and that pass also drains any notification a crashed request left queued.
+   Every fifteen minutes is a reasonable schedule; running it more often is safe
+   by design, because both events key their `dedupe_key` off the turnover and
+   the unique constraint refuses the second copy.
+
+5. Set `SMTP_HOST` and its credentials when you have a mail provider. Without
+   them the logging sender runs: notifications are still recorded as rows and
+   written to the log, but they stay `pending`, because nothing was sent. That
+   is the launch posture, and it is deliberately visible rather than silent.
+
+6. Deploy. The entrypoint runs `alembic upgrade head` before starting the
    server, and aborts the boot if a migration fails rather than serving traffic
    against a schema it does not match.
 
@@ -201,6 +224,10 @@ backend/
     services/geo.py      service-radius distance, in Python and in SQL
     services/storage.py  vetting documents, never on a public path
     services/background_check.py  Checkr, or manual when no key is set
+    services/awards.py   guardrail 1 — the row lock, and the cancellation policy
+    services/notifications.py  the one place that decides who hears about what
+    services/delivery.py   the sender — SMTP, or the log when none is configured
+    tasks/scheduled.py   the two events a clock fires, and the outbox drain
   alembic/versions/    migrations — one head, always
   tests/               pytest suite, real Postgres
   tests/e2e/           browser click-throughs, opt-in

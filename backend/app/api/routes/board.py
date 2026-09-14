@@ -47,7 +47,7 @@ from app.schemas.board import (
     BoardTurnoverOut,
     JobCancel,
 )
-from app.services import awards, vetting
+from app.services import awards, notifications, vetting
 from app.services.geo import distance_miles_sql, haversine_miles
 from app.services.turnovers import refresh_urgency
 
@@ -401,8 +401,18 @@ def place_bid(
         )
         db.add(bid)
 
+    # The owner hears about it in the same transaction that records it. The
+    # dedupe key includes the price, so re-submitting the same number is silent
+    # and changing it is not — a changed price is new information.
+    db.flush()
+    prop = db.execute(
+        select(Property).where(Property.id == turnover.property_id)
+    ).scalar_one()
+    notifications.bid_received(db, bid, turnover, prop)
+
     db.commit()
     db.refresh(bid)
+    notifications.deliver_pending(db)
     return bid
 
 

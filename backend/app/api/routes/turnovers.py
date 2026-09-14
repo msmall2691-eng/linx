@@ -49,7 +49,7 @@ from app.schemas.turnover import (
     TurnoverOut,
     TurnoverUpdate,
 )
-from app.services import awards
+from app.services import awards, notifications
 from app.services.turnovers import apply_derived_fields, refresh_urgency
 
 router = APIRouter(prefix="/turnovers", tags=["turnovers"])
@@ -141,8 +141,12 @@ def create_turnover(
     apply_derived_fields(turnover)
 
     db.add(turnover)
+    if turnover.status is TurnoverStatus.OPEN:
+        db.flush()
+        notifications.turnover_posted(db, turnover, prop)
     db.commit()
     db.refresh(turnover)
+    notifications.deliver_pending(db)
     return turnover
 
 
@@ -251,8 +255,18 @@ def publish_turnover(
 
     turnover.status = TurnoverStatus.OPEN
     apply_derived_fields(turnover)
+
+    # Every cleared cleaner whose service area covers this property. Queued in
+    # the same transaction as the status change, so a posted turnover and the
+    # message saying so cannot disagree.
+    prop = db.execute(
+        select(Property).where(Property.id == turnover.property_id)
+    ).scalar_one()
+    notifications.turnover_posted(db, turnover, prop)
+
     db.commit()
     db.refresh(turnover)
+    notifications.deliver_pending(db)
     return turnover
 
 
@@ -429,7 +443,11 @@ def decline_bid(
 
     if bid.status is BidStatus.SUBMITTED:
         bid.status = BidStatus.DECLINED
+        prop = db.get(Property, turnover.property_id)
+        if prop is not None:
+            notifications.bids_declined(db, turnover, prop, [bid])
         db.commit()
+        notifications.deliver_pending(db)
 
     return list_turnover_bids(turnover_id, db, owner)
 

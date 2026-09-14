@@ -14,12 +14,16 @@ from app.models.enums import (
     BidStatus,
     DocumentStatus,
     DocumentType,
+    NotificationChannel,
+    NotificationEvent,
+    NotificationStatus,
     PaymentStatus,
     TurnoverStatus,
     TurnoverUrgency,
     UserRole,
     VerificationStatus,
 )
+from app.models.notification import Notification
 from app.models.payment import PaymentIn, Payout
 from app.models.property import Property
 from app.models.review import Review
@@ -35,6 +39,10 @@ __all__ = [
     "Document",
     "DocumentStatus",
     "DocumentType",
+    "Notification",
+    "NotificationChannel",
+    "NotificationEvent",
+    "NotificationStatus",
     "PaymentIn",
     "PaymentStatus",
     "Payout",
