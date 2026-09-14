@@ -145,6 +145,13 @@ def write_review(
             status_code=status.HTTP_409_CONFLICT, detail=refused.detail
         ) from None
 
+    # `submit` committed, and the session is `expire_on_commit=False`, so this
+    # object is a pre-commit snapshot until it is expired. Nothing in `submit`
+    # writes the turnover today, so nothing is wrong yet — which is exactly the
+    # kind of "correct by accident" this codebase refuses to leave lying about.
+    # Same discipline as `_fresh_detail` elsewhere: build the answer from the
+    # database, not from memory.
+    db.expire(turnover)
     return _answer(db, turnover, user)
 
 

@@ -20,6 +20,7 @@ returns, and on the absence of any signal that a review has been written at all:
 from __future__ import annotations
 
 import json
+import threading
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -29,6 +30,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import settings
+from app.main import app
 from app.models import NotificationEvent, Turnover, TurnoverStatus
 from app.models.review import Review
 from app.services import notifications, reviews
@@ -786,3 +788,116 @@ class TestQueueingStaysInTheTransaction:
                 notifications.Notification.event == NotificationEvent.REVIEW_RECEIVED
             )
         ).scalars().all()
+
+
+# --------------------------------------------------------------------------
+# The lock on the write path
+# --------------------------------------------------------------------------
+
+
+class TestBothSidesSubmittingAtOnce:
+    """The claim in `write_review`'s docstring, proved rather than asserted.
+
+    Accepting a bid has had a racing test since phase 4 because a lost race
+    there hands one cleaning to two people. The review write takes the same
+    lock for a quieter failure: both sides check whether the other has written,
+    both read "not yet" against a stale snapshot, both insert — and `submit`'s
+    reveal branch fires for neither, leaving two reviews that both exist and
+    neither of which anybody can see until the fourteen-day sweep.
+
+    Nothing else catches it. `uq_reviews_turnover_author_role` is per side, so
+    two rows from opposite sides violate nothing; the endpoint answers 201
+    twice and the server log is clean. It surfaces a fortnight later as two
+    people asking why their reviews never appeared.
+    """
+
+    def test_two_at_once_still_reveal_each_other(
+        self,
+        client: TestClient,
+        make_cleaner,
+        make_open_turnover,
+        db: Session,
+        own_session_per_request,
+    ) -> None:
+        job = _finished_job(client, make_cleaner, make_open_turnover)
+        turnover_id = job["turnover"]["id"]
+
+        # Release the setup session's snapshot and its locks, so the two racing
+        # connections are the only ones in play.
+        db.commit()
+
+        start = threading.Barrier(2)
+        results: dict[str, int] = {}
+
+        def write(name: str, side: dict, rating: int) -> None:
+            with TestClient(app) as racer:
+                start.wait(timeout=10)
+                resp = racer.post(
+                    f"/api/turnovers/{turnover_id}/reviews",
+                    json={"rating": rating, "text": f"From {name}."},
+                    headers=side["auth"],
+                )
+                results[name] = resp.status_code
+
+        threads = [
+            threading.Thread(target=write, args=("owner", job["owner"], 4)),
+            threading.Thread(target=write, args=("cleaner", job["cleaner"], 5)),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=30)
+            assert not thread.is_alive(), "a review write never returned — deadlock?"
+
+        assert sorted(results.values()) == [201, 201], results
+
+        db.expire_all()
+        written = db.execute(
+            select(Review).where(Review.turnover_id == uuid.UUID(turnover_id))
+        ).scalars().all()
+        assert len(written) == 2, "one of two simultaneous reviews was lost"
+        assert all(review.visible_at is not None for review in written), (
+            "both sides wrote and neither review was revealed — each one checked "
+            "for the other against a stale read, which is what the row lock on "
+            "this path exists to prevent"
+        )
+
+        # And the pair opened together, not one and then the other.
+        assert written[0].visible_at == written[1].visible_at
+
+    def test_the_second_writer_is_told_about_the_first(
+        self,
+        client: TestClient,
+        make_cleaner,
+        make_open_turnover,
+        db: Session,
+        own_session_per_request,
+    ) -> None:
+        """Whoever loses the race reads the winner's row, not a stale absence.
+
+        The reveal has to happen on somebody's request. If the second writer's
+        transaction cannot see the first's committed row, it takes the "nobody
+        else has written" branch and the pair never opens.
+        """
+        job = _finished_job(client, make_cleaner, make_open_turnover)
+        turnover_id = job["turnover"]["id"]
+        db.commit()
+
+        with TestClient(app) as first:
+            assert first.post(
+                f"/api/turnovers/{turnover_id}/reviews",
+                json={"rating": 2, "text": "First in."},
+                headers=job["cleaner"]["auth"],
+            ).status_code == 201
+
+        with TestClient(app) as second:
+            answer = second.post(
+                f"/api/turnovers/{turnover_id}/reviews",
+                json={"rating": 5, "text": "Second in."},
+                headers=job["owner"]["auth"],
+            )
+        assert answer.status_code == 201, answer.text
+
+        body = answer.json()
+        assert body["mine"]["visible_at"] is not None
+        assert [r["text"] for r in body["visible"]] == ["First in."]

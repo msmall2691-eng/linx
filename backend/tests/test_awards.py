@@ -23,14 +23,12 @@ from __future__ import annotations
 
 import threading
 import uuid
-from collections.abc import Iterator
 
-import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.db import SessionLocal, get_db
+from app.db import SessionLocal
 from app.main import app
 from app.models import Award, Bid, BidStatus, Turnover, TurnoverStatus
 
@@ -219,32 +217,8 @@ class TestDecliningABid:
         assert "Cancel the turnover instead" in resp.json()["detail"]
 
 
-@pytest.fixture
-def own_session_per_request() -> Iterator[None]:
-    """Give every request its own session, as production does.
-
-    The `client` fixture deliberately shares the test's session so a test can
-    read back what a request wrote. That sharing makes a concurrency test
-    meaningless — two requests on one connection cannot race — so these tests
-    swap in the real thing for the duration.
-    """
-
-    def _get_db() -> Iterator[Session]:
-        session = SessionLocal()
-        try:
-            yield session
-        finally:
-            session.close()
-
-    previous = app.dependency_overrides.get(get_db)
-    app.dependency_overrides[get_db] = _get_db
-    try:
-        yield
-    finally:
-        if previous is None:
-            app.dependency_overrides.pop(get_db, None)
-        else:
-            app.dependency_overrides[get_db] = previous
+# `own_session_per_request` lives in conftest.py — the review write path
+# races on the same fixture.
 
 
 class TestTwoAcceptsAtOnce:
