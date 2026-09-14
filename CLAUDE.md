@@ -100,6 +100,32 @@ accident until it didn't, and nothing failed loudly at the moment of the change.
 
 ---
 
+## The guardrails, as things that check themselves
+
+A rule nobody checks is a rule that gets missed the week somebody is in a hurry,
+so each guardrail above is paired with a skill Claude Code reads and an agent
+that verifies the rule was actually followed:
+
+| Guardrail | Skill — the rule | Agent — the check |
+|---|---|---|
+| 1 (locking) and 2 (idempotency) | `.claude/skills/marketplace-money-invariants/` | `.claude/agents/money-path-reviewer.md` |
+| 3 (before removing a step) | `.claude/skills/seam-check-before-removal/` | `.claude/agents/seam-regression-auditor.md` |
+
+Two more skills cover the rules that are not guardrails but fail the same way —
+silently, and discovered by a person rather than a test:
+
+- `.claude/skills/trust-gate-single-source/` — `can_take_jobs` has one author,
+  two layers of enforcement, and no override.
+- `.claude/skills/notification-completeness/` — the fixed event list, and the
+  rule that a state transition is not done until its notification has both a
+  sender and a test.
+
+The agents are **read-only by design**: they report, they do not fix. A reviewer
+that can quietly commit its own corrections turns a finding into a change nobody
+read.
+
+---
+
 ## Stack
 
 | Layer | Choice |
