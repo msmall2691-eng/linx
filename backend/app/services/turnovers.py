@@ -32,11 +32,6 @@ from app.services.urgency import derive_urgency, is_same_day
 #: never had, and the one that matters would be buried in them.
 UNCLAIMED_LOOKBACK = timedelta(days=1)
 
-#: How far past checkout an unclaimed turnover keeps alarming. Without a floor,
-#: a first run against an old database would alert on every job the product
-#: never had, and the one that matters would be buried in them.
-UNCLAIMED_LOOKBACK = timedelta(days=1)
-
 
 def apply_derived_fields(turnover: Turnover, *, now: datetime | None = None) -> bool:
     """Set `is_same_day` and `urgency` from the schedule.

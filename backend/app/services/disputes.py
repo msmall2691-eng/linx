@@ -29,7 +29,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.models.award import Award
@@ -280,11 +280,15 @@ def raised_by(db: Session, user: User) -> list[Dispute]:
 
 
 def open_count(db: Session) -> int:
-    """How many need a person. The number the console leads with."""
-    return len(
-        db.execute(
-            select(Dispute.id).where(Dispute.status != DisputeStatus.RESOLVED)
-        )
-        .scalars()
-        .all()
-    )
+    """How many need a person. The number the console leads with.
+
+    Counted in the database rather than by loading the ids and measuring the
+    list: this runs on every console load, and a queue that is big enough to
+    matter is exactly the one that must not be dragged into Python to be
+    counted.
+    """
+    return db.execute(
+        select(func.count())
+        .select_from(Dispute)
+        .where(Dispute.status != DisputeStatus.RESOLVED)
+    ).scalar_one()
