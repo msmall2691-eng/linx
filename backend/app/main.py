@@ -26,6 +26,7 @@ from app.api.routes import (
     turnovers,
 )
 from app.config import settings
+from app.services import places
 
 API_PREFIX = "/api"
 
@@ -57,7 +58,7 @@ app.include_router(api_router)
 
 
 @app.get(f"{API_PREFIX}/config", tags=["meta"])
-def public_config() -> dict[str, str]:
+def public_config() -> dict[str, object]:
     """Settings the frontend is allowed to know.
 
     One region at launch — the frontend reads the name from here rather than
@@ -66,7 +67,43 @@ def public_config() -> dict[str, str]:
     return {
         "region_name": settings.region_name,
         "region_timezone": settings.region_timezone,
+        # The Google Maps **browser** key, or null. This one is meant to be
+        # public — the Maps JS SDK runs in the page, so the key is in the page
+        # by definition, and Google's own model is that it is restricted by
+        # HTTP referrer rather than kept secret.
+        #
+        # **That restriction is not optional.** An unrestricted Maps key found
+        # in a page is somebody else's autocomplete on your bill. Restrict it
+        # to this domain in the Google Cloud console, and to the Places and
+        # Maps JavaScript APIs, before it is ever deployed.
+        #
+        # Null means the address form falls back to plain fields, which still
+        # produce a placeable property — see `app/services/geocoding.py`.
+        "google_maps_api_key": settings.google_maps_api_key,
     }
+
+
+@app.get(f"{API_PREFIX}/places", tags=["meta"])
+def public_places() -> list[dict[str, object]]:
+    """The towns this product serves, with their centres.
+
+    Public and unauthenticated because a cleaner picks their service area
+    before they have an account, and because the list of towns in a region is
+    not a secret.
+
+    **The frontend reads this rather than carrying its own copy.** Two tables
+    of coordinates that have to agree are two tables that eventually do not,
+    and the one that is wrong is the one nobody is looking at.
+    """
+    return [
+        {
+            "name": place.name,
+            "lat": place.lat,
+            "lng": place.lng,
+            "zips": list(place.zips),
+        }
+        for place in places.PLACES
+    ]
 
 
 def _mount_frontend(application: FastAPI) -> None:

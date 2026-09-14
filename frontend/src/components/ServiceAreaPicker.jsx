@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 
-import { REGION_LABEL, nearestPlace, searchPlaces } from '../lib/places.js'
+import { useConfig } from '../lib/config.jsx'
+import { loadPlaces, nearestPlace, searchPlaces } from '../lib/places.js'
 
 /**
  * Where a cleaner works, asked in a way a person can answer.
@@ -25,6 +26,10 @@ import { REGION_LABEL, nearestPlace, searchPlaces } from '../lib/places.js'
  * saying so is more honest than four decimal places.
  */
 export default function ServiceAreaPicker({ lat, lng, onChange, radiusMiles }) {
+  const regionLabel = useConfig().region_name ?? 'this region'
+  // The town table is the server's — see `lib/places.js`. One copy, because the
+  // same coordinates also decide where a property sits.
+  const [places, setPlaces] = useState([])
   const [query, setQuery] = useState('')
   const [results, setResults] = useState([])
   const [locating, setLocating] = useState(false)
@@ -35,10 +40,24 @@ export default function ServiceAreaPicker({ lat, lng, onChange, radiusMiles }) {
   // When the profile loads with coordinates already saved, name them rather
   // than showing an empty box beside a set of numbers the person cannot read.
   useEffect(() => {
-    if (chosenLabel || lat === '' || lng === '' || lat == null || lng == null) return
-    const place = nearestPlace(Number(lat), Number(lng))
+    let cancelled = false
+    loadPlaces()
+      .then((loaded) => !cancelled && setPlaces(loaded))
+      .catch(() => {
+        // The picker needs the list; without it the search box finds nothing
+        // and says so, which is better than a blank dropdown with no reason.
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  useEffect(() => {
+    if (chosenLabel || places.length === 0) return
+    if (lat === '' || lng === '' || lat == null || lng == null) return
+    const place = nearestPlace(places, Number(lat), Number(lng))
     setChosenLabel(place ? `${place.name}, ME` : 'Saved location')
-  }, [lat, lng, chosenLabel])
+  }, [lat, lng, chosenLabel, places])
 
   useEffect(() => {
     function onClickOutside(event) {
@@ -50,7 +69,7 @@ export default function ServiceAreaPicker({ lat, lng, onChange, radiusMiles }) {
 
   function search(value) {
     setQuery(value)
-    setResults(searchPlaces(value))
+    setResults(searchPlaces(places, value))
   }
 
   function choose(place) {
@@ -73,14 +92,14 @@ export default function ServiceAreaPicker({ lat, lng, onChange, radiusMiles }) {
       (position) => {
         const { latitude, longitude } = position.coords
         onChange({ lat: latitude, lng: longitude })
-        const place = nearestPlace(latitude, longitude)
+        const place = nearestPlace(places, latitude, longitude)
         // Name the nearest town so somebody can sanity-check the fix. If it is
         // nowhere near the region, say so plainly rather than silently
         // accepting a service area on the other side of the country.
         setChosenLabel(place ? `Near ${place.name}, ME` : 'Your current location')
         if (!place) {
           setLocationError(
-            `That looks a long way from ${REGION_LABEL}. linx only covers this ` +
+            `That looks a long way from ${regionLabel}. linx only covers this ` +
               'region right now — you can still save it, but no turnovers will ' +
               'be in range.',
           )
@@ -168,7 +187,7 @@ export default function ServiceAreaPicker({ lat, lng, onChange, radiusMiles }) {
 
         {query.trim().length > 1 && results.length === 0 && (
           <p className="mt-2 text-sm text-slate-600" data-testid="no-places">
-            Nothing in {REGION_LABEL} matches that. linx covers one region right
+            Nothing in {regionLabel} matches that. linx covers one region right
             now — if your town is missing and it should be here, tell us.
           </p>
         )}
