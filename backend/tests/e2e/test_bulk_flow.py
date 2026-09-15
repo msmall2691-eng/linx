@@ -358,3 +358,90 @@ def test_a_page_in_flight_does_not_land_in_a_different_list(page, live_server) -
     # The screen is whole, and shows the filter that was asked for last.
     expect(page.get_by_role("heading", name="Turnovers")).to_be_visible()
     expect(page.get_by_test_id("status-badge")).to_have_count(50)
+
+
+def test_a_budget_of_a_bare_dot_is_refused(page, live_server) -> None:
+    """The case `abc` did not cover. A lone `.` passes the shape test — no
+    digits, a dot, no digits — and `Number('.')` is NaN, which every caller
+    tested for with `=== null`. `JSON.stringify` turns NaN into null on the
+    wire, so the budget somebody typed became no budget at all."""
+    _signup_owner(page, live_server)
+    _add_home(page, live_server, nickname="Dot House")
+
+    page.goto(f"{live_server}/turnovers/bulk")
+    page.select_option("#property", label="Dot House")
+    page.fill("#pasted", "2027-10-07")
+    page.get_by_role("button", name="Add these dates").click()
+    page.fill("#budget", ".")
+    page.get_by_role("button", name=re.compile("Add 1 as drafts")).click()
+
+    expect(page.get_by_text("dollars and cents", exact=False)).to_be_visible()
+    expect(page.get_by_test_id("bulk-result")).to_have_count(0)
+
+
+def test_show_more_still_works_after_a_page_was_abandoned(page, live_server) -> None:
+    """A page in flight when the filter changes skips its own
+    `setLoadingMore(false)`, because by then it is writing about a screen that
+    no longer exists. That left the flag stuck true, and the replacement
+    list's own **Show more** rendered permanently disabled as "Loading…" — the
+    later pages unreachable again, by a different route."""
+    from datetime import date, timedelta
+
+    _signup_owner(page, live_server)
+    _add_home(page, live_server, nickname="Stuck House")
+
+    start = date.today() + timedelta(days=30)
+    dates = "\n".join(
+        (start + timedelta(days=offset)).strftime("%Y-%m-%d") for offset in range(60)
+    )
+    page.goto(f"{live_server}/turnovers/bulk")
+    page.select_option("#property", label="Stuck House")
+    page.fill("#pasted", dates)
+    page.get_by_role("button", name="Add these dates").click()
+    page.get_by_role("button", name=re.compile("Add 60 as drafts")).click()
+    expect(page.get_by_role("heading", name="60 drafts added")).to_be_visible()
+
+    page.goto(f"{live_server}/turnovers")
+    expect(page.get_by_test_id("status-badge")).to_have_count(50)
+
+    page.route(
+        "**/turnovers?include_finished=false&limit=50&offset=50",
+        lambda route: (page.wait_for_timeout(1500), route.continue_()),
+    )
+    page.get_by_test_id("load-more").click()
+    page.get_by_label("Show completed and cancelled").check()
+    page.wait_for_timeout(2500)
+
+    # The replacement list has its own second page, and it must be askable for.
+    load_more = page.get_by_test_id("load-more")
+    expect(load_more).to_be_enabled()
+    load_more.click()
+    expect(page.get_by_test_id("status-badge")).to_have_count(60)
+
+
+def test_an_owner_with_no_properties_is_given_a_way_forward(page, live_server) -> None:
+    """Otherwise the feature is a required select with one permanently empty
+    option and no route onward."""
+    _signup_owner(page, live_server)
+
+    page.goto(f"{live_server}/turnovers/bulk")
+    expect(page.get_by_test_id("bulk-no-properties")).to_be_visible()
+    page.get_by_role("link", name="Add a property").click()
+    page.wait_for_url("**/properties/new")
+
+
+def test_archiving_every_property_says_so_too(page, live_server) -> None:
+    """"All archived" is the same dead end as "none yet", and the sentence
+    names restoring one rather than only adding another."""
+    _signup_owner(page, live_server)
+    _add_home(page, live_server, nickname="Gone Away")
+
+    page.goto(f"{live_server}/properties")
+    page.get_by_role("link", name="Gone Away").click()
+    page.wait_for_url(PROPERTY_DETAIL)
+    page.once("dialog", lambda dialog: dialog.accept())
+    page.get_by_role("button", name=re.compile("Archive")).click()
+
+    page.goto(f"{live_server}/turnovers/bulk")
+    expect(page.get_by_test_id("bulk-no-properties")).to_be_visible()
+    expect(page.get_by_text("restore one", exact=False)).to_be_visible()

@@ -36,6 +36,13 @@ export default function TurnoverList() {
     let cancelled = false
     setTurnovers(null)
     setMore(false)
+    // **Reset with the list it belonged to.** A page in flight when the filter
+    // changes deliberately skips its own `setLoadingMore(false)`, because by
+    // then it is writing about a screen that no longer exists — which left
+    // this stuck true, and the replacement list's own Show more rendered
+    // permanently disabled as "Loading…". The guard that made the stale write
+    // safe is what made clearing this the effect's job.
+    setLoadingMore(false)
     Promise.all([
       apiFetch(`/turnovers?include_finished=${showFinished}&limit=${PAGE}`),
       apiFetch('/properties?include_archived=true'),

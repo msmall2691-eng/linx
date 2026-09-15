@@ -272,6 +272,30 @@ export default function TurnoverBulkNew() {
     )
   }
 
+  // An owner with nothing to add jobs *to* — no properties yet, or every one
+  // archived — would otherwise get a required select with one permanently
+  // empty option and no route onward. The single-job form has said this for
+  // as long as it has existed; this is the same sentence.
+  if (properties !== null && properties.length === 0) {
+    return (
+      <div className="mx-auto max-w-2xl" data-testid="bulk-no-properties">
+        <h1 className="text-xl font-semibold">Add several jobs at once</h1>
+        <p className="mt-3 text-slate-600">
+          Add a property first — a job is a cleaning at one of your places. If
+          you have archived them all, restore one and it will appear here.
+        </p>
+        <div className="mt-6 flex gap-3">
+          <Link to="/properties/new" className="btn-primary">
+            Add a property
+          </Link>
+          <Link to="/properties" className="btn-secondary">
+            See your properties
+          </Link>
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="mx-auto max-w-3xl" data-testid="bulk-new">
       <div className="mb-4">
