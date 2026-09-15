@@ -16,6 +16,7 @@ exists to prevent.
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
@@ -172,3 +173,150 @@ def unclaimed_alarming(
             .order_by(Turnover.checkout_at)
         ).all()
     )
+
+
+# --------------------------------------------------------------------------
+# Several jobs at once, for an owner with no booking feed
+#
+# A calendar feed is the fast path onto the board, and plenty of owners cannot
+# use it: a home has no booking calendar at all — that is what a home *is* —
+# and a rental booked direct or by phone has no `.ics` URL to paste. Those
+# owners were left typing one job per screen, which is fine for one and absurd
+# for a season.
+#
+# This is deliberately **not** a second calendar source. It writes no
+# `property_calendars` row, claims no `external_ref`, and is never reconciled
+# against anything later: the owner said these dates once, and from then on the
+# rows are ordinary turnovers they own. Everything in `calendars.py` about
+# identity, adoption and vanishing bookings exists because a feed keeps
+# *talking*; a list somebody typed does not, and borrowing that machinery would
+# have meant maintaining rules with nothing behind them.
+# --------------------------------------------------------------------------
+
+#: The most jobs one submission may create.
+#:
+#: A bulk form is where a paste goes wrong, and the failure is not a big
+#: request — it is an owner who meant six jobs and posted six hundred. The cap
+#: is the difference between a mistake somebody notices and one they cannot
+#: undo by hand.
+MAX_BULK_JOBS = 100
+
+
+@dataclass(frozen=True)
+class BulkJob:
+    """One job in a bulk submission, before anything is written."""
+
+    checkout_at: datetime
+    checkin_at: datetime | None = None
+
+
+@dataclass
+class BulkResult:
+    """What one bulk submission did, reported rather than merely returned."""
+
+    created: list[Turnover] = field(default_factory=list)
+    #: Rows whose checkout already exists on this property, skipped and
+    #: **named**. A duplicate is not a mismatch to refuse — the owner asked for
+    #: a job that is already there — but silently dropping it is how somebody
+    #: pastes twice and never learns the second one did nothing.
+    already_there: list[datetime] = field(default_factory=list)
+
+
+def _existing_checkouts(db: Session, prop: Property) -> set[datetime]:
+    """Checkouts this property already has a job for.
+
+    Cancelled ones are deliberately excluded: an owner who called a job off and
+    is now re-entering that date means it, and refusing them the date they
+    just freed up would be the system arguing with them about their own
+    calendar.
+    """
+    rows = db.execute(
+        select(Turnover.checkout_at).where(
+            Turnover.property_id == prop.id,
+            Turnover.status != TurnoverStatus.CANCELLED,
+        )
+    ).scalars().all()
+    return set(rows)
+
+
+def create_many(
+    db: Session,
+    *,
+    prop: Property,
+    jobs: list[BulkJob],
+    service_type: ServiceType | None = None,
+    owner_budget_cents: int | None = None,
+    notes: str | None = None,
+) -> BulkResult:
+    """Create several drafts on one property, all or nothing.
+
+    **Drafts, never posted, and not a setting.** This is calendars rule 1 in
+    its other spelling: an owner who wanted ten jobs on the bench can post them
+    in a minute, and an owner who did not cannot unsend the alerts, the bids or
+    the apology. A bulk form is precisely where a wrong paste becomes twenty
+    jobs, so the one irreversible step is the one it does not take. Drafts also
+    notify nobody, which is why this adds no `NotificationEvent` — the closed
+    list stays closed.
+
+    **All or nothing.** A mismatch is refused rather than corrected, as
+    everywhere else here, and for a list that has to mean the whole list: a
+    partial write leaves the owner comparing what they pasted against what
+    landed, with no way to retry that is not itself a duplicate.
+
+    The scope and the checkin are decided by `service_type_for` and
+    `checkin_for` — the same two functions the single-job endpoint asks — so a
+    home still refuses a checkin here, and refuses it per row with the row
+    named.
+    """
+    if not jobs:
+        raise JobRefused("No dates were given.")
+    if len(jobs) > MAX_BULK_JOBS:
+        raise JobRefused(
+            f"{len(jobs)} jobs at once is more than the {MAX_BULK_JOBS} this "
+            "takes. Add them in smaller batches, so a mistake stays small too."
+        )
+
+    # One author for both rules, asked rather than restated. `service_type_for`
+    # is asked once because the scope is shared across the submission;
+    # `checkin_for` is asked per row because each row carries its own.
+    scope = service_type_for(prop, service_type)
+
+    seen: set[datetime] = set()
+    existing = _existing_checkouts(db, prop)
+    result = BulkResult()
+    pending: list[Turnover] = []
+
+    for index, job in enumerate(jobs, start=1):
+        try:
+            checkin_at = checkin_for(prop, job.checkin_at)
+        except JobRefused as refused:
+            raise JobRefused(f"Row {index}: {refused.detail}") from None
+        if checkin_at is not None and checkin_at < job.checkout_at:
+            raise JobRefused(
+                f"Row {index}: the checkin is before the checkout."
+            )
+
+        # A duplicate *inside* the submission is the same paste-twice mistake
+        # as one against the database, and is reported the same way rather
+        # than inserted twice.
+        if job.checkout_at in existing or job.checkout_at in seen:
+            result.already_there.append(job.checkout_at)
+            continue
+        seen.add(job.checkout_at)
+
+        turnover = Turnover(
+            property_id=prop.id,
+            checkout_at=job.checkout_at,
+            checkin_at=checkin_at,
+            service_type=scope,
+            owner_budget_cents=owner_budget_cents,
+            notes=notes,
+            status=TurnoverStatus.DRAFT,
+        )
+        apply_derived_fields(turnover)
+        pending.append(turnover)
+
+    for turnover in pending:
+        db.add(turnover)
+    result.created = pending
+    return result

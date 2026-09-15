@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -24,6 +24,7 @@ from app.models.calendar import PropertyCalendar
 from app.models.enums import UserRole
 from app.models.user import User
 from app.schemas.calendar import (
+    CalendarFileJobsOut,
     CalendarCreate,
     CalendarOut,
     CalendarUpdate,
@@ -56,6 +57,89 @@ def list_calendars(
 ) -> list[PropertyCalendar]:
     get_owned_property(property_id, db, owner)
     return calendars.for_property(db, property_id)
+
+
+@router.post("/read-file", response_model=CalendarFileJobsOut)
+def read_calendar_file(
+    property_id: uuid.UUID,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    owner: User = Depends(require_owner),
+) -> CalendarFileJobsOut:
+    """Read an uploaded `.ics` and say what cleans it implies. **Writes nothing.**
+
+    For the owner whose listing site will export a file but will not hand over
+    a sync URL. It is deliberately *not* a second kind of feed: no
+    `property_calendars` row, no `external_ref`, no adoption and nothing
+    reconciled later. It fills in the bulk form and then it is over, and the
+    rows the owner submits are ordinary turnovers they own.
+
+    That distinction is the whole reason this is safe to add cheaply. Every
+    rule in `calendars.py` about identity and vanishing bookings exists because
+    a feed keeps talking; a file does not, and giving a one-shot upload that
+    machinery would have meant maintaining rules with nothing behind them.
+
+    No network either, which means none of the request-forgery surface a URL
+    carries — this is the one place a calendar can be read without this server
+    connecting anywhere.
+    """
+    prop = get_owned_property(property_id, db, owner)
+    try:
+        # The one author of "does a booking calendar make sense here", asked
+        # rather than copied. A home has no guests checking out, so an `.ics`
+        # of stays is a category error on one — the same refusal the feed path
+        # gives, in the same words.
+        calendars.refuse_ineligible(prop)
+    except calendars.CalendarError as refused:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(refused)
+        ) from None
+
+    # Bounded before it is read, not after. `MAX_FEED_BYTES` is the same limit
+    # the fetch path enforces while streaming, and for the same reason: reading
+    # the whole thing to find out how big it is is not a limit.
+    raw = file.file.read(calendars.MAX_FEED_BYTES + 1)
+    if len(raw) > calendars.MAX_FEED_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=(
+                f"That file is larger than the "
+                f"{calendars.MAX_FEED_BYTES // (1024 * 1024)}MB this reads."
+            ),
+        )
+    if not raw:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="That file is empty."
+        )
+
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        # Named rather than shrugged at: an owner who uploaded a PDF of their
+        # bookings deserves to be told that is what happened.
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="That does not look like a calendar file (.ics).",
+        ) from None
+
+    try:
+        bookings = calendars.parse(text)
+    except calendars.CalendarError as refused:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(refused)
+        ) from None
+
+    # The same two steps the feed takes, so an uploaded file and a synced URL
+    # propose the same jobs from the same bookings — including the horizon, the
+    # past floor, and which arrival counts as this clean's checkin.
+    jobs = calendars.jobs_for(bookings, prop)
+    return CalendarFileJobsOut(
+        bookings_seen=len(bookings),
+        jobs=[
+            {"checkout_at": job.checkout_at, "checkin_at": job.checkin_at}
+            for job in jobs
+        ],
+    )
 
 
 @router.post("", response_model=SyncOut, status_code=status.HTTP_201_CREATED)

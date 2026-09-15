@@ -43,9 +43,21 @@ export default function TurnoverList() {
     <div className="mx-auto max-w-3xl px-4 py-10">
       <div className="flex items-center justify-between gap-4">
         <h1 className="text-2xl font-bold tracking-tight">Turnovers</h1>
-        <Link to="/turnovers/new" className="btn-primary">
-          Post a turnover
-        </Link>
+        <div className="flex items-center gap-3">
+          {/* Mounted here rather than tucked behind a property, because the
+              owner who needs it most has no calendar feed and so never visits
+              the panel where one would be connected. */}
+          <Link
+            to="/turnovers/bulk"
+            className="btn-secondary"
+            data-testid="bulk-link"
+          >
+            Add several
+          </Link>
+          <Link to="/turnovers/new" className="btn-primary">
+            Post a turnover
+          </Link>
+        </div>
       </div>
 
       <label className="mt-4 flex items-center gap-2 text-sm text-slate-600">

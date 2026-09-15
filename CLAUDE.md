@@ -281,6 +281,58 @@ cleaner has for pricing, so it is asked for and shown on the board.
 The privacy boundary below does not soften for a home — it matters more.
 Somebody lives there.
 
+### Several jobs at once, for the owner a feed cannot serve
+
+A booking calendar is the fast path onto the board, and **two kinds of owner
+cannot use one at all**: a home has no booking calendar — that is what a home
+is — and a rental booked direct or by phone has no `.ics` URL to paste. Both
+were left typing one job per screen, which is fine for one job and absurd for a
+season. `turnovers.create_many` is the answer, reached from the jobs list
+rather than from a calendar panel those owners never open.
+
+It is deliberately **not a second calendar source**. It writes no
+`property_calendars` row, claims no `external_ref`, and is never reconciled
+against anything afterwards: the owner said these dates once, and from then on
+the rows are ordinary turnovers they own. Everything in `calendars.py` about
+identity, adoption and vanishing bookings exists because a feed keeps
+*talking*; a list somebody typed does not, and borrowing that machinery would
+have meant maintaining rules with nothing behind them.
+
+- **Drafts, never posted, and not a setting.** Calendars rule 1 in its other
+  spelling: an owner who wanted ten jobs on the bench can post them in a
+  minute, and one who pasted the wrong column cannot unsend the alerts, the
+  bids, or the apology. There is no `publish` flag at all — a flag that
+  silently did nothing would be worse than its absence. Drafts also notify
+  nobody, which is why this added no `NotificationEvent`; the closed list stays
+  closed.
+- **All or nothing.** A mismatch is refused rather than corrected, as
+  everywhere else, and on a list that has to mean the whole list: a partial
+  write leaves the owner comparing what they pasted against what landed, with
+  no retry that is not itself a duplicate. The refusal names the row.
+- **`service_type_for` and `checkin_for` are asked, not restated**, so a home
+  still refuses a checkin here — per row, with the row named — and the property
+  row is locked for the whole submission, because one answer about its type has
+  to hold across the list.
+- **A duplicate is reported, not refused and not repeated.** The owner asked
+  for a job that is already there, which is not a mismatch; but dropping it
+  silently is how somebody pastes twice and books two cleaners for one clean.
+  `already_there` carries the dates back and the screen shows them. A
+  *cancelled* job does not block re-entering its date — an owner who called a
+  job off and is re-entering it means it.
+- **`MAX_BULK_JOBS` exists because the failure is not a big request**, it is an
+  owner who meant six jobs and posted six hundred.
+
+**An uploaded `.ics` fills in that form and writes nothing.** For the owner
+whose listing site exports a file but will not hand over a sync URL:
+`/properties/{id}/calendars/read-file` runs the same `parse` then `jobs_for` the
+sync path runs — so a file and a URL cannot disagree about what a booking
+implies — and returns proposed rows. It asks `refuse_ineligible`, so a home
+gets the same refusal in the same words whichever way the calendar arrives, and
+it enforces `MAX_FEED_BYTES` before reading rather than after. It is the one
+way to read a calendar here **without this server connecting anywhere**, so
+none of the request-forgery surface a URL carries applies; there is a test that
+the path opens no socket.
+
 ### Booking calendars — a projection, not a source of truth
 
 An owner connects the .ics their Airbnb or VRBO listing already publishes, and
@@ -801,7 +853,11 @@ Do not build toward these:
   posted as often as its owner likes, but nothing repeats on its own yet.
   Repeating means materialising future jobs, which needs its own rules about
   what happens when one is cancelled or the schedule changes — a decision, not
-  a checkbox.
+  a checkbox. **`create_many` is deliberately not the thin end of that**: it
+  writes the dates it was given and then forgets it did, with no rule, no
+  series and nothing to amend later. "Every other Tuesday until I say stop" is
+  still the decision above, and typing twelve dates is a way to live without
+  it, not a way to sneak it in.
 - Automated dispute resolution
 - Rating-weighted search ranking — phase 7 shows a rating on the owner's bid list and on a cleaner's own profile, but nothing orders by it: the bid list stays cheapest-first and the bench board urgency-first, so a cleaner with no reviews is not buried in a marketplace short of supply
 - Multi-region logic — one region is hardcoded

@@ -44,6 +44,8 @@ from app.models.user import User
 from app.schemas.award import AwardCancel, BidderOut, TurnoverBidOut
 from app.schemas.review import ReputationOut
 from app.schemas.turnover import (
+    TurnoverBulkCreate,
+    TurnoverBulkResult,
     TurnoverCancel,
     TurnoverCreate,
     TurnoverDetailOut,
@@ -174,6 +176,78 @@ def create_turnover(
     db.refresh(turnover)
     notifications.deliver_pending(db)
     return turnover
+
+
+@router.post(
+    "/bulk",
+    response_model=TurnoverBulkResult,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_turnovers_in_bulk(
+    payload: TurnoverBulkCreate,
+    db: Session = Depends(get_db),
+    owner: User = Depends(require_role(UserRole.OWNER)),
+) -> TurnoverBulkResult:
+    """Add a list of dates to one property in one go.
+
+    **For the owner a calendar feed cannot serve.** A home has no booking
+    calendar — that is what a home is — and a rental booked direct or by phone
+    has no `.ics` URL to paste. Both were left typing one job per screen.
+
+    Everything that decides what a job may be is asked, not restated: the same
+    property row lock as the single-job endpoint, the same archived refusal,
+    and `turnovers.create_many` asking `service_type_for` and `checkin_for`.
+    """
+    # Locked for the same reason `create_turnover` locks it, and more so: this
+    # holds one answer about the property's type across a whole list, so a
+    # reclassification landing midway would otherwise let half a submission
+    # through under each type.
+    prop = db.execute(
+        select(Property)
+        .where(Property.id == payload.property_id, Property.owner_id == owner.id)
+        .with_for_update()
+    ).scalar_one_or_none()
+    if prop is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Property not found"
+        )
+    if not prop.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This property is archived. Restore it before adding jobs.",
+        )
+
+    try:
+        result = turnover_rules.create_many(
+            db,
+            prop=prop,
+            jobs=[
+                turnover_rules.BulkJob(
+                    checkout_at=job.checkout_at, checkin_at=job.checkin_at
+                )
+                for job in payload.jobs
+            ],
+            service_type=payload.service_type,
+            owner_budget_cents=payload.owner_budget_cents,
+            notes=payload.notes,
+        )
+    except turnover_rules.JobRefused as refused:
+        # Nothing has been committed, so the refusal leaves the property
+        # exactly as it was — which is the whole point of all-or-nothing.
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=refused.detail
+        ) from None
+
+    db.commit()
+    for turnover in result.created:
+        db.refresh(turnover)
+    # No notification, and that is a decision rather than an omission: these
+    # are drafts, and a draft is nobody's business but the owner's until they
+    # post it. `NotificationEvent` stays closed.
+    return TurnoverBulkResult(
+        created=result.created, already_there=result.already_there
+    )
 
 
 @router.get("", response_model=list[TurnoverOut])
