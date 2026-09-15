@@ -38,6 +38,8 @@ import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
+from ipaddress import ip_address
+from urllib.parse import urlparse
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -263,16 +265,93 @@ def _stripe_webhook() -> Check:
     )
 
 
+#: Hostnames that are always this machine, whatever the deployment thinks.
+LOCAL_HOSTNAMES = frozenset({"localhost", "localhost.localdomain", "ip6-localhost"})
+
+
+def _unusable_base_url(raw: str) -> str | None:
+    """Why this value cannot be a return URL, or None if it can.
+
+    **Not `calendars._refuse_private_address`**, though the overlap is obvious
+    and the temptation to share was real. That one asks "will *our process*
+    connect somewhere private", resolves every name, and refuses a host with
+    any non-global address — the right question for a request this server
+    makes, and it does DNS to answer it. This asks "can a *browser* be sent
+    back here", which is a question about configuration rather than about the
+    network, and a launch check that performs DNS would call a deployment
+    unready because a new record had not propagated yet.
+
+    What they agree on is the literal cases, and those are checked here the
+    same way.
+    """
+    parsed = urlparse(raw)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        return f"{raw!r} is not an absolute web address."
+
+    host = parsed.hostname.lower().rstrip(".")
+    if host in LOCAL_HOSTNAMES:
+        return (
+            f"{raw} points at this machine. Stripe sends the *owner's browser* "
+            "there, so they land on their own computer."
+        )
+    try:
+        address = ip_address(host)
+    except ValueError:
+        address = None
+    if address is not None and not address.is_global:
+        return (
+            f"{raw} is not a public address, so a browser outside this network "
+            "cannot be sent back to it."
+        )
+    if parsed.scheme != "https":
+        return (
+            f"{raw} is plain HTTP. Stripe returns people over the public "
+            "internet and this is the URL they land on."
+        )
+    return None
+
+
 def _public_base_url() -> Check:
-    return _check(
+    """**Set is not the same as usable.**
+
+    This checked truthiness, and the development value the README documents —
+    `http://localhost:5173` — is a perfectly truthy string. Carried into a
+    deployment it made this check say Stripe can send people back while
+    `payments._app_base()` used it verbatim for Checkout success and cancel
+    URLs and for Express onboarding returns, so an owner finishing a payment
+    and a cleaner finishing onboarding both landed on their own computer.
+
+    The same mistake as counting admins without `is_active`, one check over:
+    asking a question that is cheap to answer instead of the one that matters.
+    """
+    raw = (settings.public_base_url or "").strip()
+    if not raw:
+        return Check(
+            "public_base_url",
+            "Stripe can send people back",
+            State.BLOCKED,
+            "PUBLIC_BASE_URL is not set, so return URLs are guessed from the "
+            "incoming request — and the fallback is localhost. Behind a proxy "
+            "that guess is wrong, and a cleaner finishing Express onboarding "
+            "lands nowhere.",
+            "Set PUBLIC_BASE_URL to the deployed origin.",
+        )
+
+    problem = _unusable_base_url(raw)
+    if problem:
+        return Check(
+            "public_base_url",
+            "Stripe can send people back",
+            State.BLOCKED,
+            problem,
+            "Set PUBLIC_BASE_URL to the deployed https origin.",
+        )
+
+    return Check(
         "public_base_url",
         "Stripe can send people back",
-        bool(settings.public_base_url),
-        when_true=f"PUBLIC_BASE_URL is {settings.public_base_url}.",
-        when_false="PUBLIC_BASE_URL is not set, so return URLs are guessed from "
-        "the incoming request. Behind a proxy that guess is wrong, and a "
-        "cleaner finishing Express onboarding lands nowhere.",
-        remedy="Set PUBLIC_BASE_URL to the deployed origin.",
+        State.READY,
+        f"PUBLIC_BASE_URL is {raw}.",
     )
 
 

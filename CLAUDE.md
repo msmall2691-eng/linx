@@ -1025,6 +1025,19 @@ something is merely unexamined. Three items are permanently in that state: whose
 entity the Connect account belongs to, whether anybody has walked a candidate
 through Checkr, and whether a human actually works the dispute inbox.
 
+**Set is not the same as usable, and truthiness is the third proxy this
+module got caught on.** `PUBLIC_BASE_URL=http://localhost:5173` is the value
+the README documents for development and a perfectly truthy string; carried
+into a deployment it made the check say Stripe can send people back while
+`payments._app_base()` used it verbatim, so an owner finishing a payment and a
+cleaner finishing onboarding both landed on their own computer.
+`_unusable_base_url` parses it and requires a public https origin. It is
+deliberately **not** `calendars._refuse_private_address`, despite the obvious
+overlap: that one asks "will *our process* connect somewhere private" and
+resolves every name to answer it, which is right for a request this server
+makes and wrong here — a launch check that did DNS would call a deployment
+unready because a new record had not propagated yet.
+
 **The check asks the function that owns each rule rather than re-deriving it**
 — the console rule from phase 8, for the same reason, and it was got wrong
 twice. `_admin_exists` counted `role == ADMIN` while `notifications.admins`

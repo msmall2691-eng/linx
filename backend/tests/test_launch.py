@@ -502,3 +502,65 @@ class TestTheCheckAsksRatherThanCopies:
             "the check did not follow `payments.SETTLED_STATUSES`, so it is "
             "answering from a copy of the set rather than from its owner"
         )
+
+
+class TestSetIsNotTheSameAsUsable:
+    """**The README's own development value is a truthy string.**
+
+    `PUBLIC_BASE_URL=http://localhost:5173` is what the docs tell you to use
+    locally. Carried into a deployment, a truthiness check called it ready
+    while `payments._app_base()` used it verbatim for Checkout success and
+    cancel URLs and for Express onboarding returns — so an owner finishing a
+    payment and a cleaner finishing onboarding both landed on their own
+    computer, with the launch panel saying Stripe could send them back.
+    """
+
+    @pytest.mark.parametrize(
+        "value, why",
+        [
+            ("http://localhost:5173", "the documented development value"),
+            ("https://localhost", "localhost is localhost over TLS too"),
+            ("http://127.0.0.1:8000", "loopback by address"),
+            ("http://192.168.1.10", "a private network address"),
+            ("http://linx.example", "plain HTTP on the public internet"),
+            ("linx.example", "not an absolute URL at all"),
+            ("", "unset"),
+        ],
+    )
+    def test_an_unusable_return_url_blocks(
+        self, db: Session, ready_env, monkeypatch, value, why
+    ) -> None:
+        monkeypatch.setattr(ready_env, "public_base_url", value)
+        check = _by_key(launch.run_checks(db), "public_base_url")
+        assert check.state is State.BLOCKED, (
+            f"{value!r} was reported as a working return URL ({why})"
+        )
+        assert check.remedy
+
+    def test_a_real_public_origin_is_ready(
+        self, db: Session, ready_env, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(ready_env, "public_base_url", "https://linx.example")
+        assert _by_key(launch.run_checks(db), "public_base_url").state is State.READY
+
+    def test_it_does_not_resolve_dns_to_decide(
+        self, db: Session, ready_env, monkeypatch
+    ) -> None:
+        """**Deliberately not `calendars._refuse_private_address`.**
+
+        That one asks "will our process connect somewhere private" and resolves
+        every name to answer it — right for a request this server makes. This
+        asks whether a browser can be sent back, which is a question about
+        configuration, and a launch check that did DNS would call a deployment
+        unready because a new record had not propagated yet.
+        """
+        import socket
+
+        def explode(*args, **kwargs):  # pragma: no cover - must not be called
+            raise AssertionError("the launch check resolved DNS")
+
+        monkeypatch.setattr(socket, "getaddrinfo", explode)
+        monkeypatch.setattr(
+            ready_env, "public_base_url", "https://not-registered-yet.example"
+        )
+        assert _by_key(launch.run_checks(db), "public_base_url").state is State.READY
