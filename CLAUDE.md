@@ -174,6 +174,7 @@ not tenant. There is deliberately no `org_id`-style scoping.
 | `awards` | One **live** row per turnover — guardrail 1 governs this; a cancelled one is kept as history |
 | `documents` | Cleaner vetting uploads (id / insurance / reference), admin-reviewed |
 | `property_calendars` | A booking feed an owner connected, and how its last read went |
+| `disputes` | A complaint about a job, decided by a human |
 | `reviews` | Mutual, delayed reveal |
 | `payments_in` | Collects from the owner |
 | `payouts` | Pays the cleaner |
@@ -599,7 +600,82 @@ relying on it.
     list below). `GET /cleaners/{id}/reputation` is readable by any signed-in
     user because a rating is the thing a marketplace makes public; there is
     deliberately no public, unauthenticated cleaner directory at v1.
-- **Disputes go to a human inbox, not a bot, at v1.**
+- **Disputes go to a human inbox, not a bot, at v1.** Built in phase 8
+  (`app/services/disputes.py`), and the shape follows from that sentence:
+  - **Three statuses and no `rejected`.** The outcome is `resolution_notes` —
+    prose an admin wrote — because at this size the outcomes are not an
+    enumerable set, and pretending otherwise puts a policy in a column.
+    `acknowledged` is separate from `open` because "somebody has picked this
+    up" and "this is settled" are different facts, and an admin working a
+    backlog needs to tell what they have already read.
+  - **Raising one tells an admin and the person who raised it — and nobody
+    else.** The receipt is not a courtesy: somebody who reports that a stranger
+    was in their house and hears nothing assumes it went nowhere. The *other
+    side is deliberately not told*, because at this size a human decides when
+    to involve somebody in a complaint about them, and a system that forwards
+    it automatically has replaced the judgement the inbox exists for. They hear
+    at resolution, with the note.
+  - **Filing one changes nothing about the money or the booking.** No refund,
+    no cancellation, no rating moves. That is the policy, not a gap.
+  - **Either party may raise one on a job that went wrong**, including a
+    cancelled award — `disputes.award_for` reads an award whether it is live or
+    not, where `reviews.participants` insists on a completed one. The jobs most
+    worth complaining about are the ones that did not finish, which is also why
+    neither panel is gated on completion the way the review beside it is.
+
+    Showing cancelled work also made `turnover_id` stop identifying a card: a
+    cleaner who backs out and later wins the same job again has two, so the
+    splice that keeps the screen alive after "I'm on site" matches on
+    `award_id`. Keyed on the turnover it overwrote both, erasing the history
+    card and leaving two React keys the same.
+
+    That reachability is a rule in its own right, because it was broken on both
+    screens at once and neither looked broken. The owner's panel was gated on
+    `turnover.award`, which aliases `live_award` and so is null the moment a
+    booking is cancelled; the cleaner's list does not ask for cancelled
+    bookings, so the card carrying their panel vanished as they backed out.
+    Both now mount unconditionally and let the server decide — the panel
+    self-hides when there is nobody to dispute with — and a browser test raises
+    a dispute from each side of a cancelled booking.
+  - **The person filing says which booking**, and the server refuses rather
+    than guessing (`disputes.award_under_dispute`). Freezing the award stops a
+    dispute *changing* who it is about; it does not make an inferred choice
+    right in the first place. An owner whose cleaner cancelled and whose job
+    was re-awarded before they got round to complaining would have had their
+    complaint filed against the replacement, who has done nothing — and the
+    same happens to a cleaner who cancelled, re-bid and was booked again, two
+    awards both theirs. `DisputeIn.award_id` is optional only because most
+    turnovers have exactly one booking and asking a question with one possible
+    answer is noise; with several, the refusal is the house rule from
+    `service_type_for`. `DisputesOut.bookings` is what the screen renders the
+    choice from.
+  - **Working a dispute is serialised on the row; raising one is not.** That
+    asymmetry is the difference between a duplicate a human closes and a record
+    that disagrees with what the parties were told. Unlocked, two admins each
+    checked a status they had loaded independently: an acknowledge committing
+    after a resolve wrote `acknowledged` back over a settled dispute while
+    leaving the note on it, and two resolves both passed, so the row kept the
+    *last* admin's note while the dedupe key had already sent the *first* one.
+    `disputes._claim` is guardrail 1's shape applied to a state transition,
+    `populate_existing` included, and there is a real two-thread test rather
+    than a sequential stand-in.
+  - **A dispute is bound to one award, written when it is filed**
+    (`disputes.award_id`), and `parties_of_dispute` is the only reader of it.
+    "The award on this turnover" is a question with a different answer next
+    week: a cancellation re-posts the job and the next accept writes a second
+    `Award`. Recomputed at read time — which is how this was first built — every
+    existing dispute silently re-pointed at the replacement cleaner, so the
+    console showed an uninvolved person's name and phone number on somebody
+    else's complaint, resolving emailed them about it, and the cleaner who
+    raised it got a 404 on their own dispute. Nothing failed; the rows were all
+    valid and described the wrong person. `award_for` therefore resolves the
+    party **per person** — a cleaner is party to their own awards and nobody
+    else's, the owner to the most recent — so a superseded cleaner can still
+    complain about the job they lost.
+  - The duplicate guard is **a courtesy, not an invariant**, and says so: two
+    simultaneous submissions could both pass it, and the cost is one extra card
+    in a queue a human closes. It deliberately takes no row lock, because a lock
+    would imply an atomicity this path does not need.
 - **No-show / cancellation policy is defined before launch.** Built in phase 4
   (`app/services/awards.py`), and the definition is:
   - **Any** cancellation of a live award — the cleaner backs out, or never turns
@@ -640,13 +716,15 @@ in `app/models/enums.py` holds exactly these and nothing else:
 - Job marked complete by the cleaner → owner (added in phase 6, see below)
 - Payment receipt (owner) / payout notice (cleaner)
 - Review received (both directions, once visible)
+- Dispute raised → an admin **and the person who raised it** (added in phase 8)
+- Dispute resolved → both parties, carrying the admin's note
 
-**All thirteen now have a sender.** Nothing is declared-and-unwired any more;
+**All fifteen have a sender.** Nothing is declared-and-unwired any more;
 the test that guarded that has flipped to guarding the other direction — a new
 enum value with nothing behind it fails, which is the conversation adding one is
 supposed to start.
 
-**The list grew by one, on purpose.** `job_completed` was added in phase 6
+**The list has grown twice, both times on purpose.** `job_completed` was added in phase 6
 alongside the transition it belongs to. Before money hung off completion, "the
 cleaner says it is done" was nobody's business; now an owner who is never told
 is an owner who never pays, and a cleaner who did the work and hears nothing.
@@ -745,7 +823,7 @@ phase.
 | 5 | Notifications (the event list above) | **done** |
 | 6 | Stripe Connect, test mode end to end, refunds, reconciliation | **done** |
 | 7 | Mutual delayed-reveal reviews | **done** |
-| 8 | Admin console — vetting queue, dispute inbox, unclaimed alerts, ledger | not started |
+| 8 | Admin console — vetting queue, dispute inbox, unclaimed alerts, ledger | **done** |
 | 9 | Pilot launch checklist — new Connect platform account under the new entity | not started |
 
 **Phase 1 built the schema for every table, with no business logic.** Tables for
@@ -828,6 +906,80 @@ Written down from day one, built with their phases:
 - ~~A real click-through of bid → award → payment, not just "the button renders"~~ — bid → award → back out is `tests/e2e/test_award_flow.py`; bid → award → done → paid is `tests/e2e/test_payment_flow.py`, against a Stripe that answers over real HTTP
 
 ---
+
+### The admin console (phase 8)
+
+`app/api/routes/console.py`, mounted under `/admin` beside the vetting queue
+phase 3 built rather than absorbing it — the trust gate has one author and the
+console reads it rather than re-deciding it.
+
+**The console carries no definitions of its own.** Every number on it is read
+from the function that already owns it, because a screen an admin trusts that
+disagrees with the alert an admin was sent is worse than either alone: both
+become untrustworthy and there is no way to tell which is lying.
+
+- The unclaimed list is `turnovers.unclaimed_alarming` — the same call the
+  scheduled alarm makes, moved out of `app/tasks/scheduled.py` so the two
+  cannot drift. `UNCLAIMED_LOOKBACK` moved with it and is re-exported from its
+  old home, because a name that moves silently is a name somebody still imports.
+  It calls `refresh_urgency` before serialising, like every other read path: a
+  standing vacancy's rung is measured against *now* and climbs as checkout
+  approaches, and an unclaimed job is very often exactly that, because a
+  cancellation re-posts it. Read straight from the column, the queue whose
+  purpose is sorting out what is most urgent showed whatever rung the job was
+  last written at.
+  Its bid count is `BidStatus.SUBMITTED` only: a job re-posted after a
+  cancellation still carries the accepted bid and every declined one, so
+  counting them all made the alarm read "3 bids, none accepted" — an owner
+  dithering over offers — when there were no live offers and the real problem
+  was that nobody had bid. An alarm that misdescribes the problem is worse than
+  one that does not fire.
+- Nothing on it links to `/turnovers/:id`. That route is `OwnerRoute`-wrapped
+  and its endpoint is owner-only, so an admin clicking one was bounced to
+  `/dashboard`; the console offered three drill-downs no console user could
+  open. The names are plain text until there is an admin-readable detail view,
+  because a link that cannot be followed reads as a screen that exists.
+- The ledger sums its own rows rather than querying totals separately, and
+  carries `total_drift_cents` from `payments.reconcile`. Two queries that could
+  disagree about the same money is how a reconciliation screen ends up
+  reassuring somebody about a number it did not check.
+- **It reads `payments.ledger_figures`, not `reconcile` directly, because
+  `reconcile` is settled-payment arithmetic.** `amount_cents` on a `pending` or
+  `processing` row is an intention — the checkout the owner has not finished,
+  or the webhook that has not arrived — and on a `failed` one it is an
+  intention now known not to have happened. Reconciled anyway, an ordinary
+  payment in flight has an amount and no payout, so the whole cleaner share
+  read as drift: the financial alarm in the red for every normal checkout,
+  which is how an alarm becomes something people scroll past. It also claimed
+  money as collected that Stripe had not confirmed, on the one screen whose job
+  is saying what actually moved.
+
+  `payments.settled()` reads `status`, which means **`status` has to keep
+  meaning "what happened to the collection"** rather than "what happened last".
+  A refund that Stripe refuses used to write `failed` onto an already-settled
+  payment, so the ledger read a row whose charge and payout both still existed
+  as money never collected — zero revenue, zero fee, and the cleaner's payout
+  reported as negative drift, every time a refund attempt was refused. A
+  definitive refusal now restores `succeeded`, because the collection is still
+  in force and only the refund failed; `failure_message` carries that, and an
+  indeterminate one still parks in `requires_review` because there the whole
+  amount's disposition is genuinely unknown. `payments.mark_failed` already
+  held this principle for out-of-order webhooks — a success already recorded is
+  not undone by a later failure notice — and it applies just as much to a
+  failure this code writes about itself.
+
+  `payments.settled()` is the single author for "has this been collected", and
+  four buckets fall out of it, each meaning something different: **settled**
+  (`succeeded`/`refunded`) gets the reconcile arithmetic; **in flight**
+  (`pending`/`processing`) is carried as `awaiting_cents`, shown and never
+  totalled as collected; **unknown** (`requires_review` — guardrail 2's flag,
+  written before the network call) is carried as `unknown_cents`, because
+  counting it as collected claims money nobody confirmed and counting it as
+  zero writes off money that may well have moved; and **failed** is in none of
+  them, reporting zero everywhere, because we were told it did not happen.
+  Drift is still computed on unsettled rows rather than suppressed — a payout
+  against a payment that never succeeded is money out with nothing in, which is
+  exactly what drift is for.
 
 ## Working in this repo
 

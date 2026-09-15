@@ -176,7 +176,14 @@ def test_a_cleaner_cannot_bid_until_a_human_clears_them(make_page, live_server, 
     expect(page.get_by_text("Not cleared").first).to_be_visible()
 
     page.get_by_role("button", name="Mark clear").click()
-    expect(page.get_by_text("Cleared").first).to_be_visible()
+    # **`exact=True`, and it is the whole assertion.** The queue renders either
+    # "Cleared" or "Not cleared", and Playwright's default text match is a
+    # case-insensitive *substring* — so `get_by_text("Cleared")` matches the
+    # not-cleared row too. This line passed before the click as readily as
+    # after it: the one browser assertion that the trust gate actually flips
+    # proved nothing, and would have gone on passing if "Mark clear" did
+    # nothing at all.
+    expect(page.get_by_text("Cleared", exact=True).first).to_be_visible()
 
     # --- back as the cleaner, the same screen now takes a price ---
     page = cleaner_page

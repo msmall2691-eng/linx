@@ -496,11 +496,15 @@ class TestTheNotification:
         assert "Missed the oven." in rows[0].body
 
     def test_the_whole_fixed_list_now_has_a_sender(self) -> None:
-        """Thirteen events, thirteen senders. Nothing left declared-and-unwired.
+        """Every event has a sender. Nothing left declared-and-unwired.
 
         The counterpart of the test that has guarded this list since phase 5 —
         which asserted the opposite, that `review_received` had no sender. That
         assertion coming out is how a phase is finished rather than forgotten.
+
+        Phase 8 added two, and this failed until they were wired, which is the
+        point of keeping the assertion here as well as in `test_notifications`:
+        a sender written but never reachable would satisfy neither.
         """
         senders = {
             NotificationEvent.TURNOVER_POSTED: notifications.turnover_posted,
@@ -516,6 +520,8 @@ class TestTheNotification:
             NotificationEvent.PAYMENT_RECEIPT: notifications.payment_receipt,
             NotificationEvent.PAYOUT_NOTICE: notifications.payout_notice,
             NotificationEvent.REVIEW_RECEIVED: notifications.review_received,
+            NotificationEvent.DISPUTE_RAISED: notifications.dispute_raised,
+            NotificationEvent.DISPUTE_RESOLVED: notifications.dispute_resolved,
         }
         assert set(senders) == set(NotificationEvent)
 

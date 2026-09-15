@@ -1074,6 +1074,55 @@ class TestRefunds:
             "a refund with an unknown outcome still reads as a settled payment"
         )
 
+    def test_a_refused_refund_does_not_erase_the_collection(
+        self, client, make_cleaner, make_open_turnover, admin_user, db, stripe,
+        webhook_secret,
+    ) -> None:
+        """**A failed refund is not a failed collection.**
+
+        Stripe answering with a definitive error means the refund did not
+        happen: the charge is still collected, the transfer still out, and the
+        row still carries both. Writing `failed` said the opposite, and the
+        ledger believed it — zero revenue, zero fee, and the cleaner's payout
+        reported as negative drift. The one screen that exists to say what
+        moved would have misstated the books every time a refund was refused.
+
+        `mark_failed` already holds this principle for webhooks arriving out of
+        order: a success already recorded is not undone by a later failure
+        notice. It applies just as much to a failure this code writes itself.
+        """
+        job = self._paid_job(client, make_cleaner, make_open_turnover, db, stripe)
+        stripe.failures["/refunds"] = stripe_client.StripeError(
+            "charge already refunded", code="charge_already_refunded", status=400
+        )
+
+        resp = client.post(
+            f"/api/turnovers/{job['turnover']['id']}/refund",
+            json={"reason": "Disputed."},
+            headers=admin_user["auth"],
+        )
+        assert resp.status_code == 409
+
+        payment = _payment(db, job["turnover"]["id"])
+        assert payment.status is PaymentStatus.SUCCEEDED, (
+            "the collection is still in force; only the refund failed"
+        )
+        assert "refund failed" in (payment.failure_message or ""), (
+            "and the attempt has to stay visible on the row"
+        )
+        assert payment.refunded_amount_cents == 0
+
+        body = client.get("/api/admin/ledger", headers=admin_user["auth"]).json()
+        assert body["total_collected_cents"] == 20_000
+        assert (
+            body["total_collected_cents"]
+            == body["total_paid_out_cents"] + body["total_platform_fee_cents"]
+        )
+        assert body["total_drift_cents"] == 0, (
+            "a refused refund made the books look like money had gone out "
+            "with nothing ever collected"
+        )
+
     def test_a_refunded_turnover_is_not_quietly_re_chargeable(
         self, client, make_cleaner, make_open_turnover, admin_user, db, stripe, webhook_secret
     ) -> None:
@@ -1273,3 +1322,189 @@ class TestUnconfigured:
             stripe_client.post("/refunds", {}, idempotency_key="refund:payment:1")
         with pytest.raises(stripe_client.StripeNotConfigured):
             stripe_client.get("/accounts/acct_1")
+
+
+# --------------------------------------------------------------------------
+# The ledger an admin reads (phase 8)
+# --------------------------------------------------------------------------
+
+
+class TestTheAdminLedger:
+    def test_the_ledger_never_drifts_on_a_real_settled_job(
+        self, client: TestClient, make_cleaner, make_open_turnover, db: Session,
+        admin_user, stripe, webhook_secret,
+    ) -> None:
+        """Collected equals paid out plus the fee kept — the carry-over check
+        from day one, asserted again where an admin reads it.
+
+        **With a real settled payment in the table**, because the same
+        assertion over an empty ledger passes without testing anything, which
+        is the failure mode this suite has already hit more than once.
+        """
+        job = _completed_job(
+            client, make_cleaner, make_open_turnover, db, price_cents=20_000
+        )
+        client.post(
+            f"/api/turnovers/{job['turnover']['id']}/pay", headers=job["owner"]["auth"]
+        )
+        paid = _webhook(
+            client,
+            "checkout.session.completed",
+            {
+                "object": "checkout.session",
+                "id": "cs_test_ledger",
+                "payment_status": "paid",
+                "payment_intent": "pi_test_ledger",
+                "metadata": {"turnover_id": job["turnover"]["id"]},
+            },
+        )
+        assert paid.status_code == 200, paid.text
+
+        body = client.get("/api/admin/ledger", headers=admin_user["auth"]).json()
+        assert body["rows"], "the settled job has to appear, or this proves nothing"
+        assert body["total_collected_cents"] == 20_000
+        assert (
+            body["total_collected_cents"]
+            == body["total_paid_out_cents"] + body["total_platform_fee_cents"]
+        )
+        assert body["total_drift_cents"] == 0
+
+    def test_a_checkout_in_flight_is_not_money_collected(
+        self, client: TestClient, make_cleaner, make_open_turnover, db: Session,
+        admin_user, stripe,
+    ) -> None:
+        """**A payment is only true when Stripe says so** (CLAUDE.md).
+
+        Starting a checkout writes a `PaymentIn` with the intended amount and
+        no payout. Reconciled as though it had settled, that reports the whole
+        cleaner share as drift and counts money as collected that Stripe has
+        not told us about — the console's financial alarm firing for every
+        ordinary payment in flight, on the one screen whose job is saying what
+        actually moved. An alarm that is usually wrong is one nobody reads.
+        """
+        job = _completed_job(
+            client, make_cleaner, make_open_turnover, db, price_cents=20_000
+        )
+        started = client.post(
+            f"/api/turnovers/{job['turnover']['id']}/pay",
+            headers=job["owner"]["auth"],
+        )
+        assert started.status_code == 200, started.text
+        # Deliberately no webhook: this is the window between the owner opening
+        # Stripe's page and the money actually moving.
+
+        body = client.get("/api/admin/ledger", headers=admin_user["auth"]).json()
+        row = next(r for r in body["rows"] if r["turnover_id"] == job["turnover"]["id"])
+
+        assert row["status"] in {"pending", "processing"}, row["status"]
+        assert row["collected_cents"] == 0
+        assert row["drift_cents"] == 0
+        assert row["awaiting_cents"] == 20_000, (
+            "the intended amount is still worth showing — it just is not a "
+            "collection"
+        )
+        assert body["total_collected_cents"] == 0
+        assert body["total_drift_cents"] == 0
+        assert body["total_awaiting_cents"] == 20_000
+
+    def test_a_failed_payment_is_not_drift(
+        self, client: TestClient, make_cleaner, make_open_turnover, db: Session,
+        admin_user, stripe,
+    ) -> None:
+        """Nothing was collected, so nothing is out of balance."""
+        job = _completed_job(
+            client, make_cleaner, make_open_turnover, db, price_cents=15_000
+        )
+        client.post(
+            f"/api/turnovers/{job['turnover']['id']}/pay", headers=job["owner"]["auth"]
+        )
+
+        row = db.execute(
+            select(PaymentIn).where(
+                PaymentIn.turnover_id == uuid.UUID(job["turnover"]["id"])
+            )
+        ).scalars().one()
+        row.status = PaymentStatus.FAILED
+        row.failure_message = "card_declined"
+        db.commit()
+
+        body = client.get("/api/admin/ledger", headers=admin_user["auth"]).json()
+        assert body["total_collected_cents"] == 0
+        assert body["total_drift_cents"] == 0
+        assert body["total_awaiting_cents"] == 0
+
+    def test_an_unknown_outcome_is_counted_as_neither(
+        self, client: TestClient, make_cleaner, make_open_turnover, db: Session,
+        admin_user, stripe,
+    ) -> None:
+        """**Guardrail 2's flag, reported rather than resolved.**
+
+        `requires_review` is written before the network call so a process that
+        dies mid-charge leaves a visible row. Counting it as collected claims
+        money nobody has confirmed; counting it as zero quietly writes off
+        money that may well have moved. It gets its own number and a person
+        decides.
+        """
+        job = _completed_job(
+            client, make_cleaner, make_open_turnover, db, price_cents=18_000
+        )
+        client.post(
+            f"/api/turnovers/{job['turnover']['id']}/pay", headers=job["owner"]["auth"]
+        )
+
+        row = db.execute(
+            select(PaymentIn).where(
+                PaymentIn.turnover_id == uuid.UUID(job["turnover"]["id"])
+            )
+        ).scalars().one()
+        row.status = PaymentStatus.REQUIRES_REVIEW
+        db.commit()
+
+        body = client.get("/api/admin/ledger", headers=admin_user["auth"]).json()
+        assert body["total_collected_cents"] == 0
+        assert body["total_drift_cents"] == 0
+        assert body["total_awaiting_cents"] == 0, (
+            "an unknown outcome is not the same as one in flight"
+        )
+        assert body["total_unknown_cents"] == 18_000
+
+    def test_a_payout_against_an_unsettled_payment_still_alarms(
+        self, client: TestClient, make_cleaner, make_open_turnover, db: Session,
+        admin_user, stripe,
+    ) -> None:
+        """**Zeroing the row must not zero the alarm.**
+
+        Money out with nothing in is exactly what drift is for. Suppressing
+        unsettled rows entirely would hide the one case worth shouting about,
+        so collected is zero rather than absent and the subtraction still runs.
+        """
+        job = _completed_job(
+            client, make_cleaner, make_open_turnover, db, price_cents=12_000
+        )
+        client.post(
+            f"/api/turnovers/{job['turnover']['id']}/pay", headers=job["owner"]["auth"]
+        )
+
+        turnover_id = uuid.UUID(job["turnover"]["id"])
+        payment = db.execute(
+            select(PaymentIn).where(PaymentIn.turnover_id == turnover_id)
+        ).scalars().one()
+        payment.status = PaymentStatus.FAILED
+        award = db.execute(
+            select(Award).where(Award.turnover_id == turnover_id)
+        ).scalars().first()
+        db.add(
+            Payout(
+                turnover_id=turnover_id,
+                cleaner_id=award.cleaner_id,
+                amount_cents=11_000,
+                status=PaymentStatus.SUCCEEDED,
+            )
+        )
+        db.commit()
+
+        body = client.get("/api/admin/ledger", headers=admin_user["auth"]).json()
+        assert body["total_drift_cents"] == -11_000, (
+            "a cleaner was paid for a payment that never succeeded, and the "
+            "ledger said nothing"
+        )

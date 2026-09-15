@@ -36,6 +36,7 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING
 
 from sqlalchemy import Float, cast, select, update
 from sqlalchemy.exc import IntegrityError
@@ -44,6 +45,7 @@ from sqlalchemy.orm import Session
 from app.models.award import Award
 from app.models.bid import Bid
 from app.models.cleaner_profile import CleanerProfile
+from app.models.dispute import Dispute
 from app.models.enums import (
     NotificationEvent,
     NotificationStatus,
@@ -57,6 +59,9 @@ from app.models.property import Property
 from app.models.review import Review
 from app.models.turnover import Turnover
 from app.models.user import User
+
+if TYPE_CHECKING:  # pragma: no cover - `disputes` imports this module
+    from app.services.disputes import Parties
 from app.services import delivery
 from app.services.geo import distance_miles_sql
 from app.services.urgency import region_timezone
@@ -793,5 +798,90 @@ def review_received(
             "window passes, so this one is only appearing now."
         ),
         dedupe_scope=str(review.id),
+        turnover_id=turnover.id,
+    )
+
+
+def dispute_raised(
+    db: Session,
+    turnover: Turnover,
+    prop: Property,
+    dispute: Dispute,
+    raiser: User,
+) -> list[Notification]:
+    """Somebody has a complaint about this job.
+
+    **The fourteenth event**, added in phase 8 with the table that made raising
+    one possible. Two recipients, and the one that is easy to leave out is the
+    important one:
+
+    * **An admin**, because that is what "disputes go to a human inbox" means.
+    * **The person who raised it**, as a receipt. Somebody reporting that a
+      stranger was in their house and hearing nothing back assumes it went
+      nowhere — and then either raises it again or telephones, which is the
+      same complaint arriving twice in a worse form.
+
+    **The other party is deliberately not told here.** At this size a human
+    decides when to involve somebody in a complaint about them; a system that
+    forwards it automatically has replaced the judgement the inbox exists for.
+    They hear at resolution, with the note explaining what was decided.
+    """
+    recipients = [raiser, *admins(db)]
+    return queue(
+        db,
+        NotificationEvent.DISPUTE_RAISED,
+        recipients=recipients,
+        subject=f"Dispute raised: {_where(prop)}",
+        body=(
+            f"{raiser.full_name} has raised a dispute about this turnover.\n\n"
+            f"Where: {_where(prop)}\n"
+            f"Checkout: {_when(turnover.checkout_at)}\n"
+            f"Raised by: the {dispute.raised_by_role.value}\n"
+            f"Reason: {dispute.reason.value}\n\n"
+            f"{dispute.description}\n\n"
+            "A person reads every one of these. Nothing is decided "
+            "automatically, and nobody is charged or refunded because a "
+            "dispute was opened."
+        ),
+        dedupe_scope=str(dispute.id),
+        turnover_id=turnover.id,
+    )
+
+
+def dispute_resolved(
+    db: Session,
+    turnover: Turnover,
+    prop: Property,
+    dispute: Dispute,
+    people: "Parties",
+) -> list[Notification]:
+    """A human decided it, and both sides are told what they decided.
+
+    **The fifteenth event.** Both parties hear, not only the person who
+    complained — which means the other side may be learning that a dispute
+    existed at all. That is why the body carries the admin's note rather than
+    the word "resolved": a bare status, to somebody who did not know they were
+    being complained about, is worse than silence.
+
+    The note is quoted as written. Nothing here summarises or softens it — a
+    decision somebody has to live with should reach them in the words of the
+    person who made it.
+    """
+    return queue(
+        db,
+        NotificationEvent.DISPUTE_RESOLVED,
+        recipients=[people.owner, people.cleaner],
+        subject=f"Dispute resolved: {_where(prop)}",
+        body=(
+            "A dispute about this turnover has been resolved.\n\n"
+            f"Where: {_where(prop)}\n"
+            f"Checkout: {_when(turnover.checkout_at)}\n"
+            f"Raised by: the {dispute.raised_by_role.value}\n"
+            f"Reason: {dispute.reason.value}\n\n"
+            f"What was decided:\n{dispute.resolution_notes}\n\n"
+            "If this is not the end of it, reply to this message — it reaches "
+            "a person, not a queue."
+        ),
+        dedupe_scope=str(dispute.id),
         turnover_id=turnover.id,
     )

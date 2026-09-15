@@ -170,7 +170,18 @@ def test_an_owner_hires_a_cleaner_and_the_cleaner_backs_out(
     page.fill("textarea[id^=why-]", "My van is off the road.")
     page.get_by_test_id("confirm-cancel-job").click()
 
-    expect(page.get_by_text("No jobs booked yet")).to_be_visible()
+    # **The card stays, marked cancelled — and the gate code does not.**
+    # It used to drop off the list entirely, and the assertion here was that
+    # the screen was empty. That was a true description of a screen with a
+    # problem: a cleaner's cancelled bookings were unreachable from the site,
+    # and with them the dispute panel on the card, which is the only way a
+    # cleaner can complain about a job that went wrong.
+    #
+    # The half of this that was always load-bearing is the second assertion.
+    # Access follows the *live* award, decided once in `_serialize_job`, so
+    # showing the card must not show the code — and this is what says so.
+    expect(page.get_by_test_id("job")).to_have_count(1)
+    expect(page.get_by_test_id("job")).to_contain_text("Cancelled")
     assert LOCKBOX_CODE not in page.inner_text("body"), (
         "the gate code outlived the booking"
     )

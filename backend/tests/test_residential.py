@@ -21,12 +21,14 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.models.enums import (
     PropertyType,
     ServiceType,
@@ -297,7 +299,15 @@ class TestTheExistingProductIsUntouched:
         owner = make_user(role="owner")
         rental = _property(client, owner)
 
-        checkout = datetime.now(timezone.utc) + timedelta(days=2)
+        # **A fixed region-local hour, not "now".** `same_day` is answered in
+        # `REGION_TIMEZONE`, so a checkout pinned to whatever o'clock the suite
+        # happens to run at plus five hours crosses local midnight for every
+        # run after 19:00 Eastern — and this assertion then failed for a
+        # five-hour window every day, describing a product that was working.
+        # `test_turnovers.py` already pins the hour for the same reason.
+        checkout = (datetime.now(timezone.utc) + timedelta(days=2)).astimezone(
+            ZoneInfo(settings.region_timezone)
+        ).replace(hour=11, minute=0, second=0, microsecond=0)
         posted = _post_job(
             client,
             owner,

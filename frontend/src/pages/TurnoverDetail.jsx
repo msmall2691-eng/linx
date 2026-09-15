@@ -5,6 +5,7 @@ import Alert from '../components/Alert.jsx'
 import PaymentPanel from '../components/PaymentPanel.jsx'
 import Rating from '../components/Rating.jsx'
 import { JobSchedule, ScopeBadge } from '../components/JobScope.jsx'
+import DisputePanel from '../components/DisputePanel.jsx'
 import ReviewPanel from '../components/ReviewPanel.jsx'
 import StatusBadge from '../components/StatusBadge.jsx'
 import UrgencyBadge from '../components/UrgencyBadge.jsx'
@@ -287,6 +288,20 @@ export default function TurnoverDetail() {
       {turnover.award?.completed_at && (
         <ReviewPanel turnoverId={turnoverId} side="owner" />
       )}
+
+      {/* **Not gated on anything**, unlike the review beside it. A review is
+          about how a finished job went; a dispute is about something going
+          wrong, and the jobs most worth complaining about are the ones that
+          did not finish — which is why `disputes.award_for` reads an award
+          whether it was cancelled or not.
+
+          It was gated on `turnover.award`, and that was the same bug one layer
+          up: `award` aliases `live_award`, so it is null the moment a booking
+          is cancelled. The panel disappeared exactly after a no-show or a
+          cancellation — the cases the backend went out of its way to allow.
+          It self-hides when the server says there is nobody to dispute with,
+          so the server decides and this does not second-guess it. */}
+      <DisputePanel turnoverId={turnoverId} />
 
       {turnover.award && (
         <div

@@ -2,6 +2,7 @@ import { Route, Routes } from 'react-router-dom'
 
 import Nav from './components/Nav.jsx'
 import RequireAuth from './components/RequireAuth.jsx'
+import AdminConsole from './pages/AdminConsole.jsx'
 import AdminVetting from './pages/AdminVetting.jsx'
 import Board from './pages/Board.jsx'
 import CleanerJobs from './pages/CleanerJobs.jsx'
@@ -132,6 +133,14 @@ export default function App() {
             }
           />
 
+          <Route
+            path="/admin"
+            element={
+              <AdminRoute>
+                <AdminConsole />
+              </AdminRoute>
+            }
+          />
           <Route
             path="/admin/vetting"
             element={

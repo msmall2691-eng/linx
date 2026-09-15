@@ -506,10 +506,12 @@ class TestTheListItself:
     def test_every_event_in_claude_md_is_declared(self) -> None:
         """The list is fixed before the feature is built, so it is a closed set.
 
-        Thirteen now, not the original twelve. `job_completed` was added in
-        phase 6 with the transition it belongs to, and this test is how that
-        addition had to be a decision: it failed the moment the value appeared,
-        which is exactly the conversation a new event is supposed to start.
+        Fifteen now, not the original twelve. `job_completed` came in phase 6
+        with the transition it belongs to; `dispute_raised` and
+        `dispute_resolved` came in phase 8 with the disputes table. Each time
+        this test failed the moment the value appeared, which is exactly the
+        conversation a new event is supposed to start — the list being closed
+        is what makes opening it a decision rather than a habit.
         """
         assert {event.value for event in NotificationEvent} == {
             "turnover_posted",
@@ -525,6 +527,8 @@ class TestTheListItself:
             "payment_receipt",
             "payout_notice",
             "review_received",
+            "dispute_raised",
+            "dispute_resolved",
         }
 
     def test_every_declared_event_now_has_a_sender(self) -> None:
@@ -552,6 +556,8 @@ class TestTheListItself:
             NotificationEvent.PAYMENT_RECEIPT: n.payment_receipt,
             NotificationEvent.PAYOUT_NOTICE: n.payout_notice,
             NotificationEvent.REVIEW_RECEIVED: n.review_received,
+            NotificationEvent.DISPUTE_RAISED: n.dispute_raised,
+            NotificationEvent.DISPUTE_RESOLVED: n.dispute_resolved,
         }
         assert set(senders) == set(NotificationEvent), (
             "an event is declared with nothing to fire it"
