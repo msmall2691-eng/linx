@@ -128,3 +128,121 @@ def test_a_line_that_cannot_be_read_is_named_not_dropped(page, live_server) -> N
     expect(page.get_by_test_id("bulk-row")).to_have_count(2)
     expect(page.get_by_text("could not be read", exact=False)).to_be_visible()
     expect(page.get_by_text("next tuesday", exact=False)).to_be_visible()
+
+
+def _ics_bytes(*days_out: int) -> bytes:
+    """A calendar file in the shape a listing site exports."""
+    from datetime import date, timedelta
+
+    events = []
+    for index, offset in enumerate(days_out):
+        start = date.today() + timedelta(days=offset)
+        end = start + timedelta(days=3)
+        events.append(
+            "BEGIN:VEVENT\n"
+            f"DTSTART;VALUE=DATE:{start.strftime('%Y%m%d')}\n"
+            f"DTEND;VALUE=DATE:{end.strftime('%Y%m%d')}\n"
+            f"UID:stay-{index}\n"
+            "SUMMARY:Reserved\n"
+            "END:VEVENT"
+        )
+    body = "\n".join(events)
+    return (
+        "BEGIN:VCALENDAR\n"
+        "VERSION:2.0\n"
+        "PRODID:-//Airbnb Inc//Hosting Calendar 1.0.0//EN\n"
+        f"{body}\n"
+        "END:VCALENDAR\n"
+    ).encode()
+
+
+def _add_rental(page, base_url: str, nickname: str) -> None:
+    page.goto(f"{base_url}/properties/new")
+    page.fill("#nickname", nickname)
+    page.fill("#address_line1", "1 Harbor Way")
+    page.fill("#city", "Portland")
+    page.fill("#state", "ME")
+    page.fill("#postal_code", "04101")
+    page.click("button[type=submit]")
+    page.wait_for_url(PROPERTY_DETAIL)
+    expect(page.get_by_role("heading", name=nickname)).to_be_visible()
+
+
+def test_uploading_a_calendar_file_fills_in_the_rows(page, live_server) -> None:
+    """**The path that was shipped broken and no test clicked.**
+
+    `apiFetch` stringified any body that was not undefined, and
+    `JSON.stringify(new FormData())` is the string "{}" — so this did not throw,
+    it posted an empty object and the server answered 422 about the file that
+    had in fact been chosen. Every endpoint test passed, because they post
+    multipart directly; only a browser doing what a person does goes through
+    the helper.
+    """
+    _signup_owner(page, live_server)
+    _add_rental(page, live_server, "Harbourside")
+
+    page.goto(f"{live_server}/turnovers/bulk")
+    page.select_option("#property", label="Harbourside")
+    page.get_by_test_id("ics-upload").set_input_files(
+        files=[
+            {
+                "name": "bookings.ics",
+                "mimeType": "text/calendar",
+                "buffer": _ics_bytes(6, 20),
+            }
+        ]
+    )
+
+    rows = page.get_by_test_id("bulk-row")
+    expect(rows).to_have_count(2)
+    # A rental does have a next guest, so the field is offered here.
+    expect(page.get_by_text("Next checkin", exact=False).first).to_be_visible()
+
+    page.get_by_role("button", name=re.compile("Add 2 as drafts")).click()
+    expect(page.get_by_role("heading", name="2 drafts added")).to_be_visible()
+
+
+def test_a_budget_that_cannot_be_read_is_refused_not_dropped(page, live_server) -> None:
+    """`dollarsToCents` answers null for "abc" the same as for an empty box, so
+    submitting it as "no budget" would create every draft without the number
+    the owner typed. The single-job form corrects them; this has to as well."""
+    _signup_owner(page, live_server)
+    _add_home(page, live_server, nickname="Willow Way")
+
+    page.goto(f"{live_server}/turnovers/bulk")
+    page.select_option("#property", label="Willow Way")
+    page.fill("#pasted", "2027-08-05")
+    page.get_by_role("button", name="Add these dates").click()
+    page.fill("#budget", "one hundred")
+    page.get_by_role("button", name=re.compile("Add 1 as drafts")).click()
+
+    expect(page.get_by_text("dollars and cents", exact=False)).to_be_visible()
+    # Nothing was created, so the owner can correct it rather than hunting for
+    # a dozen drafts with the budget missing.
+    expect(page.get_by_test_id("bulk-result")).to_have_count(0)
+
+    page.fill("#budget", "125.50")
+    page.get_by_role("button", name=re.compile("Add 1 as drafts")).click()
+    expect(page.get_by_role("heading", name="1 draft added")).to_be_visible()
+
+
+def test_switching_property_clears_rows_rather_than_carrying_them(
+    page, live_server
+) -> None:
+    """A rental's rows can carry checkins, which a home refuses as a category
+    error — and the screen stops showing the field on a home, so kept rows
+    would fail the whole batch over a value nobody can see or repair."""
+    _signup_owner(page, live_server)
+    _add_rental(page, live_server, "Dockside")
+    _add_home(page, live_server, nickname="Elm House")
+
+    page.goto(f"{live_server}/turnovers/bulk")
+    page.select_option("#property", label="Dockside")
+    page.fill("#pasted", "2027-09-02\n2027-09-09")
+    page.get_by_role("button", name="Add these dates").click()
+    expect(page.get_by_test_id("bulk-row")).to_have_count(2)
+
+    page.select_option("#property", label="Elm House")
+    expect(page.get_by_test_id("bulk-row")).to_have_count(0)
+    # Said out loud, because silently losing typed work is its own bug.
+    expect(page.get_by_text("were cleared", exact=False)).to_be_visible()

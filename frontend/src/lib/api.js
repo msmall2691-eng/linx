@@ -38,8 +38,16 @@ function readErrorDetail(body, status) {
 }
 
 export async function apiFetch(path, { method = 'GET', body, auth = true } = {}) {
+  // **A FormData body is sent as-is.** `JSON.stringify(new FormData())` is the
+  // string "{}", so stringifying one does not fail — it silently posts an empty
+  // object, and the server answers 422 about a field the caller did send. The
+  // Content-Type is left off deliberately too: the browser writes it itself
+  // with the multipart boundary, and setting it by hand produces a body no
+  // server can parse.
+  const isFormData = typeof FormData !== 'undefined' && body instanceof FormData
+
   const headers = {}
-  if (body !== undefined) headers['Content-Type'] = 'application/json'
+  if (body !== undefined && !isFormData) headers['Content-Type'] = 'application/json'
 
   const token = getToken()
   if (auth && token) headers.Authorization = `Bearer ${token}`
@@ -49,7 +57,7 @@ export async function apiFetch(path, { method = 'GET', body, auth = true } = {})
     response = await fetch(`/api${path}`, {
       method,
       headers,
-      body: body === undefined ? undefined : JSON.stringify(body),
+      body: body === undefined ? undefined : isFormData ? body : JSON.stringify(body),
     })
   } catch {
     throw new ApiError('Could not reach the server. Check your connection.', 0)

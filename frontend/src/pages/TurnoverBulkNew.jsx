@@ -86,6 +86,7 @@ export default function TurnoverBulkNew() {
   const [rows, setRows] = useState([])
   const [pasted, setPasted] = useState('')
   const [pasteProblems, setPasteProblems] = useState([])
+  const [cleared, setCleared] = useState(0)
   const [scope, setScope] = useState('')
   const [budget, setBudget] = useState('')
   const [notes, setNotes] = useState('')
@@ -119,6 +120,7 @@ export default function TurnoverBulkNew() {
     const { rows: parsed, problems } = parsePastedDates(pasted)
     setPasteProblems(problems)
     if (parsed.length === 0) return
+    setCleared(0)
     setRows((current) => [
       ...current,
       ...parsed.map((row) => ({
@@ -152,6 +154,7 @@ export default function TurnoverBulkNew() {
         )
         return
       }
+      setCleared(0)
       setRows((current) => [
         ...current,
         ...answer.jobs.map((job, index) => ({
@@ -181,6 +184,17 @@ export default function TurnoverBulkNew() {
   async function submit(event) {
     event.preventDefault()
     setError(null)
+
+    // Refused, not dropped. `dollarsToCents` answers null for "abc" and for
+    // "12.345" alike, and sending that as "no budget" would create every draft
+    // without the number the owner typed — the single-job form corrects them,
+    // and a bulk form that quietly disagreed would be worse, not better.
+    const budgetCents = dollarsToCents(budget)
+    if (budget !== '' && budgetCents === null) {
+      setError('Enter the budget as dollars and cents, like 125 or 125.50.')
+      return
+    }
+
     setBusy(true)
     try {
       const answer = await apiFetch('/turnovers/bulk', {
@@ -192,7 +206,7 @@ export default function TurnoverBulkNew() {
             checkin_at: row.checkin ? zonedInputToISO(row.checkin, timeZone) : null,
           })),
           service_type: scope || null,
-          owner_budget_cents: budget ? dollarsToCents(budget) : null,
+          owner_budget_cents: budgetCents,
           notes: notes || null,
         },
       })
@@ -271,6 +285,18 @@ export default function TurnoverBulkNew() {
             className="input"
             value={propertyId}
             onChange={(e) => {
+              // **Rows belong to the property they were entered for.** Their
+              // times came from that property's default checkout hour, and a
+              // rental's rows may carry checkins — which a home refuses as a
+              // category error. Kept across a switch, those checkins stay in
+              // state while the screen stops showing the field, so the server
+              // refuses the whole batch over a value the owner cannot see or
+              // repair. Cleared, and said out loud rather than silently.
+              if (rows.length > 0 && e.target.value !== propertyId) {
+                setCleared(rows.length)
+              }
+              setRows([])
+              setPasteProblems([])
               setPropertyId(e.target.value)
               setScope('')
             }}
@@ -320,6 +346,13 @@ export default function TurnoverBulkNew() {
                   </label>
                 )}
               </div>
+              {cleared > 0 && (
+                <Alert kind="info" className="mt-3">
+                  {cleared} row{cleared === 1 ? '' : 's'}{' '}
+                  {cleared === 1 ? 'was' : 'were'} cleared, because dates belong
+                  to the property they were entered for.
+                </Alert>
+              )}
               {pasteProblems.length > 0 && (
                 <Alert kind="warning" className="mt-3">
                   {pasteProblems.length} line
