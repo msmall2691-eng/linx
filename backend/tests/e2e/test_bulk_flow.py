@@ -496,8 +496,20 @@ def test_more_dates_than_one_submission_takes_are_capped_and_named(
     page.get_by_role("button", name="Add these dates").click()
 
     expect(page.get_by_test_id("bulk-row")).to_have_count(100)
-    expect(page.get_by_text("were left out", exact=False)).to_be_visible()
+    expect(page.get_by_text("dates are waiting", exact=False)).to_be_visible()
 
     # And the capped list is one the server actually accepts.
     page.get_by_role("button", name=re.compile("Add 100 as drafts")).click()
     expect(page.get_by_role("heading", name="100 drafts added")).to_be_visible()
+
+    # **The remainder has to be reachable.** Capping alone was not enough:
+    # `read-file` knows nothing about what already exists, so uploading the
+    # same calendar again returns the same list, the cap takes the same prefix,
+    # and every one comes back `already_there` — the last five unreachable
+    # while the screen said to come back for them.
+    page.get_by_test_id("add-waiting").click()
+    expect(page.get_by_test_id("bulk-row")).to_have_count(5)
+    page.get_by_role("button", name=re.compile("Add 5 as drafts")).click()
+    expect(page.get_by_role("heading", name="5 drafts added")).to_be_visible()
+    # Nothing waiting now, so nothing is offered.
+    expect(page.get_by_test_id("add-waiting")).to_have_count(0)

@@ -88,7 +88,14 @@ export default function TurnoverBulkNew() {
   const [pasted, setPasted] = useState('')
   const [pasteProblems, setPasteProblems] = useState([])
   const [cleared, setCleared] = useState(0)
-  const [leftOut, setLeftOut] = useState(0)
+  // **The dates that did not fit, kept rather than discarded.**
+  //
+  // Capping alone was not enough and I claimed otherwise: `read-file` writes
+  // nothing and knows nothing about what already exists, so uploading the same
+  // calendar again returns the *same* full list, the cap takes the *same*
+  // prefix, and every one of them comes back `already_there`. The remainder
+  // was unreachable, while the screen told the owner to come back for it.
+  const [overflow, setOverflow] = useState([])
   // Read inside an async completion, which closes over the *old* state value —
   // a ref is what makes "is this still the selected property" answerable there.
   const propertyIdRef = useRef(propertyId)
@@ -132,7 +139,14 @@ export default function TurnoverBulkNew() {
     setRows((current) => {
       const room = Math.max(0, maxJobs - current.length)
       const taken = parsed.slice(0, room)
-      setLeftOut(parsed.length - taken.length)
+      setOverflow((waiting) => [
+        ...waiting,
+        ...parsed.slice(room).map((row) => ({
+          id: `${row.date}-${Math.random().toString(36).slice(2, 8)}`,
+          checkout: `${row.date}T${row.time || defaultTime}`,
+          checkin: '',
+        })),
+      ])
       return [
         ...current,
         ...taken.map((row) => ({
@@ -188,7 +202,14 @@ export default function TurnoverBulkNew() {
         // already created come back as `already_there` rather than twice.
         const room = Math.max(0, maxJobs - current.length)
         const taken = answer.jobs.slice(0, room)
-        setLeftOut(answer.jobs.length - taken.length)
+        setOverflow((waiting) => [
+          ...waiting,
+          ...answer.jobs.slice(room).map((job, index) => ({
+            id: `over-${index}-${Math.random().toString(36).slice(2, 8)}`,
+            checkout: isoToZonedInput(job.checkout_at, timeZone),
+            checkin: job.checkin_at ? isoToZonedInput(job.checkin_at, timeZone) : '',
+          })),
+        ])
         return [
           ...current,
           ...taken.map((job, index) => ({
@@ -276,7 +297,32 @@ export default function TurnoverBulkNew() {
               .
             </Alert>
           )}
-          <div className="mt-6 flex gap-3">
+          {overflow.length > 0 && (
+            <Alert kind="info" className="mt-4">
+              {overflow.length}{' '}
+              {overflow.length === 1 ? 'date' : 'dates'} from that list did not
+              fit in one submission and {overflow.length === 1 ? 'is' : 'are'}{' '}
+              still waiting.
+            </Alert>
+          )}
+          <div className="mt-6 flex flex-wrap gap-3">
+            {overflow.length > 0 && (
+              <button
+                type="button"
+                className="btn-primary"
+                data-testid="add-waiting"
+                onClick={() => {
+                  // Straight into the form, so the remainder never depends on
+                  // the owner still having the file — or on re-uploading it,
+                  // which proposes the same prefix and creates nothing.
+                  setRows(overflow.slice(0, maxJobs))
+                  setOverflow(overflow.slice(maxJobs))
+                  setResult(null)
+                }}
+              >
+                Add the next {Math.min(overflow.length, maxJobs)}
+              </button>
+            )}
             <Link className="btn-primary" to="/turnovers">
               Go to jobs
             </Link>
@@ -356,7 +402,7 @@ export default function TurnoverBulkNew() {
               }
               setRows([])
               setPasteProblems([])
-              setLeftOut(0)
+              setOverflow([])
               setPropertyId(e.target.value)
               setScope('')
             }}
@@ -406,12 +452,12 @@ export default function TurnoverBulkNew() {
                   </label>
                 )}
               </div>
-              {leftOut > 0 && (
-                <Alert kind="warning" className="mt-3">
-                  {leftOut} more {leftOut === 1 ? 'date was' : 'dates were'} left
-                  out, because one submission takes at most {maxJobs} jobs. Add
-                  these, then come back and add the rest — anything already on
-                  the schedule is skipped rather than repeated.
+              {overflow.length > 0 && (
+                <Alert kind="info" className="mt-3">
+                  {overflow.length} more{' '}
+                  {overflow.length === 1 ? 'date is' : 'dates are'} waiting —
+                  one submission takes at most {maxJobs} jobs. Add these, and
+                  the rest are offered straight afterwards.
                 </Alert>
               )}
               {cleared > 0 && (
