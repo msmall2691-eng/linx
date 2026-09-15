@@ -40,11 +40,13 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.models.award import Award
 from app.models.property import Property
+from app.models.task_run import TaskRun
 from app.models.turnover import Turnover
 from app.services import (
     awards,
     calendars,
     geocoding,
+    launch,
     notifications,
     reviews,
     turnovers,
@@ -214,6 +216,47 @@ def sync_calendars(db: Session) -> tuple[int, int]:
     return created, stale
 
 
+def record_run(db: Session, *, started: float, result: dict[str, int]) -> None:
+    """Write down that this pass finished. **The pass is the only witness.**
+
+    Everything else in this product that stops announces itself: a failing
+    request throws, a failing deploy fails. A cron service that was never
+    created, or has been erroring since the last deploy, is indistinguishable
+    from a quiet week — and the review reveal is load-bearing rather than a
+    courtesy, so "quietly not running" is the expensive failure here.
+
+    Inferring it from other rows does not work, which is worth saying because
+    it is the obvious first idea: the newest notification and the newest
+    calendar sync are both silent on a genuinely quiet pass, so "nothing
+    happened" and "nothing ran" look identical. The pass records it itself, and
+    `app/services/launch.py` reads it.
+
+    Upserted on the unique `name`, so this stays one row answering one
+    question rather than a log nobody prunes.
+    """
+    summary = ", ".join(f"{count} {label}" for label, count in result.items() if count)
+    finished = datetime.now(timezone.utc)
+    duration_ms = int((monotonic() - started) * 1000)
+
+    existing = db.execute(
+        select(TaskRun).where(TaskRun.name == launch.SCHEDULED_TASK_NAME)
+    ).scalars().first()
+    if existing is None:
+        db.add(
+            TaskRun(
+                name=launch.SCHEDULED_TASK_NAME,
+                finished_at=finished,
+                duration_ms=duration_ms,
+                summary=summary or "nothing due",
+            )
+        )
+    else:
+        existing.finished_at = finished
+        existing.duration_ms = duration_ms
+        existing.summary = summary or "nothing due"
+    db.commit()
+
+
 def run(db: Session, *, now: datetime | None = None) -> dict[str, int]:
     """One pass. Queue what is due, send everything owed, *then* read feeds.
 
@@ -233,13 +276,14 @@ def run(db: Session, *, now: datetime | None = None) -> dict[str, int]:
     nobody — which is rule 1 of the calendar module, and is what makes this
     reordering safe rather than merely convenient.
     """
+    started = monotonic()
     placed = place_unmapped_properties(db)
     reminders = send_reminders(db, now=now)
     unclaimed = alert_unclaimed(db, now=now)
     revealed = reveal_reviews(db, now=now)
     delivered = notifications.deliver_pending(db, limit=SCHEDULED_DRAIN_LIMIT)
     synced, stale_bookings = sync_calendars(db)
-    return {
+    result = {
         "placed": placed,
         "synced": synced,
         "stale_bookings": stale_bookings,
@@ -248,6 +292,11 @@ def run(db: Session, *, now: datetime | None = None) -> dict[str, int]:
         "revealed": revealed,
         "delivered": delivered,
     }
+    # **Last, and only on the way out.** Recording the start would make a pass
+    # that crashes every single time look perfectly healthy, which is the exact
+    # reassurance this row exists to refuse.
+    record_run(db, started=started, result=result)
+    return result
 
 
 def main() -> None:  # pragma: no cover - exercised through run()

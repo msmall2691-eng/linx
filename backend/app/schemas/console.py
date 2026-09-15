@@ -126,3 +126,34 @@ class LedgerOut(BaseModel):
     #: before the network call so a crash leaves a visible flag. Counted as
     #: neither collected nor lost, because an unknown outcome is neither.
     total_unknown_cents: int = 0
+
+
+class LaunchCheckOut(BaseModel):
+    """One readiness check, as the console renders it.
+
+    `state` is rendered rather than re-decided: the frontend colours it and
+    prints `detail` and `remedy` verbatim, for the same reason it renders
+    `vetting` verbatim — a screen that re-derives a rule is a second author of
+    it, and two authors disagree eventually.
+    """
+
+    key: str
+    title: str
+    #: ready | blocked | attention | unverifiable
+    state: str
+    detail: str
+    remedy: str
+
+
+class LaunchReadinessOut(BaseModel):
+    """The whole list, plus the two counts a person reads first."""
+
+    checks: list[LaunchCheckOut]
+    #: Checked, and false. A pilot with real people must not start.
+    blocking_count: int
+    #: **Everything not finished, including what could not be checked.** An
+    #: unverifiable item counts here, because a list that treats "I could not
+    #: look" as "fine" reports all-green for a system nobody has confirmed.
+    outstanding_count: int
+    #: True only when nothing is outstanding at all.
+    launchable: bool

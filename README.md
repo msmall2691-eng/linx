@@ -12,7 +12,7 @@ reference to any other codebase.
 
 ---
 
-## Status: phase 7 — reviews
+## Status: phase 9 — launch readiness
 
 What works today:
 
@@ -39,17 +39,18 @@ What works today:
 - **Cancellations and no-shows** — an award is cancelled, never deleted; the job
   goes back on the bench; and the owner, the cleaner and an admin are told every
   time, never conditional on the cancellation being late.
-- **Notifications** — all thirteen events in the fixed list, recorded in the
+- **Notifications** — all fifteen events in the fixed list, recorded in the
   same transaction as the state change and delivered after it, with a unique
-  `dedupe_key` so a retry cannot send twice. The last of them, the review
-  notice, was wired in phase 7 and fires on reveal rather than on write.
+  `dedupe_key` so a retry cannot send twice. The list is closed, so opening it
+  is a migration and a failing test — which is exactly the conversation a new
+  event is supposed to start.
 - **Payments** — the cleaner marks a job done, the owner pays on Stripe's own
   hosted page, and one **destination charge** settles both halves at once: the
   cleaner's share transfers to their Express account and the platform fee comes
   out of the same transaction. Refunds are admin-only and reverse both halves.
   Every Stripe call goes through one helper with an idempotency key derived from
   a database id, and the attempt is written before the call.
-- The full v1 database schema — eleven tables — built by Alembic migrations.
+- The full v1 database schema — fourteen tables — built by Alembic migrations.
   Tables belonging to later phases exist and are empty on purpose.
 - A single-container deploy: the backend serves the built frontend.
 - **Reviews** — mutual and delayed. Neither side sees the other's until both
@@ -57,18 +58,30 @@ What works today:
   does: not even the fact that a review exists. Once a review is visible it
   counts towards a rating, shown on the owner's bid list and on a cleaner's own
   profile — shown, never ranked: the bid list still sorts cheapest-first.
-- 375 tests against real PostgreSQL, plus 9 browser click-throughs — including
+- **Disputes** — either side can raise one about a job that went wrong,
+  including a cancelled booking, and it is bound to the specific booking it is
+  about rather than to whichever one the turnover carries today. Raising one
+  tells an admin and the person who raised it, and deliberately nobody else: at
+  this size a human decides when somebody is told they are being complained
+  about.
+- **An admin console** — the dispute inbox, the unclaimed alarm, the ledger with
+  its drift column, and a link to the vetting queue phase 3 already built. It
+  carries no definitions of its own: every number is read from the function that
+  already owns it, so the screen and the alert an admin was sent cannot
+  disagree.
+- **A launch check** — `python -m app.tasks.launch_check`, and the same list on
+  the console. It refuses to call anything ready that it could not actually
+  verify, and the things it *cannot* verify are reported as needing a person
+  rather than counted as passes. See [`docs/LAUNCH.md`](docs/LAUNCH.md).
+- 595 tests against real PostgreSQL, plus 14 browser click-throughs — including
   bid → award → job done → paid against a Stripe that answers over real HTTP,
   and a two-browser check that one side's page does not change when the other
   reviews them.
 
-The admin console is **not** built yet. The vetting queue is the exception and
-predates it — a real screen since phase 3, because a human reviewing a photo ID
-is what stands between "hands off" and "anyone can walk into a stranger's
-house". The dispute inbox and the ledger have neither: disputes are a policy
-written into comments and answered by a person today, and `payments.reconcile()`
-is a service function with no route and no page. That is phase 8; see the phase
-table in [`CLAUDE.md`](CLAUDE.md).
+The vetting queue predates the console — a real screen since phase 3, because a
+human reviewing a photo ID is what stands between "hands off" and "anyone can
+walk into a stranger's house", and that could not wait for an admin surface to
+exist.
 
 **All Stripe work is test mode.** Going live means a new, separate Connect
 platform account under the new entity — never a migrated one, and never real
@@ -225,15 +238,32 @@ One Railway service, one Postgres, nothing shared with any other project.
    | `STRIPE_SECRET_KEY` | `sk_test_…`. Without it the payment path is off, not faked |
    | `STRIPE_WEBHOOK_SECRET` | from the webhook endpoint you create, pointed at `/api/stripe/webhook` |
    | `PUBLIC_BASE_URL` | your deployed origin — where Stripe sends people back to |
+   | `STRIPE_PLATFORM_ENTITY` | **live mode only** — the legal name of the entity the Connect platform account was opened under |
 
    The webhook is what makes a payment true; without the secret every delivery
    is refused rather than trusted. Going live is **not** a matter of swapping
    these for live keys: it means a new, separate Connect platform account under
-   the new entity.
+   the new entity — and a live key with `STRIPE_PLATFORM_ENTITY` unset is
+   refused, so the two have to be set together.
 
 7. Deploy. The entrypoint runs `alembic upgrade head` before starting the
    server, and aborts the boot if a migration fails rather than serving traffic
    against a schema it does not match.
+
+8. Ask whether it is actually ready:
+
+   ```bash
+   python -m app.tasks.launch_check
+   ```
+
+   It exits non-zero on anything blocking, and reads the same function the
+   console's **Launch readiness** panel does. Everything it checks is a failure
+   that would otherwise be silent — a storage directory that is not really a
+   volume, no admin to receive admin alerts, no mail host so nothing is ever
+   sent, a cron service nobody created. Items it *cannot* check — whose entity
+   the Stripe account belongs to, chiefly — are reported as needing a person
+   rather than counted as passes. [`docs/LAUNCH.md`](docs/LAUNCH.md) is the
+   long form, including the order to go live in.
 
 The image builds the frontend with Node, then copies the static build into the
 Python runtime image — `PORT` is read from the environment, so Railway's port
@@ -269,10 +299,14 @@ backend/
     services/awards.py   guardrail 1 — the row lock, and the cancellation policy
     services/notifications.py  the one place that decides who hears about what
     services/delivery.py   the sender — SMTP, or the log when none is configured
+    services/disputes.py   a complaint, bound to the booking it is about
+    services/launch.py     is this ready for real people, and what cannot be checked
     tasks/scheduled.py   the three things a clock fires, and the outbox drain
+    tasks/launch_check.py  the same list, as a command that can gate a deploy
   alembic/versions/    migrations — one head, always
   tests/               pytest suite, real Postgres
   tests/e2e/           browser click-throughs, opt-in
+docs/LAUNCH.md         the pilot checklist, and the line about the entity
 frontend/
   src/
     lib/api.js         the one place that knows about tokens and errors
@@ -294,3 +328,8 @@ tested in full before the entity exists.
 The line that must not be crossed: **no real pilot transactions in live mode
 under a personal SSN or an existing company's EIN.** Going live means a new,
 separate Connect platform account under the new entity, not a migrated one.
+
+Since phase 9 that is enforced, not just written here. A live key with
+`STRIPE_PLATFORM_ENTITY` unset makes every mutating Stripe call refuse, naming
+the variable. Test mode is untouched — it can only ever refuse to move real
+money. See [`docs/LAUNCH.md`](docs/LAUNCH.md).

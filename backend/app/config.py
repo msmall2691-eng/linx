@@ -100,6 +100,22 @@ class Settings(BaseSettings):
     #: Express onboarding returns to. Empty means "work it out from the request",
     #: which is right in development and wrong behind a proxy in production.
     public_base_url: str | None = None
+    #: **The legal entity the Connect platform account belongs to** — the line
+    #: this project exists to hold, written down where the code can read it.
+    #:
+    #: A live key with this unset makes every mutating Stripe call refuse.
+    #: Nothing about test mode changes. That asymmetry is the whole point: the
+    #: failure being guarded against is not a bug, it is somebody pasting a
+    #: live key into a service that is already working and money starting to
+    #: move through the wrong tax identity — a change with no error, no failing
+    #: test, and consequences that surface at the end of the tax year.
+    #:
+    #: It is a free-text name rather than a boolean because "yes I confirm" is
+    #: a box anybody ticks, and typing the entity's actual name is a sentence
+    #: somebody has to mean. It cannot verify *whose* EIN the Stripe account
+    #: was opened under — nothing in this process can — so the launch check
+    #: reports it as declared rather than verified, and says so.
+    stripe_platform_entity: str | None = None
 
     # ---------------------------------------------------------------------
     # Reviews (phase 7)

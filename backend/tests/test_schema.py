@@ -62,6 +62,13 @@ EXPECTED_TABLES = {
     # because at that point "disputes go to a human inbox" was a policy with no
     # shape; giving it one is what phase 8 is.
     "disputes",
+    # Phase 9, and the only table here that is about the system rather than the
+    # marketplace. The scheduled pass is the one part of this product that says
+    # nothing when it stops, and no other row can stand in for it: the newest
+    # notification and the newest calendar sync are both silent on a genuinely
+    # quiet pass, so "nothing happened" and "nothing ran" look identical. One
+    # row, overwritten, answering one question.
+    "task_runs",
 }
 
 

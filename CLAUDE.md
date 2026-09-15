@@ -178,6 +178,7 @@ not tenant. There is deliberately no `org_id`-style scoping.
 | `reviews` | Mutual, delayed reveal |
 | `payments_in` | Collects from the owner |
 | `payouts` | Pays the cleaner |
+| `task_runs` | One row per background task: when it last *finished* |
 
 Two fields carry more weight than they look like they do:
 
@@ -824,7 +825,7 @@ phase.
 | 6 | Stripe Connect, test mode end to end, refunds, reconciliation | **done** |
 | 7 | Mutual delayed-reveal reviews | **done** |
 | 8 | Admin console — vetting queue, dispute inbox, unclaimed alerts, ledger | **done** |
-| 9 | Pilot launch checklist — new Connect platform account under the new entity | not started |
+| 9 | Pilot launch checklist — new Connect platform account under the new entity | **done** |
 
 **Phase 1 built the schema for every table, with no business logic.** Tables for
 later phases exist and are empty on purpose. The shape is settled now; the
@@ -839,6 +840,20 @@ or an existing company's EIN.** That would route money legally through an
 individual rather than the new entity, undoing the separation this project
 exists for. Going live means opening a **new, separate Connect platform account
 under the new entity** — not migrating an existing one.
+
+**Phase 9 enforces that sentence rather than only stating it.** A live key
+(`sk_live_…` or `rk_live_…`) with `STRIPE_PLATFORM_ENTITY` unset makes every
+mutating Stripe call refuse, in `stripe_client.post` — the only door. Prose does
+not stop a live key being pasted into a service that is already working: that
+change produces no error, fails no test, and surfaces at the end of a tax year
+as money having moved through the wrong legal person.
+
+The variable holds the entity's **legal name**, not a boolean, because a
+confirmation flag is a box anybody ticks and a name is a sentence somebody has
+to mean. It cannot verify the name is true — nothing in this process can read
+whose EIN a Stripe account was opened under — so the launch check reports it as
+*declared* and says as much. Test mode is untouched; the gate can only ever
+refuse to move real money.
 
 ### How it is built (phase 6)
 
@@ -980,6 +995,44 @@ become untrustworthy and there is no way to tell which is lying.
   Drift is still computed on unsettled rows rather than suppressed — a payout
   against a payment that never succeeded is money out with nothing in, which is
   exactly what drift is for.
+
+### Launch readiness (phase 9)
+
+`app/services/launch.py`, read two ways: `python -m app.tasks.launch_check` at
+deploy time, and the console's **Launch readiness** panel — one function, so
+the screen and the command cannot disagree. `docs/LAUNCH.md` is the long form.
+
+**Four states, and the fourth is the design.** `ready`, `blocked`, `attention`,
+and `unverifiable` — *this process cannot know*. The obvious two-state
+checklist turns everything it cannot see into a pass and then reports all-green
+for a system nobody has confirmed anything about, which is the same mistake as
+assuming an unknown Stripe outcome succeeded. `is_launchable` counts an
+unverifiable item as outstanding, so the summary can never say ready while
+something is merely unexamined. Three items are permanently in that state: whose
+entity the Connect account belongs to, whether anybody has walked a candidate
+through Checkr, and whether a human actually works the dispute inbox.
+
+**Everything checked fails silently.** Anything that shouts on its own — a bad
+`DATABASE_URL`, a missing `SECRET_KEY` — already stops the boot in
+`app/preflight.py` and is not given a second home. What is here is the other
+kind: `os.path.ismount` on the upload directory, because a plain directory is
+writable and passes every naive test and is replaced on the next deploy, so the
+photo IDs vanish while their rows survive *one deploy after the mistake*; no
+admin user, because "an admin" resolves from the role and with none every alert
+is addressed to nobody; no `SMTP_HOST`, because every notification then stays
+`pending` and an owner learns their cleaner cancelled by arriving at a dirty
+house.
+
+**`task_runs` exists because the scheduled pass is the only part of this product
+that says nothing when it stops.** A cron service that was never created, or has
+been erroring since the last deploy, is indistinguishable from a quiet week —
+and the review reveal is load-bearing rather than a courtesy, so silence there
+is how refusing to answer becomes the way to bury a bad review. Inference does
+not work and that is worth writing down, because it is the obvious first idea:
+the newest notification and the newest calendar sync are both silent on a
+genuinely quiet pass, so "nothing happened" and "nothing ran" look identical.
+The pass records it itself — one row, overwritten, written **after** the work,
+because a pass that starts and dies is not evidence that anything was done.
 
 ## Working in this repo
 
