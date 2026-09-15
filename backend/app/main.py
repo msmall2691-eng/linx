@@ -29,6 +29,8 @@ from app.api.routes import (
     turnovers,
 )
 from app.config import settings
+from app.middleware import BodySizeLimit
+from app.services import turnovers as turnover_rules
 from app.services import places
 
 API_PREFIX = "/api"
@@ -38,6 +40,13 @@ app = FastAPI(
     description="A marketplace connecting STR property owners with independent cleaners.",
     version="0.1.0",
 )
+
+# **Outermost of the two, so the bytes are refused before anything reads them.**
+# Starlette applies middleware in reverse, so adding this last puts it first:
+# a body over the limit is answered without CORS, routing, or the multipart
+# parser ever seeing it — which is the whole point, since `UploadFile` spools
+# the body before the endpoint's auth dependency even runs.
+app.add_middleware(BodySizeLimit, max_bytes=settings.max_request_bytes)
 
 app.add_middleware(
     CORSMiddleware,
@@ -89,6 +98,10 @@ def public_config() -> dict[str, object]:
         # Null means the address form falls back to plain fields, which still
         # produce a placeable property — see `app/services/geocoding.py`.
         "google_maps_api_key": settings.google_maps_api_key,
+        # **The bulk limit, so the form does not carry its own copy.** A screen
+        # that lets somebody build a list the API will refuse is a form that
+        # lies, and a second constant is how the two drift apart.
+        "max_bulk_jobs": turnover_rules.MAX_BULK_JOBS,
     }
 
 

@@ -57,6 +57,55 @@ class TurnoverCreate(BaseModel):
         return self
 
 
+class BulkJobIn(BaseModel):
+    """One dated job in a bulk submission."""
+
+    checkout_at: datetime
+    checkin_at: datetime | None = None
+
+    @model_validator(mode="after")
+    def timestamps_must_be_timezone_aware(self) -> "BulkJobIn":
+        """The same refusal as the single-job shape, for the same reason.
+
+        A naive timestamp read as UTC moves a Maine checkout by four or five
+        hours, which is the difference between a same-day turnover and an
+        ordinary one — and a bulk paste is exactly where a stray naive value
+        would arrive unnoticed among forty correct ones.
+        """
+        for name in ("checkout_at", "checkin_at"):
+            value = getattr(self, name)
+            if value is not None and value.tzinfo is None:
+                raise ValueError(f"{name} must include a timezone offset")
+        return self
+
+
+class TurnoverBulkCreate(BaseModel):
+    """Several jobs on one property, for an owner with no booking feed.
+
+    The scope, the budget and the notes are shared across the submission and
+    the dates are not: an owner adding a season of cleans is saying one thing
+    about the work and many things about when. Per-row overrides are what the
+    ordinary edit screen is for, once the drafts exist.
+
+    There is deliberately no `publish` flag — see `turnovers.create_many`.
+    """
+
+    property_id: uuid.UUID
+    jobs: list[BulkJobIn] = Field(min_length=1)
+    service_type: ServiceType | None = None
+    owner_budget_cents: int | None = Field(default=None, ge=0)
+    notes: str | None = None
+
+
+class TurnoverBulkResult(BaseModel):
+    """What the submission did, including what it did *not* do."""
+
+    created: list["TurnoverOut"]
+    #: Checkouts this property already had a job for. Named rather than
+    #: silently dropped, so pasting the same list twice is visible.
+    already_there: list[datetime]
+
+
 class TurnoverUpdate(BaseModel):
     """Reschedule or re-describe a turnover. Status is not settable here."""
 

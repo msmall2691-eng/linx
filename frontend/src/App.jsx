@@ -17,6 +17,7 @@ import PropertyNew from './pages/PropertyNew.jsx'
 import Signup from './pages/Signup.jsx'
 import TurnoverDetail from './pages/TurnoverDetail.jsx'
 import TurnoverList from './pages/TurnoverList.jsx'
+import TurnoverBulkNew from './pages/TurnoverBulkNew.jsx'
 import TurnoverNew from './pages/TurnoverNew.jsx'
 
 /** Properties and turnovers are the owner's side of the marketplace. */
@@ -96,6 +97,14 @@ export default function App() {
             element={
               <OwnerRoute>
                 <TurnoverNew />
+              </OwnerRoute>
+            }
+          />
+          <Route
+            path="/turnovers/bulk"
+            element={
+              <OwnerRoute>
+                <TurnoverBulkNew />
               </OwnerRoute>
             }
           />

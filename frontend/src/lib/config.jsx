@@ -9,6 +9,11 @@ import { apiFetch } from './api.js'
 const FALLBACK = {
   region_name: 'your area',
   region_timezone: 'America/New_York',
+  // Only reached if the config fetch fails. It matches the server's
+  // `MAX_BULK_JOBS`, and being wrong here is safe in one direction only — the
+  // server still refuses, so the cost is a form that offers less than it could
+  // rather than one that offers more than the API will take.
+  max_bulk_jobs: 100,
 }
 
 const ConfigContext = createContext(FALLBACK)
@@ -37,6 +42,11 @@ export function ConfigProvider({ children }) {
 
 export function useConfig() {
   return useContext(ConfigContext)
+}
+
+/** The most jobs one bulk submission may create, as the server counts them. */
+export function useMaxBulkJobs() {
+  return useConfig().max_bulk_jobs ?? FALLBACK.max_bulk_jobs
 }
 
 /** The region timezone, which is what every date in this app is read in. */

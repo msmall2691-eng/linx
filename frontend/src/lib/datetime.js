@@ -124,10 +124,29 @@ export function formatCents(cents) {
   }).format(cents / 100)
 }
 
-/** Dollars typed by a person into integer cents, without float drift. */
+/**
+ * Dollars typed by a person into integer cents, without float drift.
+ *
+ * **Null is the only "no" this returns**, which it did not always manage. A
+ * lone `.` passes the shape test — `\d*` matches nothing, `\.?` matches the
+ * dot, `\d{0,2}` matches nothing — and `Number('.')` is NaN, so this handed
+ * back NaN while every caller tested `=== null`. `JSON.stringify` then turns
+ * NaN into `null` on the wire, so a budget somebody typed became no budget at
+ * all, silently, with no correction offered. Both forms tested for null and
+ * both were wrong in the same way, which is why the fix is here rather than at
+ * the call sites.
+ */
 export function dollarsToCents(value) {
   if (value === '' || value === null || value === undefined) return null
   const cleaned = String(value).replace(/[$,\s]/g, '')
+  // A digit has to survive the cleaning. `$` or `,` or a run of spaces strips
+  // to the empty string, which the shape test below accepts and `Number('')`
+  // reads as a perfectly finite **zero** — so a visibly non-empty entry became
+  // a budget of nothing, with no correction offered. Empty input is already
+  // handled above and means "no budget"; this is about input that looked like
+  // one.
+  if (!/\d/.test(cleaned)) return null
   if (!/^\d*\.?\d{0,2}$/.test(cleaned)) return null
-  return Math.round(Number(cleaned) * 100)
+  const cents = Math.round(Number(cleaned) * 100)
+  return Number.isFinite(cents) ? cents : null
 }

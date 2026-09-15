@@ -150,6 +150,26 @@ class SyncOut(BaseModel):
     stale_but_kept: int
 
 
+class CalendarFileJob(BaseModel):
+    """One clean an uploaded calendar implies, before anything is written."""
+
+    checkout_at: datetime
+    checkin_at: datetime | None
+
+
+class CalendarFileJobsOut(BaseModel):
+    """What an uploaded `.ics` says, for the bulk form to be filled in from.
+
+    Carries `bookings_seen` as well as the jobs because the two differ for
+    reasons an owner should see: stays outside the horizon or behind the past
+    floor are read and then dropped, and a file of last year's bookings would
+    otherwise come back as an unexplained empty list.
+    """
+
+    bookings_seen: int
+    jobs: list[CalendarFileJob]
+
+
 class DefaultTimesUpdate(BaseModel):
     """The house's own checkout and checkin policy.
 
