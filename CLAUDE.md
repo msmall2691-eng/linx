@@ -1072,8 +1072,12 @@ rather than two, the same shape as `_payment_proven`: no host blocks, a host
 with a delivered notification behind it is ready, and a host nobody has
 successfully sent through is `attention` — the honest description of a fresh
 deployment. The evidence is scoped to the sender configured *now*
-(`notifications.sent_via`, written from `delivery.Sender.identity` — host, port
-and from-address, never the password): a `SENT` row proves *a* sender worked,
+(`notifications.sent_via`, written from `delivery.Sender.identity` — every
+setting that decides whether a delivery succeeds, with the credentials as a
+salted digest rather than plaintext, because this is read back onto an admin
+screen and a password on a screen is a password in a screenshot; host, port and
+from-address alone left `SMTP_USERNAME`, `SMTP_PASSWORD` and `SMTP_USE_TLS`
+able to change underneath it): a `SENT` row proves *a* sender worked,
 so without that tie, changing `SMTP_HOST` to something broken left yesterday's
 success standing as proof about a system nobody is using. An unreachable host, a refused credential or a sender address the
 relay rejects all fail at send time and every notification sits `failed`, which
@@ -1098,9 +1102,16 @@ does not tell the modes apart, and two *different* platforms in the same mode
 compare equal on the boolean — which the launch order itself reaches, since
 step 4 opens a new platform account under the new entity and testing it first
 means new test keys. `payments.platform_account_id()` resolves the current
-platform in one cached call rather than one per cleaner, and returning None
-means *not known*: never a match, never a mismatch, because a Stripe blip
-turning every vetted cleaner unpayable is the opposite failure and just as bad. The charge path **refuses**,
+platform once and returning None means *not known*: never a match, never a
+mismatch, because a Stripe blip turning every vetted cleaner unpayable is the
+opposite failure and just as bad. It caches a success and **deliberately not a
+failure** — an outage must not become a permanent unknown for the life of the
+process — so the caller that asks about many rows resolves once and passes the
+answer down (`connected_account_is_foreign(..., platform=...)`, with an
+`UNRESOLVED` sentinel because a resolved *None* is an answer rather than an
+absence). Without that, an outage cost one full timeout per cleaner plus one
+more, and the console hung for minutes on the screen whose job is saying what
+is wrong. The charge path **refuses**,
 naming the remedy; the onboarding path **replaces**, because there somebody is
 deliberately connecting to the platform that is running now, and resetting the
 two flags keeps them refused until they actually finish. Migration 0009 does

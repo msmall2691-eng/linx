@@ -927,6 +927,102 @@ class TestTheModeColumnIsAFloorNotAProof:
         assert payments.platform_account_id() is None
 
 
+class TestAnOutageCostsOneCallNotNPlusOne:
+    """The hole in the previous fix, which its own test walked past.
+
+    `platform_account_id` caches a *success* and deliberately not a failure —
+    a Stripe blip must not become a permanent "unknown" for the life of the
+    process. So the call-counting test passed while measuring only the path
+    where the cache does the work: on an outage every call site pays the full
+    timeout, and the check asks per cleaner and then once more.
+    """
+
+    def _cleaners_with_accounts(self, db: Session, make_cleaner, n: int) -> None:
+        from app.models.cleaner_profile import CleanerProfile
+
+        for _ in range(n):
+            cleaner = make_cleaner(cleared=True)
+            profile = db.execute(
+                select(CleanerProfile).where(
+                    CleanerProfile.user_id == uuid.UUID(cleaner["user"]["id"])
+                )
+            ).scalar_one()
+            profile.stripe_account_id = f"acct_{uuid.uuid4().hex[:12]}"
+            profile.stripe_account_livemode = False
+            profile.stripe_platform_id = "acct_platform"
+            db.commit()
+
+    def test_an_unreachable_stripe_is_asked_once_not_once_per_cleaner(
+        self, db: Session, ready_env, make_cleaner, monkeypatch
+    ) -> None:
+        """N cleaners must not mean N sequential 30-second timeouts."""
+        from app.services import payments as payments_module
+
+        self._cleaners_with_accounts(db, make_cleaner, 3)
+        payments_module._PLATFORM_CACHE.clear()
+
+        calls = []
+
+        def unreachable(path, **kwargs):
+            calls.append(path)
+            raise stripe_client.StripeError("could not reach Stripe")
+
+        monkeypatch.setattr(stripe_client, "is_configured", lambda: True)
+        monkeypatch.setattr(stripe_client, "get", unreachable)
+
+        check = _by_key(launch.run_checks(db), "stripe_account_modes")
+        assert check.state is State.UNVERIFIABLE
+        assert calls.count("/account") == 1, (
+            f"an outage cost {calls.count('/account')} sequential Stripe calls "
+            "with three cleaners on the list"
+        )
+
+    def test_a_failure_is_still_not_cached_permanently(
+        self, ready_env, monkeypatch
+    ) -> None:
+        """Passing the answer down is what bounds the outage, *not* caching the
+        failure — a blip must not decide the answer for the whole process."""
+        from app.services import payments as payments_module
+
+        payments_module._PLATFORM_CACHE.clear()
+
+        def unreachable(path, **kwargs):
+            raise stripe_client.StripeError("could not reach Stripe")
+
+        monkeypatch.setattr(stripe_client, "is_configured", lambda: True)
+        monkeypatch.setattr(stripe_client, "get", unreachable)
+        assert payments.platform_account_id() is None
+
+        monkeypatch.setattr(stripe_client, "get", lambda p, **kw: {"id": "acct_back"})
+        assert payments.platform_account_id() == "acct_back", (
+            "the outage was cached, so recovery never took effect"
+        )
+
+    def test_a_resolved_unknown_is_not_re_resolved_by_the_predicate(
+        self, db: Session, ready_env, make_cleaner, monkeypatch
+    ) -> None:
+        """`None` passed in is an *answer*, not an absence. Without the
+        sentinel the predicate would treat it as "nobody told me" and go
+        looking again — which is the N+1 by another route."""
+        from app.models.cleaner_profile import CleanerProfile
+        from app.services import payments as payments_module
+
+        self._cleaners_with_accounts(db, make_cleaner, 1)
+        profile = db.execute(
+            select(CleanerProfile).where(
+                CleanerProfile.stripe_account_id.is_not(None)
+            )
+        ).scalars().first()
+        payments_module._PLATFORM_CACHE.clear()
+
+        def explode(path, **kwargs):
+            raise AssertionError("re-resolved a platform it was handed")
+
+        monkeypatch.setattr(stripe_client, "is_configured", lambda: True)
+        monkeypatch.setattr(stripe_client, "get", explode)
+        assert not payments.connected_account_is_foreign(profile, platform=None)
+
+
 class TestEvidenceForTheSenderConfiguredNow:
     """A `SENT` row proves *a* sender worked, not the one configured now.
 
@@ -1040,3 +1136,67 @@ class TestOneSpellingOfTheBaseUrl:
         assert _by_key(launch.run_checks(db), "public_base_url").state is State.READY
         assert " " not in payments._app_base()
         assert payments._app_base() == "https://linx.example"
+
+
+class TestTheSenderIdentityCoversEverySetting:
+    """Host, port and from-address left three settings out.
+
+    Changing `SMTP_USERNAME`, `SMTP_PASSWORD` or `SMTP_USE_TLS` to something
+    that fails kept the identity identical, so a `SENT` row from the old
+    credentials went on standing as evidence for the new ones — the staleness
+    `sent_via` exists to stop, one setting over.
+    """
+
+    def _sender(self, **overrides):
+        from app.services import delivery
+
+        kwargs = dict(
+            host="relay.example",
+            port=587,
+            username="user",
+            password="hunter2",
+            use_tls=True,
+            sender="linx@example",
+        )
+        kwargs.update(overrides)
+        return delivery.SmtpSender(**kwargs)
+
+    @pytest.mark.parametrize(
+        "change",
+        [
+            {"username": "somebody-else"},
+            {"password": "a-rotated-one"},
+            {"use_tls": False},
+            {"port": 2525},
+            {"host": "another-relay.example"},
+            {"sender": "someone@example"},
+        ],
+    )
+    def test_every_delivery_affecting_setting_changes_it(self, change: dict) -> None:
+        assert self._sender().identity != self._sender(**change).identity, (
+            f"changing {list(change)[0]} left the identity unchanged, so old "
+            "evidence would stand for the new configuration"
+        )
+
+    def test_the_same_configuration_is_stable(self) -> None:
+        """It has to be, or every deploy would invalidate its own evidence."""
+        assert self._sender().identity == self._sender().identity
+
+    def test_no_secret_appears_in_it(self) -> None:
+        """Written to every delivered row and read back onto an admin screen —
+        a password on a screen is a password in a screenshot."""
+        identity = self._sender().identity
+        assert "hunter2" not in identity
+        assert "user" not in identity.replace("linx@example", "")
+
+    def test_the_digest_is_salted_rather_than_a_bare_password_hash(self) -> None:
+        """Two deployments sharing a password must not share a digest, or the
+        digest is a lookup key for the password."""
+        import hashlib
+
+        bare = hashlib.sha256(b"hunter2").hexdigest()[:12]
+        assert bare not in self._sender().identity
+        assert (
+            self._sender().identity.split("#")[-1]
+            != self._sender(host="another-relay.example").identity.split("#")[-1]
+        )

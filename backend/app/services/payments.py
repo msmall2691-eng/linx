@@ -270,7 +270,15 @@ def platform_account_id() -> str | None:
     return resolved
 
 
-def connected_account_is_foreign(profile: CleanerProfile) -> bool:
+#: "Nobody passed one", as distinct from "resolved, and the answer is unknown".
+#: The second is a real value that must not be re-resolved; a plain `None`
+#: default could not tell the two apart.
+UNRESOLVED = object()
+
+
+def connected_account_is_foreign(
+    profile: CleanerProfile, *, platform: object = UNRESOLVED
+) -> bool:
     """Does this profile hold an account belonging to a *different* platform?
 
     **The single author of "is the stored account addressable from here".**
@@ -298,7 +306,19 @@ def connected_account_is_foreign(profile: CleanerProfile) -> bool:
     # both sides are known: an unresolved current platform (Stripe unreachable,
     # no key) must not turn every cleaner unpayable, and a NULL stored id is a
     # row from before this was recorded.
-    current = platform_account_id()
+    # **Resolved once by a caller that asks about many rows.**
+    #
+    # `platform_account_id` caches a success, and deliberately does not cache a
+    # failure — a Stripe blip must not become a permanent "unknown" for the
+    # life of the process. That is right, and it means an outage costs one
+    # 30-second call *per call site*: the launch check asks per cleaner and
+    # then once more, so N cleaners became N+1 sequential timeouts and an admin
+    # page that hangs for minutes.
+    #
+    # Passing the answer down fixes that structurally, with no clock and no
+    # expiry to tune: one resolution per readiness run, reused for every row.
+    # A caller with a single row passes nothing and resolves it itself.
+    current = platform_account_id() if platform is UNRESOLVED else platform
     if current and profile.stripe_platform_id:
         return profile.stripe_platform_id != current
     return False

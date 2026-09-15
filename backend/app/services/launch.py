@@ -264,7 +264,7 @@ def _stripe_mode() -> Check:
     )
 
 
-def _stripe_accounts_verified(profiles: list) -> Check:
+def _stripe_accounts_verified(profiles: list, current: str | None) -> Check:
     """**The mode is a floor, not the identity, so this compares platforms.**
 
     `stripe_account_livemode` catches the transition the launch order actually
@@ -281,7 +281,6 @@ def _stripe_accounts_verified(profiles: list) -> Check:
     the check most able to make it.
     """
     count = len(profiles)
-    current = payments.platform_account_id()
     if not current:
         return Check(
             "stripe_account_modes",
@@ -347,10 +346,18 @@ def _stripe_account_modes(db: Session) -> Check:
             "No cleaner has connected a payout account yet.",
         )
 
-    foreign = [p for p in profiles if payments.connected_account_is_foreign(p)]
+    # Resolved once for the whole run and handed to every caller below. Asking
+    # per row would cost one Stripe call per cleaner whenever the answer is not
+    # cached — which is exactly the case where each one takes the full timeout.
+    current = payments.platform_account_id()
+    foreign = [
+        p
+        for p in profiles
+        if payments.connected_account_is_foreign(p, platform=current)
+    ]
 
     if not foreign:
-        return _stripe_accounts_verified(profiles)
+        return _stripe_accounts_verified(profiles, current)
 
     return Check(
         "stripe_account_modes",

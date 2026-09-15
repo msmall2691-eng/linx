@@ -19,6 +19,7 @@ that leaves a person wondering whether they were told.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import smtplib
 from dataclasses import dataclass
@@ -111,9 +112,37 @@ class SmtpSender(Sender):
 
     @property
     def identity(self) -> str:
-        """Host, port and from-address — the three that decide whether a relay
-        accepts the message. Never the password."""
-        return f"{self.host}:{self.port} as {self.sender}"
+        """**Every setting that decides whether a delivery succeeds.**
+
+        The first version was host, port and from-address, which left three
+        out: changing `SMTP_USERNAME`, `SMTP_PASSWORD` or `SMTP_USE_TLS` to
+        something that fails kept the identity identical, so a `SENT` row from
+        the old credentials went on standing as evidence for the new ones —
+        the same staleness this field exists to stop, one setting over.
+
+        The readable half names the host so the launch check can say which
+        relay it means. The credentials go through a digest instead: this is
+        written to every delivered row and read back onto an admin screen, and
+        a password on a screen is a password in a screenshot.
+
+        It is **salted with the host, port and username** rather than being a
+        bare hash of the password, so the digest cannot be matched against a
+        precomputed table — the same reasoning as `source_feed_key` being a
+        digest because the feed URL is a credential. Truncated because what is
+        needed is "did this change", not a cryptographic commitment.
+        """
+        secrets_fingerprint = hashlib.sha256(
+            "|".join(
+                [
+                    self.host,
+                    str(self.port),
+                    self.username or "",
+                    self.password or "",
+                    "tls" if self.use_tls else "plain",
+                ]
+            ).encode()
+        ).hexdigest()[:12]
+        return f"{self.host}:{self.port} as {self.sender} #{secrets_fingerprint}"
 
     def send(self, message: Outgoing) -> None:
         email = EmailMessage()
