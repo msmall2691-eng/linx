@@ -15,7 +15,14 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from playwright.sync_api import expect
+
+# **`importorskip`, not a plain import.** The backend CI job installs
+# `requirements-dev.txt`, which has no playwright, and runs `pytest -q` over
+# this whole tree — so a module-scope `from playwright...` fails *collection*
+# and takes the entire backend suite down with it, which is exactly what it
+# did. Every other file in this directory already does it this way.
+playwright_api = pytest.importorskip("playwright.sync_api")
+expect = playwright_api.expect
 
 pytestmark = pytest.mark.e2e
 
