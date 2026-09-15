@@ -452,3 +452,52 @@ def test_archiving_every_property_says_so_too(page, live_server) -> None:
     page.goto(f"{live_server}/turnovers/bulk")
     expect(page.get_by_test_id("bulk-no-properties")).to_be_visible()
     expect(page.get_by_text("restore one", exact=False)).to_be_visible()
+
+
+def test_a_budget_of_only_symbols_is_refused(page, live_server) -> None:
+    """`$` or `,` strips to the empty string, which the shape test accepts and
+    `Number('')` reads as a perfectly finite **zero** — so a visibly non-empty
+    entry became a budget of nothing with no correction offered."""
+    _signup_owner(page, live_server)
+    _add_home(page, live_server, nickname="Symbol House")
+
+    page.goto(f"{live_server}/turnovers/bulk")
+    page.select_option("#property", label="Symbol House")
+    page.fill("#pasted", "2027-11-04")
+    page.get_by_role("button", name="Add these dates").click()
+    page.fill("#budget", "$")
+    page.get_by_role("button", name=re.compile("Add 1 as drafts")).click()
+
+    expect(page.get_by_text("dollars and cents", exact=False)).to_be_visible()
+    expect(page.get_by_test_id("bulk-result")).to_have_count(0)
+
+
+def test_more_dates_than_one_submission_takes_are_capped_and_named(
+    page, live_server
+) -> None:
+    """**Never build a list the server will refuse.** `create_many` rejects the
+    whole submission over `MAX_BULK_JOBS`, so letting the screen collect more
+    would leave the owner deleting rows by hand with no idea how many to
+    remove. A calendar reaches this easily with short stays inside the horizon.
+    """
+    from datetime import date, timedelta
+
+    _signup_owner(page, live_server)
+    _add_home(page, live_server, nickname="Too Many")
+
+    start = date.today() + timedelta(days=20)
+    dates = "\n".join(
+        (start + timedelta(days=offset)).strftime("%Y-%m-%d") for offset in range(105)
+    )
+
+    page.goto(f"{live_server}/turnovers/bulk")
+    page.select_option("#property", label="Too Many")
+    page.fill("#pasted", dates)
+    page.get_by_role("button", name="Add these dates").click()
+
+    expect(page.get_by_test_id("bulk-row")).to_have_count(100)
+    expect(page.get_by_text("were left out", exact=False)).to_be_visible()
+
+    # And the capped list is one the server actually accepts.
+    page.get_by_role("button", name=re.compile("Add 100 as drafts")).click()
+    expect(page.get_by_role("heading", name="100 drafts added")).to_be_visible()

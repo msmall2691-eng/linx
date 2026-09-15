@@ -3,7 +3,7 @@ import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 
 import Alert from '../components/Alert.jsx'
 import { apiFetch } from '../lib/api.js'
-import { useTimeZone } from '../lib/config.jsx'
+import { useMaxBulkJobs, useTimeZone } from '../lib/config.jsx'
 import {
   dollarsToCents,
   formatDateTime,
@@ -79,6 +79,7 @@ export function parsePastedDates(text) {
 export default function TurnoverBulkNew() {
   const navigate = useNavigate()
   const timeZone = useTimeZone()
+  const maxJobs = useMaxBulkJobs()
   const [params] = useSearchParams()
 
   const [properties, setProperties] = useState(null)
@@ -87,6 +88,7 @@ export default function TurnoverBulkNew() {
   const [pasted, setPasted] = useState('')
   const [pasteProblems, setPasteProblems] = useState([])
   const [cleared, setCleared] = useState(0)
+  const [leftOut, setLeftOut] = useState(0)
   // Read inside an async completion, which closes over the *old* state value —
   // a ref is what makes "is this still the selected property" answerable there.
   const propertyIdRef = useRef(propertyId)
@@ -127,14 +129,19 @@ export default function TurnoverBulkNew() {
     setPasteProblems(problems)
     if (parsed.length === 0) return
     setCleared(0)
-    setRows((current) => [
-      ...current,
-      ...parsed.map((row) => ({
-        id: `${row.date}-${Math.random().toString(36).slice(2, 8)}`,
-        checkout: `${row.date}T${row.time || defaultTime}`,
-        checkin: '',
-      })),
-    ])
+    setRows((current) => {
+      const room = Math.max(0, maxJobs - current.length)
+      const taken = parsed.slice(0, room)
+      setLeftOut(parsed.length - taken.length)
+      return [
+        ...current,
+        ...taken.map((row) => ({
+          id: `${row.date}-${Math.random().toString(36).slice(2, 8)}`,
+          checkout: `${row.date}T${row.time || defaultTime}`,
+          checkin: '',
+        })),
+      ]
+    })
     setPasted('')
   }
 
@@ -169,14 +176,28 @@ export default function TurnoverBulkNew() {
         return
       }
       setCleared(0)
-      setRows((current) => [
-        ...current,
-        ...answer.jobs.map((job, index) => ({
-          id: `file-${index}-${Math.random().toString(36).slice(2, 8)}`,
-          checkout: isoToZonedInput(job.checkout_at, timeZone),
-          checkin: job.checkin_at ? isoToZonedInput(job.checkin_at, timeZone) : '',
-        })),
-      ])
+      setRows((current) => {
+        // **Never build a list the server will refuse.** A calendar can carry
+        // more departures inside the sync horizon than one submission may
+        // create — short stays reach that easily — and `create_many` rejects
+        // the whole list rather than part of it, so the owner would have been
+        // left deleting rows by hand with no idea how many to remove.
+        //
+        // Capped, and the remainder is not lost: submitting these and
+        // uploading the same file again proposes the rest, and the ones
+        // already created come back as `already_there` rather than twice.
+        const room = Math.max(0, maxJobs - current.length)
+        const taken = answer.jobs.slice(0, room)
+        setLeftOut(answer.jobs.length - taken.length)
+        return [
+          ...current,
+          ...taken.map((job, index) => ({
+            id: `file-${index}-${Math.random().toString(36).slice(2, 8)}`,
+            checkout: isoToZonedInput(job.checkout_at, timeZone),
+            checkin: job.checkin_at ? isoToZonedInput(job.checkin_at, timeZone) : '',
+          })),
+        ]
+      })
     } catch (err) {
       if (askedFor === propertyIdRef.current) setError(err.message)
     } finally {
@@ -335,6 +356,7 @@ export default function TurnoverBulkNew() {
               }
               setRows([])
               setPasteProblems([])
+              setLeftOut(0)
               setPropertyId(e.target.value)
               setScope('')
             }}
@@ -384,6 +406,14 @@ export default function TurnoverBulkNew() {
                   </label>
                 )}
               </div>
+              {leftOut > 0 && (
+                <Alert kind="warning" className="mt-3">
+                  {leftOut} more {leftOut === 1 ? 'date was' : 'dates were'} left
+                  out, because one submission takes at most {maxJobs} jobs. Add
+                  these, then come back and add the rest — anything already on
+                  the schedule is skipped rather than repeated.
+                </Alert>
+              )}
               {cleared > 0 && (
                 <Alert kind="info" className="mt-3">
                   {cleared} row{cleared === 1 ? '' : 's'}{' '}

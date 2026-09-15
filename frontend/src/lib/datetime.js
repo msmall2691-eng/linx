@@ -139,6 +139,13 @@ export function formatCents(cents) {
 export function dollarsToCents(value) {
   if (value === '' || value === null || value === undefined) return null
   const cleaned = String(value).replace(/[$,\s]/g, '')
+  // A digit has to survive the cleaning. `$` or `,` or a run of spaces strips
+  // to the empty string, which the shape test below accepts and `Number('')`
+  // reads as a perfectly finite **zero** — so a visibly non-empty entry became
+  // a budget of nothing, with no correction offered. Empty input is already
+  // handled above and means "no budget"; this is about input that looked like
+  // one.
+  if (!/\d/.test(cleaned)) return null
   if (!/^\d*\.?\d{0,2}$/.test(cleaned)) return null
   const cents = Math.round(Number(cleaned) * 100)
   return Number.isFinite(cents) ? cents : null

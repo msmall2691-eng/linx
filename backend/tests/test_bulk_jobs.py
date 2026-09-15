@@ -643,3 +643,77 @@ class TestPagingOverATotalOrder:
         assert len(set(seen)) == 10, "a row appeared twice, so another is on no page"
         # And the pages, stitched together, are still one total order.
         assert seen == sorted(seen)
+
+
+class TestABodyIsRefusedBeforeItIsRead:
+    """**The limit has to be outside the router.**
+
+    With `UploadFile`, the multipart body is consumed and spooled *before* the
+    endpoint runs — and before its authentication dependency runs with it. A
+    check inside the handler therefore measures something that has already
+    arrived and already cost disk and bandwidth, for a caller who may never
+    have signed in. `storage.save` streams its writes and aborts on overrun,
+    which is right and still too late: Starlette has written the upload to a
+    temporary file of its own by then.
+    """
+
+    def test_a_body_over_the_limit_is_refused(
+        self, client: TestClient, make_user
+    ) -> None:
+        from app.config import settings
+
+        owner = make_user(role="owner")
+        prop = _property(client, owner)
+        resp = client.post(
+            f"/api/properties/{prop['id']}/calendars/read-file",
+            files={
+                "file": (
+                    "huge.ics",
+                    b"x" * (settings.max_request_bytes + 1024),
+                    "text/calendar",
+                )
+            },
+            headers=owner["auth"],
+        )
+        assert resp.status_code == 413
+
+    def test_it_refuses_before_authentication(self, client: TestClient) -> None:
+        """The part a handler cannot do. An unauthenticated caller would
+        otherwise have their whole body spooled before anything checked who
+        they were — 401 is an answer that arrives *after* the cost."""
+        from app.config import settings
+
+        resp = client.post(
+            f"/api/properties/{uuid.uuid4()}/calendars/read-file",
+            files={
+                "file": (
+                    "huge.ics",
+                    b"x" * (settings.max_request_bytes + 1024),
+                    "text/calendar",
+                )
+            },
+        )
+        assert resp.status_code == 413, (
+            "an anonymous caller got past the size limit to the auth check, "
+            "which means the body was read first"
+        )
+
+    def test_an_ordinary_request_is_untouched(
+        self, client: TestClient, make_user
+    ) -> None:
+        owner = make_user(role="owner")
+        prop = _property(client, owner)
+        resp = client.post(
+            "/api/turnovers/bulk",
+            json={"property_id": prop["id"], "jobs": _days(4)},
+            headers=owner["auth"],
+        )
+        assert resp.status_code == 201, resp.text
+
+    def test_the_bulk_limit_is_published_rather_than_copied(
+        self, client: TestClient
+    ) -> None:
+        """A screen that lets somebody build a list the API will refuse is a
+        form that lies, and a second constant is how the two drift apart."""
+        config = client.get("/api/config").json()
+        assert config["max_bulk_jobs"] == turnover_rules.MAX_BULK_JOBS

@@ -88,6 +88,14 @@ class Settings(BaseSettings):
     document_storage_dir: str = "var/documents"
     #: Upload ceiling. A phone photo of an ID is comfortably under this.
     max_document_bytes: int = 15 * 1024 * 1024
+    #: The largest request body this server will accept at all, enforced before
+    #: anything reads it (`app/middleware.py`).
+    #:
+    #: Comfortably above `max_document_bytes` because a multipart body carries
+    #: the file plus its envelope, and the point is to stop something absurd
+    #: rather than to second-guess the per-upload limits, which still apply and
+    #: are the ones that give a useful message.
+    max_request_bytes: int = 20 * 1024 * 1024
 
     # Background checks (phase 3). Without a key the manual provider is used
     # and an admin records the outcome by hand — see
