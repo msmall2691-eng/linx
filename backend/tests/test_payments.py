@@ -1329,6 +1329,113 @@ class TestUnconfigured:
 # --------------------------------------------------------------------------
 
 
+
+class TestALocalRefusalIsNotAnUnknownOutcome:
+    """**A refusal raised before the request leaves this process.**
+
+    Phase 9's live-mode gate refuses when a live key is configured without
+    `STRIPE_PLATFORM_ENTITY`. Nothing moved, so whatever the caller wrote
+    beforehand is still exactly true — but both handlers keyed on `exc.status`,
+    a proxy for "Stripe answered", and a local refusal has no status while
+    being the most definite outcome there is.
+
+    Read through that proxy it looked *unknown*, and guardrail 2 treats an
+    unknown outcome as permanently unsafe. The gate meant to protect the entity
+    would have quietly made jobs unpayable and moved collected money into the
+    ledger's unknown bucket. `outcome_known` is the question the handlers were
+    really asking.
+    """
+
+    def _completed(self, client, make_cleaner, make_open_turnover, db):
+        return _completed_job(
+            client, make_cleaner, make_open_turnover, db, price_cents=20_000
+        )
+
+    def test_a_refused_checkout_stays_payable(
+        self, client, make_cleaner, make_open_turnover, db: Session, stripe,
+    ) -> None:
+        """`start_checkout` refuses outright to re-charge a `requires_review`
+        row — correctly, for a genuinely unknown outcome. So marking a local
+        refusal that way makes the job unpayable for good, and a person has to
+        edit the database to undo it.
+
+        Raised through the fake, the way every other failure in this file is:
+        what is under test is the handler's mapping, not the gate itself (which
+        `test_launch.py` covers, and which this fixture replaces `post` to
+        bypass).
+        """
+        job = self._completed(client, make_cleaner, make_open_turnover, db)
+        turnover_id = job["turnover"]["id"]
+
+        stripe.failures["/checkout/sessions"] = (
+            stripe_client.StripeLiveModeUndeclared()
+        )
+        refused = client.post(
+            f"/api/turnovers/{turnover_id}/pay", headers=job["owner"]["auth"]
+        )
+        assert refused.status_code == 409, refused.text
+        assert "STRIPE_PLATFORM_ENTITY" in refused.text
+
+        row = _payment(db, turnover_id)
+        assert row.status is not PaymentStatus.REQUIRES_REVIEW, (
+            "a refusal that never reached Stripe was recorded as an unknown "
+            "outcome, which blocks this turnover from ever being paid"
+        )
+        assert row.status is PaymentStatus.FAILED
+
+        # The entity is declared and the owner tries again. It must go through.
+        stripe.failures.clear()
+        again = client.post(
+            f"/api/turnovers/{turnover_id}/pay", headers=job["owner"]["auth"]
+        )
+        assert again.status_code == 200, again.text
+
+    def test_a_refused_refund_leaves_the_collection_intact(
+        self, client, make_cleaner, make_open_turnover, db: Session, admin_user,
+        stripe, webhook_secret,
+    ) -> None:
+        """**The same misstatement, through a different door.**
+
+        Turning a settled payment into `requires_review` moves real collected
+        revenue into the ledger's `unknown_cents` bucket — exactly what the
+        four-bucket split was built to prevent.
+        """
+        job = self._completed(client, make_cleaner, make_open_turnover, db)
+        turnover_id = job["turnover"]["id"]
+        client.post(f"/api/turnovers/{turnover_id}/pay", headers=job["owner"]["auth"])
+        paid = _webhook(
+            client,
+            "checkout.session.completed",
+            {
+                "object": "checkout.session",
+                "id": "cs_test_gate",
+                "payment_status": "paid",
+                "payment_intent": "pi_test_gate",
+                "metadata": {"turnover_id": turnover_id},
+            },
+        )
+        assert paid.status_code == 200, paid.text
+
+        stripe.failures["/refunds"] = stripe_client.StripeLiveModeUndeclared()
+        refused = client.post(
+            f"/api/turnovers/{turnover_id}/refund",
+            json={"reason": "Disputed."},
+            headers=admin_user["auth"],
+        )
+        assert refused.status_code == 409, refused.text
+
+        row = _payment(db, turnover_id)
+        assert row.status is PaymentStatus.SUCCEEDED, (
+            "a refund refused before it left the process turned a collected "
+            "payment into money the ledger calls unknown"
+        )
+        assert row.refunded_amount_cents == 0
+
+        body = client.get("/api/admin/ledger", headers=admin_user["auth"]).json()
+        assert body["total_collected_cents"] == 20_000
+        assert body["total_unknown_cents"] == 0
+
+
 class TestTheAdminLedger:
     def test_the_ledger_never_drifts_on_a_real_settled_job(
         self, client: TestClient, make_cleaner, make_open_turnover, db: Session,

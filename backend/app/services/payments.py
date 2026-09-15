@@ -461,9 +461,16 @@ def start_checkout(
         )
     except stripe_client.StripeError as exc:
         # An unknown outcome is never assumed failed either. A refused request
-        # (Stripe answered) is a failure; an unreachable Stripe is not.
+        # is a failure; an unreachable Stripe is not.
+        #
+        # `outcome_known` rather than `status`: a refusal raised before the
+        # request leaves this process has no status and is the most definite
+        # outcome there is. Read through `status` it looked unknown, and
+        # `requires_review` is a permanent block on re-charging — so a live key
+        # set without `STRIPE_PLATFORM_ENTITY` would have made the turnover
+        # unpayable even after the variable was fixed.
         payment.status = (
-            PaymentStatus.FAILED if exc.status else PaymentStatus.REQUIRES_REVIEW
+            PaymentStatus.FAILED if exc.outcome_known else PaymentStatus.REQUIRES_REVIEW
         )
         payment.failure_message = str(exc)
         db.commit()
@@ -656,15 +663,23 @@ def refund_payment(db: Session, *, payment: PaymentIn, reason: str) -> PaymentIn
         # The same applies to a failure this code writes about itself.
         #
         # So the two branches say different things, because they are different
-        # facts. Stripe answering (`exc.status`) means the refund definitively
-        # did not happen: nothing moved, the pre-refund state is still exactly
-        # true, and restoring it is recording what is known rather than
-        # assuming success. Stripe not answering means the refund may or may
-        # not have gone through, and `requires_review` is the honest word for
-        # that — the whole amount's disposition is genuinely unknown, which is
-        # what the ledger's `unknown_cents` bucket says.
+        # facts. A known outcome means the refund definitively did not happen:
+        # nothing moved, the pre-refund state is still exactly true, and
+        # restoring it is recording what is known rather than assuming success.
+        # An unknown one means the refund may or may not have gone through, and
+        # `requires_review` is the honest word for that — the whole amount's
+        # disposition is genuinely unknown, which is what the ledger's
+        # `unknown_cents` bucket says.
+        #
+        # `outcome_known` rather than `status`, for the same reason as the
+        # charge path: a local refusal has no status and is entirely definite.
+        # Read through `status` it would turn a settled payment into unknown
+        # money on the ledger — the exact misstatement the four-bucket split
+        # exists to prevent, arriving through a different door.
         payment.status = (
-            PaymentStatus.SUCCEEDED if exc.status else PaymentStatus.REQUIRES_REVIEW
+            PaymentStatus.SUCCEEDED
+            if exc.outcome_known
+            else PaymentStatus.REQUIRES_REVIEW
         )
         payment.failure_message = f"refund failed: {exc}"
         db.commit()

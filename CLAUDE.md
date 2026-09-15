@@ -848,6 +848,19 @@ not stop a live key being pasted into a service that is already working: that
 change produces no error, fails no test, and surfaces at the end of a tax year
 as money having moved through the wrong legal person.
 
+**A refusal raised before the request leaves the process is a *known*
+outcome**, and `StripeError.outcome_known` is what says so. Both handlers used
+to key on `exc.status` — a proxy for "Stripe answered, so it rejected us and
+nothing moved" — which is exactly right while the only two outcomes are
+"answered" and "unreachable", and wrong for a local refusal, which has no
+status while being the most definite outcome there is. Read through the proxy
+the gate looked *unknown*, and guardrail 2 treats unknown as permanently
+unsafe: a checkout would have parked in `requires_review`, which
+`start_checkout` refuses to re-charge even after the variable is fixed, and a
+refund would have turned an already-settled payment into money the ledger
+reports as unknown. The gate protecting the entity would have made jobs
+unpayable and revenue vanish off the books.
+
 The variable holds the entity's **legal name**, not a boolean, because a
 confirmation flag is a box anybody ticks and a name is a sentence somebody has
 to mean. It cannot verify the name is true — nothing in this process can read
@@ -1033,6 +1046,11 @@ the newest notification and the newest calendar sync are both silent on a
 genuinely quiet pass, so "nothing happened" and "nothing ran" look identical.
 The pass records it itself — one row, overwritten, written **after** the work,
 because a pass that starts and dies is not evidence that anything was done.
+The write is one `INSERT ... ON CONFLICT DO UPDATE` rather than select-then-
+insert: this module promises the pass is safe to run as often as you like, and
+a manual run overlapping cron on a first deploy is precisely when there is no
+row yet — both would read `None`, both would insert, and the unique constraint
+would fail one of them *at commit*, after it had done all its real work.
 
 ## Working in this repo
 

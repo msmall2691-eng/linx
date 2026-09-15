@@ -35,6 +35,7 @@ from datetime import datetime, timedelta, timezone
 from time import monotonic
 
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -231,29 +232,39 @@ def record_run(db: Session, *, started: float, result: dict[str, int]) -> None:
     happened" and "nothing ran" look identical. The pass records it itself, and
     `app/services/launch.py` reads it.
 
-    Upserted on the unique `name`, so this stays one row answering one
-    question rather than a log nobody prunes.
+    **One statement, not select-then-insert.** This module's own docstring
+    promises the pass is safe to run as often as you like, and a manual run
+    overlapping cron — or two cron ticks on a first deploy — is exactly when
+    there is no row yet. Both passes would read `None`, both would insert, and
+    the unique constraint would fail one of them *at commit*: a pass that did
+    all of its real work and then died on the bookkeeping. The failure is most
+    likely on the very first deploy, which is the worst possible moment to
+    learn the readiness check cannot be trusted.
+
+    `ON CONFLICT (name) DO UPDATE` makes the database settle it. The last
+    writer wins, which is the right answer for a row whose whole meaning is
+    "most recently finished".
     """
     summary = ", ".join(f"{count} {label}" for label, count in result.items() if count)
-    finished = datetime.now(timezone.utc)
-    duration_ms = int((monotonic() - started) * 1000)
+    values = {
+        "name": launch.SCHEDULED_TASK_NAME,
+        "finished_at": datetime.now(timezone.utc),
+        "duration_ms": int((monotonic() - started) * 1000),
+        "summary": summary or "nothing due",
+    }
 
-    existing = db.execute(
-        select(TaskRun).where(TaskRun.name == launch.SCHEDULED_TASK_NAME)
-    ).scalars().first()
-    if existing is None:
-        db.add(
-            TaskRun(
-                name=launch.SCHEDULED_TASK_NAME,
-                finished_at=finished,
-                duration_ms=duration_ms,
-                summary=summary or "nothing due",
-            )
+    statement = pg_insert(TaskRun).values(**values)
+    db.execute(
+        statement.on_conflict_do_update(
+            index_elements=[TaskRun.name],
+            set_={
+                "finished_at": statement.excluded.finished_at,
+                "duration_ms": statement.excluded.duration_ms,
+                "summary": statement.excluded.summary,
+                "updated_at": statement.excluded.finished_at,
+            },
         )
-    else:
-        existing.finished_at = finished
-        existing.duration_ms = duration_ms
-        existing.summary = summary or "nothing due"
+    )
     db.commit()
 
 

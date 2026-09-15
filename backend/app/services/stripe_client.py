@@ -65,9 +65,40 @@ class StripeError(Exception):
         self.code = code
         self.status = status
 
+    @property
+    def outcome_known(self) -> bool:
+        """Whether we know this request changed nothing at Stripe.
+
+        **The question the callers were really asking.** They keyed on
+        `status` — Stripe answered, so it rejected us and nothing moved — and
+        that worked while the only two outcomes were "answered" and "could not
+        be reached". It is a proxy, though, and a refusal raised *before the
+        request leaves this process* has no status while being the most
+        definite outcome there is.
+
+        Read through the proxy, such a refusal looked unknown. Guardrail 2
+        treats an unknown outcome as permanently unsafe to retry, so a live key
+        set without `STRIPE_PLATFORM_ENTITY` would have parked a checkout in
+        `requires_review` — which `start_checkout` refuses to re-charge even
+        after the variable is fixed — and turned an already-settled payment
+        into one the ledger reports as unknown money.
+        """
+        return self.status is not None
+
 
 class StripeLiveModeUndeclared(StripeError):
-    """A live key is configured and nobody has said which entity owns it."""
+    """A live key is configured and nobody has said which entity owns it.
+
+    **The outcome is known**, and saying so is the whole reason this overrides
+    the property: the request never left the process, so nothing moved, and
+    whatever state the caller wrote before calling is still exactly true. The
+    fix is to set the variable and try again — which is only possible if the
+    row was not marked "unknown, never retry" on the way past.
+    """
+
+    @property
+    def outcome_known(self) -> bool:
+        return True
 
     def __init__(self) -> None:
         super().__init__(

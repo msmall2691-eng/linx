@@ -15,9 +15,11 @@ refused here for the same reason.
 from __future__ import annotations
 
 import os
+import threading
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.enums import UserRole
@@ -332,3 +334,78 @@ class TestEvidenceRatherThanMemory:
         check = _by_key(launch.run_checks(db), "payment_proven")
         assert check.state is State.ATTENTION
         assert "never been verified" in check.detail
+
+
+class TestALocalRefusalIsNotAnUnknownOutcome:
+    """**The gate must not poison the row it refuses.**
+
+    `StripeLiveModeUndeclared` is raised before the request leaves this
+    process, so nothing moved and whatever the caller wrote beforehand is still
+    exactly true. The handlers keyed on `exc.status`, which is a proxy for
+    "Stripe answered" — and a local refusal has no status while being the most
+    definite outcome there is.
+
+    Read through that proxy it looked *unknown*, and guardrail 2 treats an
+    unknown outcome as permanently unsafe. So the gate meant to protect the
+    entity would have quietly made jobs unpayable and money vanish off the
+    ledger.
+    """
+
+    def test_it_reports_its_outcome_as_known(self) -> None:
+        assert stripe_client.StripeLiveModeUndeclared().outcome_known is True
+        assert stripe_client.StripeError("could not reach Stripe").outcome_known is False
+        assert stripe_client.StripeError("no", status=402).outcome_known is True
+
+
+class TestTwoPassesAtOnce:
+    def test_overlapping_passes_both_record(
+        self, db: Session, own_session_per_request
+    ) -> None:
+        """**The pass promises it is safe to run as often as you like.**
+
+        Select-then-insert breaks that promise at the worst moment: on a first
+        deploy there is no row, so two overlapping passes both read `None`,
+        both insert, and the unique constraint fails one of them *at commit* —
+        after it has done all of its real work.
+        """
+        from app.db import SessionLocal
+        from app.tasks import scheduled
+
+        db.commit()  # release this session's snapshot before the race
+
+        start = threading.Barrier(2)
+        errors: list[Exception] = []
+
+        def record(name: str) -> None:
+            session = SessionLocal()
+            try:
+                start.wait(timeout=10)
+                scheduled.record_run(
+                    session, started=0.0, result={"reminders": 1}
+                )
+            except Exception as exc:  # noqa: BLE001 - the point of the test
+                errors.append(exc)
+            finally:
+                session.close()
+
+        threads = [
+            threading.Thread(target=record, args=("first",)),
+            threading.Thread(target=record, args=("second",)),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=30)
+            assert not thread.is_alive(), "a pass never returned — deadlock?"
+
+        assert not errors, f"an overlapping pass failed on the bookkeeping: {errors}"
+
+        db.expire_all()
+        from sqlalchemy import func
+
+        count = db.execute(
+            select(func.count()).select_from(TaskRun).where(
+                TaskRun.name == launch.SCHEDULED_TASK_NAME
+            )
+        ).scalar_one()
+        assert count == 1, "still one row answering one question"
