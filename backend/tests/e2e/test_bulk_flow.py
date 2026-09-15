@@ -439,8 +439,15 @@ def test_archiving_every_property_says_so_too(page, live_server) -> None:
     page.goto(f"{live_server}/properties")
     page.get_by_role("link", name="Gone Away").click()
     page.wait_for_url(PROPERTY_DETAIL)
-    page.once("dialog", lambda dialog: dialog.accept())
-    page.get_by_role("button", name=re.compile("Archive")).click()
+    page.get_by_role("button", name="Archive this property").click()
+
+    # **Wait on the thing that can only be true once the archive has landed.**
+    # `handleArchive` awaits the DELETE and only then navigates, so this is the
+    # request completing rather than a guess at how long it takes. Navigating
+    # straight to the bulk screen passed locally and failed in CI, which is the
+    # same trap `test_owner_flow` already names: a setup step that returns
+    # before its own work has landed poisons everything after it.
+    page.wait_for_url(re.compile(r"/properties$"))
 
     page.goto(f"{live_server}/turnovers/bulk")
     expect(page.get_by_test_id("bulk-no-properties")).to_be_visible()
