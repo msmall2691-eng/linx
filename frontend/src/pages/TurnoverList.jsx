@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 
 import Alert from '../components/Alert.jsx'
@@ -24,6 +24,13 @@ export default function TurnoverList() {
   const [error, setError] = useState(null)
   const [more, setMore] = useState(false)
   const [loadingMore, setLoadingMore] = useState(false)
+  // Read inside an async completion, which closes over the filter as it was
+  // when the page was asked for — comparing against that would always agree
+  // with itself. Same shape as the upload guard on the bulk screen.
+  const showFinishedRef = useRef(showFinished)
+  useEffect(() => {
+    showFinishedRef.current = showFinished
+  }, [showFinished])
 
   useEffect(() => {
     let cancelled = false
@@ -56,18 +63,25 @@ export default function TurnoverList() {
    * be opened.
    */
   async function loadMore() {
+    // **Which list this page belongs to.** Toggling the filter restarts the
+    // effect, which sets `turnovers` back to null and asks for a different
+    // list. A page still in flight from the old filter would then either
+    // spread `null` and blank the screen, or append finished jobs into a list
+    // that is not showing them — whichever landed second.
+    const askedFor = showFinished
     setLoadingMore(true)
     try {
       const next = await apiFetch(
-        `/turnovers?include_finished=${showFinished}&limit=${PAGE}` +
+        `/turnovers?include_finished=${askedFor}&limit=${PAGE}` +
           `&offset=${turnovers.length}`,
       )
-      setTurnovers((current) => [...current, ...next])
+      if (askedFor !== showFinishedRef.current) return
+      setTurnovers((current) => (current ? [...current, ...next] : next))
       setMore(next.length === PAGE)
     } catch (err) {
-      setError(err.message)
+      if (askedFor === showFinishedRef.current) setError(err.message)
     } finally {
-      setLoadingMore(false)
+      if (askedFor === showFinishedRef.current) setLoadingMore(false)
     }
   }
 

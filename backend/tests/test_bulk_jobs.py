@@ -574,3 +574,72 @@ class TestAnUploadedCalendar:
         rental = _property(client, owner)
         resp = _upload(client, owner, rental["id"], _ics(_stay(5, "a")))
         assert resp.status_code == 200, resp.text
+
+
+class TestPagingOverATotalOrder:
+    """`offset` is only meaningful over an order SQL actually defines.
+
+    Ordering by `checkout_at` alone leaves rows sharing an instant in an
+    undefined order, and nothing obliges the database to pick the same one
+    twice — so two pages can repeat a row and skip another, putting a job on no
+    page at all. That is the same failure the paging was added to fix, one
+    level down.
+
+    Ties are not exotic here: an owner with several properties on the same
+    default checkout hour makes them by the dozen, and `create_many` writes a
+    season of them at once.
+
+    **These assert the order rather than comparing two pages**, which is the
+    only honest way to test this. Postgres is free to return ties in any order
+    and in practice returns them consistently, so paging twice and finding the
+    same rows passes just as well without the tiebreaker as with it — the first
+    version of this test did exactly that and proved nothing. Ids are random
+    uuid4s, so an id-ascending tie group is not something an arbitrary plan
+    produces by accident.
+    """
+
+    def _tied_jobs(self, client: TestClient, owner: dict, count: int) -> str:
+        when = (datetime.now(timezone.utc) + timedelta(days=12)).isoformat()
+        for _ in range(count):
+            prop = _property(client, owner)
+            created = client.post(
+                "/api/turnovers/bulk",
+                json={"property_id": prop["id"], "jobs": [{"checkout_at": when}]},
+                headers=owner["auth"],
+            )
+            assert created.status_code == 201, created.text
+        return when
+
+    def test_rows_sharing_an_instant_come_back_in_id_order(
+        self, client: TestClient, make_user
+    ) -> None:
+        owner = make_user(role="owner")
+        self._tied_jobs(client, owner, 10)
+
+        rows = client.get("/api/turnovers?limit=50", headers=owner["auth"]).json()
+        ids = [row["id"] for row in rows]
+        assert len(ids) == 10
+        assert ids == sorted(ids), (
+            "ties came back in an order the database chose, which it is free to "
+            "choose differently next time — so a row can fall between two pages"
+        )
+
+    def test_every_row_appears_on_exactly_one_page(
+        self, client: TestClient, make_user
+    ) -> None:
+        """The failure this prevents, stated as the owner would meet it."""
+        owner = make_user(role="owner")
+        self._tied_jobs(client, owner, 10)
+
+        seen: list[str] = []
+        for offset in range(0, 10, 3):
+            page = client.get(
+                f"/api/turnovers?limit=3&offset={offset}", headers=owner["auth"]
+            )
+            assert page.status_code == 200, page.text
+            seen.extend(row["id"] for row in page.json())
+
+        assert len(seen) == 10
+        assert len(set(seen)) == 10, "a row appeared twice, so another is on no page"
+        # And the pages, stitched together, are still one total order.
+        assert seen == sorted(seen)

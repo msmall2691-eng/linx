@@ -290,7 +290,15 @@ def list_turnovers(
 
     # Soonest checkout first: the thing an owner is about to have a problem with
     # is the one nearest in time, not the one highest on the ladder in a month.
-    stmt = stmt.order_by(Turnover.checkout_at).limit(limit).offset(offset)
+    # **A tiebreaker, because `offset` is only meaningful over a total order.**
+    # `checkout_at` alone leaves rows that share an instant in an order SQL does
+    # not define, and it does not have to pick the same one twice: two pages can
+    # then repeat a row and skip another, which puts a job on no page at all.
+    # Ties are not exotic here — an owner with several properties on the same
+    # default checkout hour produces them by the dozen, and `create_many` writes
+    # a season of them in one go. `disputes.award_for` already pages this way
+    # (`awarded_at.desc(), id.desc()`); this is the same rule.
+    stmt = stmt.order_by(Turnover.checkout_at, Turnover.id).limit(limit).offset(offset)
 
     turnovers = list(db.execute(stmt).scalars().all())
     refresh_urgency(db, turnovers)

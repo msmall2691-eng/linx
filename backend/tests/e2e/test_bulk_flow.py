@@ -320,3 +320,41 @@ def test_an_upload_that_lands_after_a_switch_is_discarded(page, live_server) -> 
     # The answer for Pier View arrives while Oak Cottage is selected.
     page.wait_for_timeout(2000)
     expect(page.get_by_test_id("bulk-row")).to_have_count(0)
+
+
+def test_a_page_in_flight_does_not_land_in_a_different_list(page, live_server) -> None:
+    """Toggling the filter restarts the list, so a page still in flight from
+    the old filter would either spread `null` and blank the screen or append
+    finished jobs into a list that is not showing them — whichever landed
+    second."""
+    from datetime import date, timedelta
+
+    _signup_owner(page, live_server)
+    _add_home(page, live_server, nickname="Paged House")
+
+    start = date.today() + timedelta(days=30)
+    dates = "\n".join(
+        (start + timedelta(days=offset)).strftime("%Y-%m-%d") for offset in range(60)
+    )
+    page.goto(f"{live_server}/turnovers/bulk")
+    page.select_option("#property", label="Paged House")
+    page.fill("#pasted", dates)
+    page.get_by_role("button", name="Add these dates").click()
+    page.get_by_role("button", name=re.compile("Add 60 as drafts")).click()
+    expect(page.get_by_role("heading", name="60 drafts added")).to_be_visible()
+
+    page.goto(f"{live_server}/turnovers")
+    expect(page.get_by_test_id("status-badge")).to_have_count(50)
+
+    # Hold the second page open, then toggle the filter under it.
+    page.route(
+        "**/turnovers?include_finished=false&limit=50&offset=50",
+        lambda route: (page.wait_for_timeout(1500), route.continue_()),
+    )
+    page.get_by_test_id("load-more").click()
+    page.get_by_label("Show completed and cancelled").check()
+
+    page.wait_for_timeout(2500)
+    # The screen is whole, and shows the filter that was asked for last.
+    expect(page.get_by_role("heading", name="Turnovers")).to_be_visible()
+    expect(page.get_by_test_id("status-badge")).to_have_count(50)
