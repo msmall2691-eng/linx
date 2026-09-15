@@ -237,16 +237,53 @@ def _return_urls(path: str) -> tuple[str, str]:
     return f"{base}{path}?stripe=refresh", f"{base}{path}?stripe=return"
 
 
+def connected_account_is_foreign(profile: CleanerProfile) -> bool:
+    """Does this profile hold an account belonging to a *different* platform?
+
+    **The single author of "is the stored account addressable from here".**
+
+    Stripe objects are mode-scoped and the id does not say which mode it came
+    from, so `stripe_account_id is not None` is a proxy for "this cleaner has a
+    connected account" that stops being true the moment the platform changes —
+    which phase 9's launch order does on purpose, between walking a job through
+    in test mode on the deployed site and setting the live key.
+
+    A NULL `stripe_account_livemode` is a row written before the mode was
+    recorded, and counts as foreign for the same reason guardrail 2 refuses to
+    read an unknown Stripe outcome as a success: not knowing is not the same as
+    knowing it is fine.
+
+    False when there is no stored account at all — that is "not set up yet",
+    which `payout_blocker` already has its own words for.
+    """
+    if not profile.stripe_account_id:
+        return False
+    return profile.stripe_account_livemode is not stripe_client.live_mode()
+
+
 def ensure_connected_account(db: Session, *, user: User, profile: CleanerProfile) -> str:
-    """The cleaner's Express account, created once and remembered.
+    """The cleaner's Express account on *this* platform, created once.
 
     **Express, not Custom.** Identity verification and 1099 reporting sit with
     Stripe, the same reasoning as Checkr collecting the SSN: regulated data we
     never hold is regulated data we cannot lose.
+
+    An account belonging to another mode is replaced rather than returned. This
+    is the onboarding path — somebody is deliberately connecting payouts to the
+    platform that is running now — so creating the account they are asking for
+    is the answer, and the reset flags below mean `payout_blocker` keeps
+    refusing until they have actually finished. The charge path does the
+    opposite and refuses outright, because there nobody has asked for anything
+    and a silent new account would be a guess about somebody's money.
+
+    The replaced id is not the only record of the old account: it is on
+    Stripe's side too, carrying `metadata.cleaner_profile_id`, so a platform
+    switched by mistake loses a pointer rather than an account.
     """
-    if profile.stripe_account_id:
+    if profile.stripe_account_id and not connected_account_is_foreign(profile):
         return profile.stripe_account_id
 
+    livemode = stripe_client.live_mode()
     account = stripe_client.post(
         "/accounts",
         {
@@ -258,11 +295,19 @@ def ensure_connected_account(db: Session, *, user: User, profile: CleanerProfile
         },
         # Derived from the profile, so a double-click cannot leave one cleaner
         # holding two connected accounts with the money going to whichever one
-        # a later call happens to read.
-        idempotency_key=f"connect:account:{profile.id}",
+        # a later call happens to read. The mode is in the key because the key
+        # is only unique within one, and a replacement account on a new
+        # platform is a different request rather than a retry of the old one.
+        idempotency_key=f"connect:account:{'live' if livemode else 'test'}:{profile.id}",
     )
 
     profile.stripe_account_id = account["id"]
+    profile.stripe_account_livemode = livemode
+    # Both are facts about the account being replaced, and neither carries
+    # over. A cleaner whose test-mode account was enabled has not been through
+    # anything in live mode.
+    profile.stripe_payouts_enabled = False
+    profile.stripe_details_submitted = False
     db.commit()
     return profile.stripe_account_id
 
@@ -301,6 +346,11 @@ def refresh_connect_status(db: Session, profile: CleanerProfile) -> CleanerProfi
     """
     if not profile.stripe_account_id:
         return profile
+    # Asking this platform about another platform's account is a 404, and the
+    # answer would be written onto the row as though it were Stripe's verdict
+    # on the cleaner. `payout_blocker` says what is wrong; this stays quiet.
+    if connected_account_is_foreign(profile):
+        return profile
 
     account = stripe_client.get(f"/accounts/{profile.stripe_account_id}")
     profile.stripe_payouts_enabled = bool(account.get("payouts_enabled"))
@@ -318,6 +368,17 @@ def payout_blocker(profile: CleanerProfile | None) -> str | None:
     """
     if profile is None or not profile.stripe_account_id:
         return "The cleaner has not set up payouts yet."
+    if connected_account_is_foreign(profile):
+        # Refused, never corrected. The stored flags say this cleaner can be
+        # paid, and they are true about a platform this process is no longer
+        # talking to — so the one thing that must not happen is a destination
+        # charge naming an account that does not exist, which collects the
+        # owner's money and leaves the transfer with nowhere to go.
+        return (
+            "The cleaner's payout account was set up on a different Stripe "
+            "platform and does not exist on this one. They need to connect "
+            "payouts again before they can be paid."
+        )
     if not profile.stripe_payouts_enabled:
         if profile.stripe_details_submitted:
             return "Stripe is still verifying the cleaner's payout account."

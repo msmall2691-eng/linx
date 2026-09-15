@@ -1025,8 +1025,8 @@ something is merely unexamined. Three items are permanently in that state: whose
 entity the Connect account belongs to, whether anybody has walked a candidate
 through Checkr, and whether a human actually works the dispute inbox.
 
-**Set is not the same as usable, and truthiness is the third proxy this
-module got caught on.** `PUBLIC_BASE_URL=http://localhost:5173` is the value
+**Set is not the same as usable, and truthiness is the proxy this module got
+caught on three times.** `PUBLIC_BASE_URL=http://localhost:5173` is the value
 the README documents for development and a perfectly truthy string; carried
 into a deployment it made the check say Stripe can send people back while
 `payments._app_base()` used it verbatim, so an owner finishing a payment and a
@@ -1047,6 +1047,46 @@ an empty list: the check saying yes to precisely the failure it exists to
 catch. `_payment_proven` hand-copied `{succeeded, refunded}`, which *is*
 `payments.SETTLED_STATUSES` — latent only because the two agreed. Both now call
 the owner, so the next change to either rule arrives here on its own.
+
+The same mistake twice more, in its other two spellings. `SECRET_KEY` was
+checked for inequality with the development placeholder — which is what
+`config.py` checked too, so `SECRET_KEY=` and `SECRET_KEY=x` booted the service
+and turned the check green while every JWT was signed with a guessable value,
+and anybody holding an ordinary token could forge an admin one.
+`config.weak_secret_key` is now the one author and both ask it; length is the
+floor rather than an entropy measure, because nothing here can tell a random
+string from a memorable one and a check that claimed to would be this module's
+own lie. And `PUBLIC_BASE_URL` was checked as a URL when it is an *origin*:
+`payments._app_base()` appends `/cleaner/profile` to it, so a query or fragment
+does not sit where a path can follow, and `https://linx.example#preview` sends
+the browser to the site root with the callback buried in the fragment — almost
+right, which is worse than nowhere.
+
+**`SMTP_HOST` set is not `SMTP_HOST` working**, so that check has three answers
+rather than two, the same shape as `_payment_proven`: no host blocks, a host
+with a delivered notification behind it is ready, and a host nobody has
+successfully sent through is `attention` — the honest description of a fresh
+deployment. An unreachable host, a refused credential or a sender address the
+relay rejects all fail at send time and every notification sits `failed`, which
+a check titled *Notifications are actually sent* used to report as ready.
+
+**A connected account belongs to a platform, and the id does not say which.**
+Stripe objects are mode-scoped: an `acct_…` created with a test key does not
+exist to a live key. That is latent only while the platform never changes, and
+the launch order changes it on purpose — walk a job end to end on the deployed
+site in test mode, *then* set the live key. The three `cleaner_profiles.stripe_*`
+fields were facts about some platform with nothing saying which, so every
+cleaner would have carried a test-mode account with `stripe_payouts_enabled`
+true, `payout_blocker` would have found nothing missing, and the first live
+destination charge would have named an account that does not exist: the owner
+charged and the transfer with nowhere to go, every row valid.
+`stripe_account_livemode` records it, and `payments.connected_account_is_foreign`
+is its one reader — NULL counts as foreign, because not knowing which platform
+an account is on is not knowing it is this one. The charge path **refuses**,
+naming the remedy; the onboarding path **replaces**, because there somebody is
+deliberately connecting to the platform that is running now, and resetting the
+two flags keeps them refused until they actually finish. Migration 0009 does
+not backfill a guess.
 
 **Everything checked fails silently.** Anything that shouts on its own — a bad
 `DATABASE_URL`, a missing `SECRET_KEY` — already stops the boot in

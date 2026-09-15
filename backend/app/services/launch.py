@@ -44,7 +44,10 @@ from urllib.parse import urlparse
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.config import DEV_SECRET_KEY, settings
+from app.config import MIN_SECRET_KEY_LENGTH, settings, weak_secret_key
+from app.models.cleaner_profile import CleanerProfile
+from app.models.enums import NotificationStatus
+from app.models.notification import Notification
 from app.models.payment import PaymentIn
 from app.models.task_run import TaskRun
 from app.services import notifications, payments, stripe_client
@@ -106,12 +109,23 @@ def _environment() -> Check:
 
 
 def _secret_key() -> Check:
+    """**Asks `config.weak_secret_key` rather than re-deriving the rule.**
+
+    This tested inequality with the development placeholder, which is what the
+    settings validator tested too — so `SECRET_KEY=` and `SECRET_KEY=x` booted
+    the service and turned this check green while every JWT was signed with a
+    guessable value. Both now call the one function, so the next change to what
+    counts as a real key arrives here on its own.
+    """
+    problem = weak_secret_key(settings.secret_key)
     return _check(
         "secret_key",
         "Signing key is a real one",
-        settings.secret_key != DEV_SECRET_KEY,
-        when_true="SECRET_KEY is set to something other than the development value.",
-        when_false="SECRET_KEY is still the development placeholder.",
+        problem is None,
+        when_true=f"SECRET_KEY is set, and is at least {MIN_SECRET_KEY_LENGTH} "
+        "characters of something other than the development value.",
+        when_false=f"{problem} Anybody holding an ordinary token could forge an "
+        "admin one, which is the whole of the role gate.",
         remedy='python -c "import secrets; print(secrets.token_urlsafe(48))"',
     )
 
@@ -250,6 +264,49 @@ def _stripe_mode() -> Check:
     )
 
 
+def _stripe_account_modes(db: Session) -> Check:
+    """Do any cleaners hold a connected account from the other platform?
+
+    **The launch order is what makes this reachable**, which is why it is a
+    check rather than a note. Step 2 walks a job end to end on the deployed
+    site with test-mode keys — writing a test-mode `acct_…` and an enabled
+    payout flag onto a real cleaner profile — and step 5 sets the live key.
+    Everything about those rows still looks correct afterwards; they are just
+    describing a platform that is no longer being talked to.
+
+    `payments.connected_account_is_foreign` is the author of that question and
+    is asked here per row rather than restated as SQL, so the two cannot come
+    apart. The rows are few at launch and this runs at deploy time.
+    """
+    profiles = db.execute(
+        select(CleanerProfile).where(CleanerProfile.stripe_account_id.is_not(None))
+    ).scalars().all()
+    foreign = [p for p in profiles if payments.connected_account_is_foreign(p)]
+
+    if not foreign:
+        return Check(
+            "stripe_account_modes",
+            "Payout accounts belong to this platform",
+            State.READY,
+            f"{len(profiles)} cleaner(s) have a connected account, and every "
+            "one of them was created on the platform now configured.",
+        )
+
+    return Check(
+        "stripe_account_modes",
+        "Payout accounts belong to this platform",
+        State.BLOCKED,
+        f"{len(foreign)} of {len(profiles)} connected account(s) were created "
+        "on a different Stripe platform, or before the mode was recorded. "
+        "Stripe objects are mode-scoped, so a destination charge naming one "
+        "collects the owner's money and leaves the transfer with nowhere to "
+        "go. Those cleaners are refused at the payment step until they "
+        "reconnect.",
+        "Have each of those cleaners open their profile and connect payouts "
+        "again, which creates their account on this platform.",
+    )
+
+
 def _stripe_webhook() -> Check:
     return _check(
         "stripe_webhook",
@@ -307,6 +364,18 @@ def _unusable_base_url(raw: str) -> str | None:
         return (
             f"{raw} is plain HTTP. Stripe returns people over the public "
             "internet and this is the URL they land on."
+        )
+    # An origin, not a URL. `payments._app_base()` appends `/turnovers/...` or
+    # `/cleaner/profile` to whatever this is, so a query or a fragment does not
+    # sit where a path can follow it: `https://linx.example#preview` becomes
+    # `https://linx.example#preview/cleaner/profile`, which is the site root
+    # with the callback buried in the fragment. The browser arrives somewhere
+    # that looks almost right, which is worse than arriving nowhere.
+    if parsed.query or parsed.fragment or parsed.params:
+        return (
+            f"{raw} carries a query or a fragment. Return paths are appended "
+            "to this value, so they would land after it and never be read as "
+            "a path at all."
         )
     return None
 
@@ -392,17 +461,75 @@ def _payment_proven(db: Session) -> Check:
 # --------------------------------------------------------------------------
 
 
-def _email_sender() -> Check:
-    return _check(
+def _email_sender(db: Session) -> Check:
+    """**Configured is not the same as delivering** — the same shape as
+    `_payment_proven`, and for the same reason.
+
+    `SMTP_HOST` being set says a sender will be constructed, not that it will
+    succeed. An unreachable host, a refused credential or a sender address the
+    relay will not accept all raise `DeliveryError`, `deliver_pending` writes
+    `failed` with the reason, and nobody receives anything — while a check
+    titled *Notifications are actually sent* reported ready. That is the
+    truthiness mistake one more time, and this module is supposed to be where
+    it stops.
+
+    So there are three answers rather than two, and the middle one is the
+    honest description of a fresh deployment: **configured, with nothing
+    delivered yet.** A sent row is the evidence, and `deliver_pending` only
+    writes `SENT` when a sender reported the message gone.
+    """
+    if not settings.smtp_host:
+        return Check(
+            "email",
+            "Notifications are actually sent",
+            State.BLOCKED,
+            "SMTP_HOST is not set. Every notification is recorded and logged, "
+            "and every one stays `pending`, because nothing is sent. Nobody is "
+            "told anything — an owner learns their cleaner cancelled by "
+            "arriving at a dirty house.",
+            "Set SMTP_HOST and its credentials.",
+        )
+
+    sent = db.execute(
+        select(func.count())
+        .select_from(Notification)
+        .where(Notification.status == NotificationStatus.SENT)
+    ).scalar_one()
+    if sent:
+        return Check(
+            "email",
+            "Notifications are actually sent",
+            State.READY,
+            f"SMTP_HOST is {settings.smtp_host}, and {sent} notification(s) "
+            "have been delivered from this database.",
+        )
+
+    failed = db.execute(
+        select(func.count())
+        .select_from(Notification)
+        .where(Notification.status == NotificationStatus.FAILED)
+    ).scalar_one()
+    detail = (
+        f"SMTP_HOST is {settings.smtp_host}, but nothing has ever been "
+        "delivered from this database"
+    )
+    detail += (
+        f", and {failed} notification(s) have failed. Something is configured "
+        "but not working."
+        if failed
+        else ". Set is not the same as reachable: a bad host, a refused "
+        "credential or a sender address the relay will not accept all fail at "
+        "send time, and every notification then sits `failed` while nobody "
+        "hears anything."
+    )
+    return Check(
         "email",
         "Notifications are actually sent",
-        bool(settings.smtp_host),
-        when_true=f"SMTP_HOST is {settings.smtp_host}.",
-        when_false="SMTP_HOST is not set. Every notification is recorded and "
-        "logged, and every one stays `pending`, because nothing is sent. "
-        "Nobody is told anything — an owner learns their cleaner cancelled by "
-        "arriving at a dirty house.",
-        remedy="Set SMTP_HOST and its credentials.",
+        State.ATTENTION,
+        detail,
+        "Trigger one real notification — post a turnover, or bid on one — and "
+        "confirm it arrives rather than landing in the notifications table as "
+        "`failed`.",
     )
 
 
@@ -548,11 +675,12 @@ def run_checks(db: Session, *, now: datetime | None = None) -> list[Check]:
         _cors(),
         _document_storage(),
         _admin_exists(db),
-        _email_sender(),
+        _email_sender(db),
         _scheduled_pass(db, now=now),
         _stripe_configured(),
         _stripe_mode(),
         _stripe_webhook(),
+        _stripe_account_modes(db),
         _public_base_url(),
         _payment_proven(db),
         *_declared_only(),

@@ -134,6 +134,23 @@ class CleanerProfile(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     stripe_details_submitted: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default="false"
     )
+    #: **Which Stripe platform the account above belongs to.**
+    #:
+    #: Stripe objects are mode-scoped: an `acct_…` created with a test key does
+    #: not exist to a live key, and the id does not say which it is. Without
+    #: this column the three fields above are a claim about *some* platform,
+    #: and the launch order walks a job through in test mode on the deployed
+    #: site and then swaps in the live key — so every cleaner would carry a
+    #: test-mode account and `stripe_payouts_enabled = true`, the payout guard
+    #: would see nothing missing, and the first live destination charge would
+    #: name an account that does not exist.
+    #:
+    #: NULL means the account predates this column and its mode is unknown,
+    #: which is treated exactly like a mismatch: guardrail 2's rule that an
+    #: unknown outcome is never assumed to be the good one.
+    stripe_account_livemode: Mapped[bool | None] = mapped_column(
+        Boolean, nullable=True
+    )
 
     #: Read-only. Computed by Postgres; assigning to it raises on flush.
     can_take_jobs: Mapped[bool] = mapped_column(

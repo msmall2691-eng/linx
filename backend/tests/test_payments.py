@@ -138,6 +138,10 @@ def _payout_ready(db: Session, cleaner: dict) -> CleanerProfile:
     profile.stripe_account_id = f"acct_{profile.id.hex[:12]}"
     profile.stripe_details_submitted = True
     profile.stripe_payouts_enabled = True
+    # Which platform those three facts are about. The fake runs on a test key,
+    # so this is a cleaner onboarded here — without it the row describes an
+    # account of unknown mode, which `payout_blocker` now refuses, and rightly.
+    profile.stripe_account_livemode = False
     db.commit()
     return profile
 
@@ -1615,3 +1619,138 @@ class TestTheAdminLedger:
             "a cleaner was paid for a payment that never succeeded, and the "
             "ledger said nothing"
         )
+
+
+class TestAnAccountBelongsToAPlatform:
+    """**Stripe objects are mode-scoped, and the id does not say which.**
+
+    An `acct_…` created with a test key does not exist to a live key. Until the
+    mode was recorded, `stripe_account_id is not None` was a proxy for "this
+    cleaner has a connected account" — true right up until the platform
+    changed, which phase 9's own launch order does on purpose: walk a job end
+    to end on the deployed site in test mode, then set the live key.
+
+    Everything about the row still looks right afterwards. The account id is
+    there, `stripe_payouts_enabled` is true because the *test-mode* account
+    really was enabled, and the payout guard finds nothing missing. The first
+    live destination charge then names an account that is not there: the owner
+    is charged and the transfer has nowhere to go.
+    """
+
+    def test_a_test_mode_account_is_foreign_once_the_key_goes_live(
+        self, db: Session, stripe, make_cleaner, monkeypatch
+    ) -> None:
+        cleaner = make_cleaner(cleared=True)
+        profile = _payout_ready(db, cleaner)
+        assert payments.payout_blocker(profile) is None
+
+        monkeypatch.setattr(settings, "stripe_secret_key", "sk_live_real")
+        assert payments.connected_account_is_foreign(profile)
+        blocker = payments.payout_blocker(profile)
+        assert blocker is not None, (
+            "a test-mode account read as payable under a live key — the "
+            "destination charge would name an account that does not exist"
+        )
+        assert "different Stripe platform" in blocker
+
+    def test_an_unknown_mode_is_not_assumed_to_match(
+        self, db: Session, stripe, make_cleaner
+    ) -> None:
+        """Guardrail 2's rule, applied to a column rather than to a response.
+
+        NULL is a row written before the mode was recorded. Not knowing which
+        platform an account belongs to is not the same as knowing it is this
+        one, and the migration deliberately does not backfill a guess.
+        """
+        cleaner = make_cleaner(cleared=True)
+        profile = _payout_ready(db, cleaner)
+        profile.stripe_account_livemode = None
+        db.commit()
+        assert payments.connected_account_is_foreign(profile)
+        assert payments.payout_blocker(profile) is not None
+
+    def test_the_charge_path_refuses_rather_than_guessing(
+        self, db: Session, stripe, client, make_cleaner, make_open_turnover, monkeypatch
+    ) -> None:
+        """The whole point: no destination charge names a foreign account."""
+        job = _completed_job(client, make_cleaner, make_open_turnover, db)
+        owner, turnover, cleaner = job["owner"], job["turnover"], job["cleaner"]
+        profile = db.execute(
+            select(CleanerProfile).where(
+                CleanerProfile.user_id == uuid.UUID(cleaner["user"]["id"])
+            )
+        ).scalar_one()
+        profile.stripe_account_livemode = True  # as if opened on the live platform
+        db.commit()
+
+        before = len(stripe.calls)
+        resp = client.post(
+            f"/api/turnovers/{turnover['id']}/pay", headers=owner["auth"]
+        )
+        assert resp.status_code == 409, resp.text
+        assert "different Stripe platform" in resp.json()["detail"]
+        assert not [
+            c for c in stripe.calls[before:] if c[1] == "/checkout/sessions"
+        ], "a checkout was created against an account on another platform"
+
+    def test_onboarding_again_replaces_it_rather_than_refusing_forever(
+        self, db: Session, stripe, client, make_cleaner, monkeypatch
+    ) -> None:
+        """The charge path refuses; the onboarding path is somebody asking.
+
+        If both refused, a legitimate platform switch would leave every cleaner
+        permanently unpayable with no way back. Connecting payouts again is the
+        deliberate act, and it resets the two flags that described the old
+        account — so `payout_blocker` keeps refusing until they actually finish.
+        """
+        cleaner = make_cleaner(cleared=True)
+        profile = _payout_ready(db, cleaner)
+        profile.stripe_account_livemode = True
+        db.commit()
+
+        stripe.responses["/accounts"] = {"id": "acct_on_this_platform"}
+        resp = client.post("/api/payouts/onboarding", headers=cleaner["auth"])
+        assert resp.status_code == 200, resp.text
+
+        db.refresh(profile)
+        assert profile.stripe_account_id == "acct_on_this_platform"
+        assert profile.stripe_account_livemode is False
+        assert profile.stripe_payouts_enabled is False, (
+            "an enabled flag from the old platform carried over"
+        )
+        assert profile.stripe_details_submitted is False
+        assert not payments.connected_account_is_foreign(profile)
+
+    def test_the_status_screen_does_not_contradict_the_blocker(
+        self, db: Session, stripe, client, make_cleaner, monkeypatch
+    ) -> None:
+        """Reporting "connected, payouts enabled" beside a blocker saying they
+        cannot be paid is the disagreement the trust gate has one author to
+        avoid, one screen over."""
+        cleaner = make_cleaner(cleared=True)
+        profile = _payout_ready(db, cleaner)
+        profile.stripe_account_livemode = True
+        db.commit()
+
+        resp = client.get("/api/payouts/status", headers=cleaner["auth"])
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["blocker"] is not None
+        assert body["connected"] is False
+        assert body["payouts_enabled"] is False
+
+    def test_a_foreign_account_is_never_asked_about(
+        self, db: Session, stripe, make_cleaner, monkeypatch
+    ) -> None:
+        """Asking this platform about another platform's account is a 404, and
+        the answer would be written onto the row as Stripe's verdict on the
+        cleaner."""
+        cleaner = make_cleaner(cleared=True)
+        profile = _payout_ready(db, cleaner)
+        profile.stripe_account_livemode = True
+        db.commit()
+
+        before = len(stripe.calls)
+        payments.refresh_connect_status(db, profile)
+        assert not [c for c in stripe.calls[before:] if c[1].startswith("/accounts/")]
+        assert profile.stripe_payouts_enabled is True, "the row was rewritten"

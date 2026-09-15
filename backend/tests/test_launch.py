@@ -47,7 +47,7 @@ def ready_env(monkeypatch, tmp_path):
     from app.config import settings
 
     monkeypatch.setattr(settings, "environment", "production")
-    monkeypatch.setattr(settings, "secret_key", "a-real-one")
+    monkeypatch.setattr(settings, "secret_key", "x7Qp" * 9)
     monkeypatch.setattr(settings, "cors_origins", "https://linx.example")
     monkeypatch.setattr(settings, "document_storage_dir", str(tmp_path))
     monkeypatch.setattr(settings, "smtp_host", "smtp.example")
@@ -564,3 +564,209 @@ class TestSetIsNotTheSameAsUsable:
             ready_env, "public_base_url", "https://not-registered-yet.example"
         )
         assert _by_key(launch.run_checks(db), "public_base_url").state is State.READY
+
+
+class TestASigningKeyThatIsMerelyDifferent:
+    """**Not the development placeholder is not the same as strong.**
+
+    Both the settings validator and this check tested inequality with one
+    constant, so `SECRET_KEY=` and `SECRET_KEY=x` passed both: the service
+    booted and signed every JWT with a guessable value, and anybody holding an
+    ordinary token could forge an admin one. That is the whole of the role
+    gate, turned green by a check that was asking a cheaper question than the
+    one that mattered.
+    """
+
+    @pytest.mark.parametrize("value", ["", "   ", "x", "secret", "changeme"])
+    def test_a_weak_key_is_refused(self, value: str) -> None:
+        from app.config import weak_secret_key
+
+        assert weak_secret_key(value) is not None
+
+    def test_a_generated_key_passes(self) -> None:
+        import secrets
+
+        from app.config import weak_secret_key
+
+        assert weak_secret_key(secrets.token_urlsafe(48)) is None
+
+    @pytest.mark.parametrize("value", ["", "x", "dev-only-insecure-secret-key-change-me"])
+    def test_production_refuses_to_boot_on_one(self, value: str) -> None:
+        """The launch check reports; the validator is what actually stops it."""
+        from app.config import Settings
+
+        with pytest.raises(ValueError, match="SECRET_KEY"):
+            Settings(
+                environment="production",
+                secret_key=value,
+                database_url="postgresql://x/y",
+            )
+
+    def test_the_check_and_the_validator_ask_the_same_function(
+        self, db: Session, ready_env, monkeypatch
+    ) -> None:
+        """Round two's lesson, one check over: ask the owner of the rule.
+
+        A short key used to turn this green while the validator would have
+        refused the same value at boot — two rules about one thing, which is
+        how they come apart.
+        """
+        monkeypatch.setattr(ready_env, "secret_key", "x")
+        check = _by_key(launch.run_checks(db), "secret_key")
+        assert check.state is State.BLOCKED
+        assert "1 characters" in check.detail
+
+
+class TestSetIsNotTheSameAsDelivering:
+    """`SMTP_HOST` being set says a sender will be *constructed*.
+
+    An unreachable host, a refused credential or a sender address the relay
+    will not accept all raise at send time, `deliver_pending` writes `failed`,
+    and nobody receives anything — while a check titled *Notifications are
+    actually sent* reported ready.
+    """
+
+    def test_configured_but_nothing_delivered_is_attention(
+        self, db: Session, ready_env
+    ) -> None:
+        check = _by_key(launch.run_checks(db), "email")
+        assert check.state is State.ATTENTION, (
+            "a host nobody has ever successfully sent through reported ready"
+        )
+        assert "not the same as reachable" in check.detail
+
+    def test_a_delivered_notification_is_what_turns_it_green(
+        self, db: Session, ready_env, admin_user
+    ) -> None:
+        from app.models.enums import NotificationChannel, NotificationEvent, NotificationStatus
+        from app.models.notification import Notification
+
+        db.add(
+            Notification(
+                recipient_id=admin_user["user"].id,
+                destination=admin_user["user"].email,
+                event=NotificationEvent.BID_RECEIVED,
+                channel=NotificationChannel.EMAIL,
+                status=NotificationStatus.SENT,
+                dedupe_key=f"test:{uuid.uuid4()}",
+                subject="s",
+                body="b",
+            )
+        )
+        db.commit()
+        check = _by_key(launch.run_checks(db), "email")
+        assert check.state is State.READY
+        assert "delivered" in check.detail
+
+    def test_failures_are_named_rather_than_merely_unproven(
+        self, db: Session, ready_env, admin_user
+    ) -> None:
+        """"Configured and failing" and "configured and untried" are different
+        problems, and an admin reading the panel needs to tell them apart."""
+        from app.models.enums import NotificationChannel, NotificationEvent, NotificationStatus
+        from app.models.notification import Notification
+
+        db.add(
+            Notification(
+                recipient_id=admin_user["user"].id,
+                destination=admin_user["user"].email,
+                event=NotificationEvent.BID_RECEIVED,
+                channel=NotificationChannel.EMAIL,
+                status=NotificationStatus.FAILED,
+                dedupe_key=f"test:{uuid.uuid4()}",
+                subject="s",
+                body="b",
+            )
+        )
+        db.commit()
+        check = _by_key(launch.run_checks(db), "email")
+        assert check.state is State.ATTENTION
+        assert "have failed" in check.detail
+
+
+class TestAnOriginRatherThanAUrl:
+    """`payments._app_base()` appends `/turnovers/…` to this value.
+
+    So a query or a fragment does not sit anywhere a path can follow it:
+    `https://linx.example#preview` becomes
+    `https://linx.example#preview/cleaner/profile`, which is the site root with
+    the callback buried in the fragment. The browser arrives somewhere that
+    looks almost right, which is worse than arriving nowhere.
+    """
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "https://linx.example#preview",
+            "https://linx.example?tenant=x",
+            "https://linx.example/?utm=1",
+        ],
+    )
+    def test_a_query_or_fragment_is_refused(
+        self, db: Session, ready_env, monkeypatch, value: str
+    ) -> None:
+        monkeypatch.setattr(ready_env, "public_base_url", value)
+        check = _by_key(launch.run_checks(db), "public_base_url")
+        assert check.state is State.BLOCKED, f"{value} reported usable"
+
+    def test_a_path_prefix_is_still_allowed(
+        self, db: Session, ready_env, monkeypatch
+    ) -> None:
+        """A deployment under a sub-path is a real thing, and appending to it
+        works — this is about components a path cannot follow, not about
+        insisting on a bare host."""
+        monkeypatch.setattr(ready_env, "public_base_url", "https://linx.example/app")
+        assert _by_key(launch.run_checks(db), "public_base_url").state is State.READY
+
+
+class TestThePlatformTheAccountsAreOn:
+    """The launch *order* is what makes this reachable, so it is a check.
+
+    Step 2 walks a job end to end on the deployed site with test keys, writing
+    a test-mode account and an enabled payout flag onto a real cleaner profile.
+    Step 5 sets the live key. Nothing about those rows looks wrong afterwards.
+    """
+
+    def test_no_connected_accounts_is_ready(self, db: Session, ready_env) -> None:
+        check = _by_key(launch.run_checks(db), "stripe_account_modes")
+        assert check.state is State.READY
+
+    def test_an_account_from_the_other_platform_blocks(
+        self, db: Session, ready_env, make_cleaner, monkeypatch
+    ) -> None:
+        from app.models.cleaner_profile import CleanerProfile
+
+        cleaner = make_cleaner(cleared=True)
+        profile = db.execute(
+            select(CleanerProfile).where(
+                CleanerProfile.user_id == uuid.UUID(cleaner["user"]["id"])
+            )
+        ).scalar_one()
+        profile.stripe_account_id = "acct_from_test_mode"
+        profile.stripe_account_livemode = False
+        profile.stripe_payouts_enabled = True
+        db.commit()
+
+        # Still on the test key it was made under: nothing to say.
+        assert (
+            _by_key(launch.run_checks(db), "stripe_account_modes").state is State.READY
+        )
+
+        monkeypatch.setattr(ready_env, "stripe_secret_key", "sk_live_real")
+        check = _by_key(launch.run_checks(db), "stripe_account_modes")
+        assert check.state is State.BLOCKED, (
+            "the live configuration reported ready while every cleaner held an "
+            "account that does not exist on it"
+        )
+        assert check.remedy
+
+    def test_it_asks_the_function_that_owns_the_rule(self) -> None:
+        """Round two's lesson again: the check does not restate the predicate
+        as SQL, it asks `payments.connected_account_is_foreign` per row."""
+        import inspect
+
+        from app.services import payments
+
+        source = inspect.getsource(launch._stripe_account_modes)
+        assert "connected_account_is_foreign" in source
+        assert callable(payments.connected_account_is_foreign)
