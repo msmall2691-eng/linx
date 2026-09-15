@@ -10,6 +10,11 @@ import { useTimeZone } from '../lib/config.jsx'
 import { formatDateTime, formatTurnaround } from '../lib/datetime.js'
 import { showsUrgency } from '../lib/turnover.js'
 
+//: How many jobs a page asks for. The endpoint caps `limit` at 200; asking for
+//: a screenful at a time and offering more is kinder than one enormous query,
+//: and `offset` is what makes the rest reachable at all.
+const PAGE = 50
+
 export default function TurnoverList() {
   const timeZone = useTimeZone()
 
@@ -17,17 +22,21 @@ export default function TurnoverList() {
   const [properties, setProperties] = useState([])
   const [showFinished, setShowFinished] = useState(false)
   const [error, setError] = useState(null)
+  const [more, setMore] = useState(false)
+  const [loadingMore, setLoadingMore] = useState(false)
 
   useEffect(() => {
     let cancelled = false
     setTurnovers(null)
+    setMore(false)
     Promise.all([
-      apiFetch(`/turnovers?include_finished=${showFinished}`),
+      apiFetch(`/turnovers?include_finished=${showFinished}&limit=${PAGE}`),
       apiFetch('/properties?include_archived=true'),
     ])
       .then(([loadedTurnovers, loadedProperties]) => {
         if (cancelled) return
         setTurnovers(loadedTurnovers)
+        setMore(loadedTurnovers.length === PAGE)
         setProperties(loadedProperties)
       })
       .catch((err) => !cancelled && setError(err.message))
@@ -35,6 +44,32 @@ export default function TurnoverList() {
       cancelled = true
     }
   }, [showFinished])
+
+  /**
+   * **A job the list cannot reach is a job nobody can post, edit or cancel.**
+   *
+   * The endpoint has always taken `limit` and `offset`; this screen asked for
+   * neither and so showed the API's default fifty with no way past them. That
+   * was survivable while jobs arrived one form at a time, and stopped being so
+   * the moment `create_many` could add a hundred in one go — the drafts past
+   * the fiftieth existed, were charged nothing, notified nobody, and could not
+   * be opened.
+   */
+  async function loadMore() {
+    setLoadingMore(true)
+    try {
+      const next = await apiFetch(
+        `/turnovers?include_finished=${showFinished}&limit=${PAGE}` +
+          `&offset=${turnovers.length}`,
+      )
+      setTurnovers((current) => [...current, ...next])
+      setMore(next.length === PAGE)
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setLoadingMore(false)
+    }
+  }
 
   const propertyName = (id) =>
     properties.find((p) => p.id === id)?.nickname ?? 'Unknown property'
@@ -107,6 +142,18 @@ export default function TurnoverList() {
             </div>
           </Link>
         ))}
+
+        {more && (
+          <button
+            type="button"
+            className="btn-secondary w-full"
+            onClick={loadMore}
+            disabled={loadingMore}
+            data-testid="load-more"
+          >
+            {loadingMore ? 'Loading…' : 'Show more'}
+          </button>
+        )}
       </div>
     </div>
   )

@@ -246,3 +246,77 @@ def test_switching_property_clears_rows_rather_than_carrying_them(
     expect(page.get_by_test_id("bulk-row")).to_have_count(0)
     # Said out loud, because silently losing typed work is its own bug.
     expect(page.get_by_text("were cleared", exact=False)).to_be_visible()
+
+
+def test_every_draft_created_is_reachable_from_the_list(page, live_server) -> None:
+    """**A job the list cannot reach is a job nobody can post, edit or cancel.**
+
+    `/turnovers` has always taken `limit` and `offset`; the screen asked for
+    neither and so showed the API's default fifty with no way past them. That
+    was survivable while jobs arrived one form at a time, and stopped being so
+    the moment this feature could add a hundred at once — the drafts past the
+    fiftieth existed and could not be opened.
+    """
+    from datetime import date, timedelta
+
+    _signup_owner(page, live_server)
+    _add_home(page, live_server, nickname="Long List")
+
+    # 60 dates: more than one page, well inside MAX_BULK_JOBS.
+    start = date.today() + timedelta(days=30)
+    dates = "\n".join(
+        (start + timedelta(days=offset)).strftime("%Y-%m-%d") for offset in range(60)
+    )
+
+    page.goto(f"{live_server}/turnovers/bulk")
+    page.select_option("#property", label="Long List")
+    page.fill("#pasted", dates)
+    page.get_by_role("button", name="Add these dates").click()
+    expect(page.get_by_test_id("bulk-row")).to_have_count(60)
+    page.get_by_role("button", name=re.compile("Add 60 as drafts")).click()
+    expect(page.get_by_role("heading", name="60 drafts added")).to_be_visible()
+
+    page.get_by_role("link", name="Go to jobs").click()
+    page.wait_for_url("**/turnovers")
+
+    cards = page.get_by_test_id("status-badge")
+    expect(cards).to_have_count(50)
+    page.get_by_test_id("load-more").click()
+    expect(cards).to_have_count(60)
+    # Nothing left to ask for, so the button goes.
+    expect(page.get_by_test_id("load-more")).to_have_count(0)
+
+
+def test_an_upload_that_lands_after_a_switch_is_discarded(page, live_server) -> None:
+    """Parsing is a round trip, and the owner can change the property while it
+    is in flight. Appending the answer then would put one property's bookings
+    on another's list — silently, and after the switch handler had already
+    cleared the rows for exactly that reason."""
+    _signup_owner(page, live_server)
+    _add_rental(page, live_server, "Pier View")
+    _add_home(page, live_server, nickname="Oak Cottage")
+
+    page.goto(f"{live_server}/turnovers/bulk")
+
+    # Hold the parse open, so the switch lands first — the real ordering, not a
+    # simulated one.
+    page.route(
+        "**/calendars/read-file",
+        lambda route: (page.wait_for_timeout(1200), route.continue_()),
+    )
+
+    page.select_option("#property", label="Pier View")
+    page.get_by_test_id("ics-upload").set_input_files(
+        files=[
+            {
+                "name": "bookings.ics",
+                "mimeType": "text/calendar",
+                "buffer": _ics_bytes(6, 20),
+            }
+        ]
+    )
+    page.select_option("#property", label="Oak Cottage")
+
+    # The answer for Pier View arrives while Oak Cottage is selected.
+    page.wait_for_timeout(2000)
+    expect(page.get_by_test_id("bulk-row")).to_have_count(0)

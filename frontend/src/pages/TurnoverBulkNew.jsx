@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 
 import Alert from '../components/Alert.jsx'
@@ -87,6 +87,12 @@ export default function TurnoverBulkNew() {
   const [pasted, setPasted] = useState('')
   const [pasteProblems, setPasteProblems] = useState([])
   const [cleared, setCleared] = useState(0)
+  // Read inside an async completion, which closes over the *old* state value —
+  // a ref is what makes "is this still the selected property" answerable there.
+  const propertyIdRef = useRef(propertyId)
+  useEffect(() => {
+    propertyIdRef.current = propertyId
+  }, [propertyId])
   const [scope, setScope] = useState('')
   const [budget, setBudget] = useState('')
   const [notes, setNotes] = useState('')
@@ -136,13 +142,21 @@ export default function TurnoverBulkNew() {
     const file = event.target.files?.[0]
     if (!file || !propertyId) return
     setError(null)
+    // **Whose calendar this was.** Parsing is a round trip, and the owner can
+    // change the property while it is in flight — at which point appending the
+    // answer would put one property's bookings on another's list, silently,
+    // after the switch handler had already cleared the rows for exactly that
+    // reason. Rental to rental would create drafts for the wrong house; rental
+    // to home would restore checkins the screen no longer shows.
+    const askedFor = propertyId
     const body = new FormData()
     body.append('file', file)
     try {
       const answer = await apiFetch(
-        `/properties/${propertyId}/calendars/read-file`,
+        `/properties/${askedFor}/calendars/read-file`,
         { method: 'POST', body },
       )
+      if (askedFor !== propertyIdRef.current) return
       if (answer.jobs.length === 0) {
         // `bookings_seen` is why this is not just an empty list: a file of last
         // year's stays is read and then dropped by the past floor, and saying
@@ -164,7 +178,7 @@ export default function TurnoverBulkNew() {
         })),
       ])
     } catch (err) {
-      setError(err.message)
+      if (askedFor === propertyIdRef.current) setError(err.message)
     } finally {
       // Let the same file be chosen again after a correction.
       event.target.value = ''
