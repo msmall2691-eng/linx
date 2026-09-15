@@ -59,10 +59,16 @@ def _my_profile(db: Session, user: User) -> CleanerProfile:
 
 
 def _connect_status(profile: CleanerProfile) -> ConnectStatusOut:
+    # An account on another Stripe platform reads as *not connected*, and its
+    # two flags read as false, because that is what is true of the platform
+    # this cleaner is looking at. Reporting "connected, payouts enabled" beside
+    # a blocker saying they cannot be paid is the disagreement the trust gate
+    # has one author to avoid, one screen over.
+    foreign = payments.connected_account_is_foreign(profile)
     return ConnectStatusOut(
-        connected=bool(profile.stripe_account_id),
-        details_submitted=profile.stripe_details_submitted,
-        payouts_enabled=profile.stripe_payouts_enabled,
+        connected=bool(profile.stripe_account_id) and not foreign,
+        details_submitted=profile.stripe_details_submitted and not foreign,
+        payouts_enabled=profile.stripe_payouts_enabled and not foreign,
         blocker=payments.payout_blocker(profile),
         payments_configured=stripe_client.is_configured(),
     )

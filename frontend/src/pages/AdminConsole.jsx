@@ -54,6 +54,91 @@ function Stat({ label, value, tone = 'normal', to }) {
   )
 }
 
+const LAUNCH_STATES = {
+  ready: { mark: '✓', label: 'Ready', cls: 'text-emerald-700', dot: 'bg-emerald-500' },
+  blocked: { mark: '!', label: 'Blocking', cls: 'text-rose-700', dot: 'bg-rose-500' },
+  attention: { mark: '·', label: 'Worth knowing', cls: 'text-amber-700', dot: 'bg-amber-500' },
+  // **Not a warning and not a pass.** Rendered in its own colour because the
+  // whole reason this state exists is that it is neither: a list which shows
+  // "I could not check" the same as "fine" reports all-green for a system
+  // nobody has confirmed anything about.
+  unverifiable: { mark: '?', label: 'Needs a person', cls: 'text-indigo-700', dot: 'bg-indigo-500' },
+}
+
+/**
+ * Whether this deployment is ready to take real money from real people.
+ *
+ * Reads `/admin/launch`, which is the same function `python -m
+ * app.tasks.launch_check` reads — one answer, two places to see it. It renders
+ * `detail` and `remedy` verbatim for the same reason the vetting panel renders
+ * `vetting` verbatim: a screen that re-derives a rule is a second author of it.
+ */
+function LaunchReadiness({ launch }) {
+  const [open, setOpen] = useState(false)
+  if (!launch) return null
+
+  const { blocking_count: blocking, outstanding_count: outstanding, launchable } = launch
+  const shown = open ? launch.checks : launch.checks.filter((c) => c.state !== 'ready')
+
+  return (
+    <section className="mt-10" data-testid="launch-readiness">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h2 className="text-lg font-semibold">Launch readiness</h2>
+        <button
+          type="button"
+          className="text-sm text-slate-600 underline"
+          onClick={() => setOpen((v) => !v)}
+          data-testid="toggle-launch-detail"
+        >
+          {open ? 'Hide what is already done' : 'Show everything'}
+        </button>
+      </div>
+
+      <p className="mt-1 text-sm text-slate-600" data-testid="launch-summary">
+        {launchable
+          ? 'Everything checked, and nothing left for a person to answer.'
+          : blocking > 0
+            ? `${blocking} blocking — a pilot with real people must not start yet.`
+            : `Nothing blocking. ${outstanding} item(s) still need a person.`}
+      </p>
+
+      <ul className="mt-4 space-y-3">
+        {shown.map((check) => {
+          const tone = LAUNCH_STATES[check.state] ?? LAUNCH_STATES.attention
+          return (
+            <li
+              key={check.key}
+              className="rounded-lg border border-slate-200 bg-white p-4"
+              data-testid={`launch-check-${check.state}`}
+            >
+              <div className="flex items-start gap-3">
+                <span
+                  className={`mt-1 inline-block h-2 w-2 shrink-0 rounded-full ${tone.dot}`}
+                  aria-hidden="true"
+                />
+                <div className="min-w-0">
+                  <p className="font-medium">
+                    {check.title}{' '}
+                    <span className={`text-xs font-normal ${tone.cls}`}>— {tone.label}</span>
+                  </p>
+                  <p className="mt-1 text-sm text-slate-700">{check.detail}</p>
+                  {check.remedy && (
+                    <p className="mt-2 text-sm text-slate-500">{check.remedy}</p>
+                  )}
+                </div>
+              </div>
+            </li>
+          )
+        })}
+      </ul>
+
+      {shown.length === 0 && (
+        <p className="mt-4 text-sm text-slate-500">Nothing outstanding.</p>
+      )}
+    </section>
+  )
+}
+
 /**
  * **Nothing here links to `/turnovers/:id`.** That route is wrapped in
  * `OwnerRoute` and its endpoint is owner-only, so an admin clicking one was
@@ -449,21 +534,24 @@ export default function AdminConsole() {
   const [disputes, setDisputes] = useState(null)
   const [unclaimed, setUnclaimed] = useState(null)
   const [ledger, setLedger] = useState(null)
+  const [launch, setLaunch] = useState(null)
   const [showResolved, setShowResolved] = useState(false)
   const [error, setError] = useState('')
 
   const load = useCallback(async () => {
     try {
-      const [s, d, u, l] = await Promise.all([
+      const [s, d, u, l, r] = await Promise.all([
         apiFetch('/admin/summary'),
         apiFetch(`/admin/disputes?include_resolved=${showResolved}`),
         apiFetch('/admin/unclaimed'),
         apiFetch('/admin/ledger'),
+        apiFetch('/admin/launch'),
       ])
       setSummary(s)
       setDisputes(d)
       setUnclaimed(u)
       setLedger(l)
+      setLaunch(r)
     } catch (err) {
       setError(err.message)
     }
@@ -505,6 +593,8 @@ export default function AdminConsole() {
           <Stat label="Payments with drift" value={summary.payments_with_drift} tone="alarm" />
         </div>
       )}
+
+      <LaunchReadiness launch={launch} />
 
       <section className="mt-10">
         <div className="flex flex-wrap items-center justify-between gap-3">

@@ -65,6 +65,50 @@ class StripeError(Exception):
         self.code = code
         self.status = status
 
+    @property
+    def outcome_known(self) -> bool:
+        """Whether we know this request changed nothing at Stripe.
+
+        **The question the callers were really asking.** They keyed on
+        `status` — Stripe answered, so it rejected us and nothing moved — and
+        that worked while the only two outcomes were "answered" and "could not
+        be reached". It is a proxy, though, and a refusal raised *before the
+        request leaves this process* has no status while being the most
+        definite outcome there is.
+
+        Read through the proxy, such a refusal looked unknown. Guardrail 2
+        treats an unknown outcome as permanently unsafe to retry, so a live key
+        set without `STRIPE_PLATFORM_ENTITY` would have parked a checkout in
+        `requires_review` — which `start_checkout` refuses to re-charge even
+        after the variable is fixed — and turned an already-settled payment
+        into one the ledger reports as unknown money.
+        """
+        return self.status is not None
+
+
+class StripeLiveModeUndeclared(StripeError):
+    """A live key is configured and nobody has said which entity owns it.
+
+    **The outcome is known**, and saying so is the whole reason this overrides
+    the property: the request never left the process, so nothing moved, and
+    whatever state the caller wrote before calling is still exactly true. The
+    fix is to set the variable and try again — which is only possible if the
+    row was not marked "unknown, never retry" on the way past.
+    """
+
+    @property
+    def outcome_known(self) -> bool:
+        return True
+
+    def __init__(self) -> None:
+        super().__init__(
+            "Stripe is in LIVE mode and STRIPE_PLATFORM_ENTITY is not set. Live "
+            "money must not move until the Connect platform account has been "
+            "opened under the new entity — not a personal SSN, and not an "
+            "existing company's EIN. Set STRIPE_PLATFORM_ENTITY to that "
+            "entity's legal name once it is true, or use a test key."
+        )
+
 
 class StripeNotConfigured(StripeError):
     """No API key. The payment path is off, and says so."""
@@ -83,6 +127,58 @@ class WebhookVerificationError(Exception):
 def is_configured() -> bool:
     """Whether money can move at all. Read by endpoints before they promise."""
     return bool(settings.stripe_secret_key)
+
+
+#: Stripe's own spelling for a live key. Restricted keys (`rk_live_…`) are live
+#: too, so the test is on the `_live_` segment rather than an `sk_` prefix.
+LIVE_KEY_MARKERS = ("sk_live_", "rk_live_")
+
+
+def live_mode() -> bool:
+    """Whether the configured key moves real money.
+
+    Read from the key rather than from `ENVIRONMENT`, because those two can
+    disagree and only one of them decides whose bank account is involved. A
+    staging service set to `production` with a test key moves nothing; a
+    service set to `development` with a live key moves everything.
+    """
+    key = settings.stripe_secret_key or ""
+    return any(marker in key for marker in LIVE_KEY_MARKERS)
+
+
+def platform_entity() -> str | None:
+    """The legal entity the platform account is declared to belong to."""
+    declared = (settings.stripe_platform_entity or "").strip()
+    return declared or None
+
+
+def _refuse_undeclared_live_mode() -> None:
+    """**The line from CLAUDE.md, enforced rather than written down.**
+
+    "Do not run real pilot transactions in live mode under a personal SSN or an
+    existing company's EIN. Going live means opening a new, separate Connect
+    platform account under the new entity."
+
+    That is the sentence this whole repository is separate for, and until now it
+    lived only in prose. Prose does not stop a live key being pasted into a
+    service that is already working — a change that produces no error, fails no
+    test, and surfaces at the end of a tax year as money having moved through
+    the wrong legal person.
+
+    So a live key must be accompanied by `STRIPE_PLATFORM_ENTITY`, the name of
+    the entity the account was opened under. It is deliberately a name and not
+    a boolean: a confirmation flag is a box somebody ticks, and a name is a
+    sentence somebody has to mean.
+
+    **It cannot check that the name is true** — nothing inside this process can
+    know whose EIN a Stripe account was opened under — and the launch check
+    says so rather than reporting it verified. What it can do is make going live
+    a thing somebody did on purpose instead of a thing that happened.
+
+    Test mode is untouched. This can only ever refuse to move real money.
+    """
+    if live_mode() and platform_entity() is None:
+        raise StripeLiveModeUndeclared()
 
 
 # --------------------------------------------------------------------------
@@ -166,6 +262,10 @@ def post(
     """
     if not is_configured():
         raise StripeNotConfigured()
+    # Before the key check and before the network, because this is not about
+    # whether the call is well-formed — it is about whether this money should
+    # be moving at all.
+    _refuse_undeclared_live_mode()
     if not idempotency_key and not non_idempotent_reason:
         raise ValueError(
             "a mutating Stripe call needs a derived idempotency key, or an "

@@ -178,6 +178,7 @@ not tenant. There is deliberately no `org_id`-style scoping.
 | `reviews` | Mutual, delayed reveal |
 | `payments_in` | Collects from the owner |
 | `payouts` | Pays the cleaner |
+| `task_runs` | One row per background task: when it last *finished* |
 
 Two fields carry more weight than they look like they do:
 
@@ -824,7 +825,7 @@ phase.
 | 6 | Stripe Connect, test mode end to end, refunds, reconciliation | **done** |
 | 7 | Mutual delayed-reveal reviews | **done** |
 | 8 | Admin console — vetting queue, dispute inbox, unclaimed alerts, ledger | **done** |
-| 9 | Pilot launch checklist — new Connect platform account under the new entity | not started |
+| 9 | Pilot launch checklist — new Connect platform account under the new entity | **done** |
 
 **Phase 1 built the schema for every table, with no business logic.** Tables for
 later phases exist and are empty on purpose. The shape is settled now; the
@@ -839,6 +840,33 @@ or an existing company's EIN.** That would route money legally through an
 individual rather than the new entity, undoing the separation this project
 exists for. Going live means opening a **new, separate Connect platform account
 under the new entity** — not migrating an existing one.
+
+**Phase 9 enforces that sentence rather than only stating it.** A live key
+(`sk_live_…` or `rk_live_…`) with `STRIPE_PLATFORM_ENTITY` unset makes every
+mutating Stripe call refuse, in `stripe_client.post` — the only door. Prose does
+not stop a live key being pasted into a service that is already working: that
+change produces no error, fails no test, and surfaces at the end of a tax year
+as money having moved through the wrong legal person.
+
+**A refusal raised before the request leaves the process is a *known*
+outcome**, and `StripeError.outcome_known` is what says so. Both handlers used
+to key on `exc.status` — a proxy for "Stripe answered, so it rejected us and
+nothing moved" — which is exactly right while the only two outcomes are
+"answered" and "unreachable", and wrong for a local refusal, which has no
+status while being the most definite outcome there is. Read through the proxy
+the gate looked *unknown*, and guardrail 2 treats unknown as permanently
+unsafe: a checkout would have parked in `requires_review`, which
+`start_checkout` refuses to re-charge even after the variable is fixed, and a
+refund would have turned an already-settled payment into money the ledger
+reports as unknown. The gate protecting the entity would have made jobs
+unpayable and revenue vanish off the books.
+
+The variable holds the entity's **legal name**, not a boolean, because a
+confirmation flag is a box anybody ticks and a name is a sentence somebody has
+to mean. It cannot verify the name is true — nothing in this process can read
+whose EIN a Stripe account was opened under — so the launch check reports it as
+*declared* and says as much. Test mode is untouched; the gate can only ever
+refuse to move real money.
 
 ### How it is built (phase 6)
 
@@ -980,6 +1008,148 @@ become untrustworthy and there is no way to tell which is lying.
   Drift is still computed on unsettled rows rather than suppressed — a payout
   against a payment that never succeeded is money out with nothing in, which is
   exactly what drift is for.
+
+### Launch readiness (phase 9)
+
+`app/services/launch.py`, read two ways: `python -m app.tasks.launch_check` at
+deploy time, and the console's **Launch readiness** panel — one function, so
+the screen and the command cannot disagree. `docs/LAUNCH.md` is the long form.
+
+**Four states, and the fourth is the design.** `ready`, `blocked`, `attention`,
+and `unverifiable` — *this process cannot know*. The obvious two-state
+checklist turns everything it cannot see into a pass and then reports all-green
+for a system nobody has confirmed anything about, which is the same mistake as
+assuming an unknown Stripe outcome succeeded. `is_launchable` counts an
+unverifiable item as outstanding, so the summary can never say ready while
+something is merely unexamined. Three items are permanently in that state: whose
+entity the Connect account belongs to, whether anybody has walked a candidate
+through Checkr, and whether a human actually works the dispute inbox.
+
+**Set is not the same as usable, and truthiness is the proxy this module got
+caught on three times.** `PUBLIC_BASE_URL=http://localhost:5173` is the value
+the README documents for development and a perfectly truthy string; carried
+into a deployment it made the check say Stripe can send people back while
+`payments._app_base()` used it verbatim, so an owner finishing a payment and a
+cleaner finishing onboarding both landed on their own computer.
+`_unusable_base_url` parses it and requires a public https origin. It is
+deliberately **not** `calendars._refuse_private_address`, despite the obvious
+overlap: that one asks "will *our process* connect somewhere private" and
+resolves every name to answer it, which is right for a request this server
+makes and wrong here — a launch check that did DNS would call a deployment
+unready because a new record had not propagated yet.
+
+**The check asks the function that owns each rule rather than re-deriving it**
+— the console rule from phase 8, for the same reason, and it was got wrong
+twice. `_admin_exists` counted `role == ADMIN` while `notifications.admins`
+also requires `is_active`, so a database holding only deactivated admins
+reported that somebody receives the alerts while every one of them resolved to
+an empty list: the check saying yes to precisely the failure it exists to
+catch. `_payment_proven` hand-copied `{succeeded, refunded}`, which *is*
+`payments.SETTLED_STATUSES` — latent only because the two agreed. Both now call
+the owner, so the next change to either rule arrives here on its own.
+
+The same mistake twice more, in its other two spellings. `SECRET_KEY` was
+checked for inequality with the development placeholder — which is what
+`config.py` checked too, so `SECRET_KEY=` and `SECRET_KEY=x` booted the service
+and turned the check green while every JWT was signed with a guessable value,
+and anybody holding an ordinary token could forge an admin one.
+`config.weak_secret_key` is now the one author and both ask it; length is the
+floor rather than an entropy measure, because nothing here can tell a random
+string from a memorable one and a check that claimed to would be this module's
+own lie. And `PUBLIC_BASE_URL` was checked as a URL when it is an *origin*:
+`payments._app_base()` appends `/cleaner/profile` to it, so a query or fragment
+does not sit where a path can follow, and `https://linx.example#preview` sends
+the browser to the site root with the callback buried in the fragment — almost
+right, which is worse than nowhere. The same setting was also read in two
+spellings: the check stripped whitespace before parsing and `_app_base()` did
+not, so a trailing space validated clean and then sat in the middle of a
+Checkout return URL. It is normalised once in `config.py` instead, because
+normalising in either reader is what lets a third arrive with a third opinion —
+the same failure as one feed URL spelled three ways being three calendars.
+
+**`SMTP_HOST` set is not `SMTP_HOST` working**, so that check has three answers
+rather than two, the same shape as `_payment_proven`: no host blocks, a host
+with a delivered notification behind it is ready, and a host nobody has
+successfully sent through is `attention` — the honest description of a fresh
+deployment. The evidence is scoped to the sender configured *now*
+(`notifications.sent_via`, written from `delivery.Sender.identity` — every
+setting that decides whether a delivery succeeds, with the credentials as an
+HMAC under `SECRET_KEY` rather than plaintext, because this is read back onto an
+admin screen and a password on a screen is a password in a screenshot — and
+**keyed rather than merely salted**, since the host and port are printed beside
+the digest and usernames are guessable, so a fast salted hash would have handed
+anybody who could read the column an offline oracle for the SMTP password.
+Rotating `SECRET_KEY` re-reads past deliveries as "a sender since replaced",
+which is the conservative direction. The material is JSON rather than a
+delimiter join, because `"|".join` is not injective — username `a|b` with
+password `c` and username `a` with password `b|c` are the same bytes; host, port and
+from-address alone left `SMTP_USERNAME`, `SMTP_PASSWORD` and `SMTP_USE_TLS`
+able to change underneath it): a `SENT` row proves *a* sender worked,
+so without that tie, changing `SMTP_HOST` to something broken left yesterday's
+success standing as proof about a system nobody is using. An unreachable host, a refused credential or a sender address the
+relay rejects all fail at send time and every notification sits `failed`, which
+a check titled *Notifications are actually sent* used to report as ready.
+
+**A connected account belongs to a platform, and the id does not say which.**
+Stripe objects are mode-scoped: an `acct_…` created with a test key does not
+exist to a live key. That is latent only while the platform never changes, and
+the launch order changes it on purpose — walk a job end to end on the deployed
+site in test mode, *then* set the live key. The three `cleaner_profiles.stripe_*`
+fields were facts about some platform with nothing saying which, so every
+cleaner would have carried a test-mode account with `stripe_payouts_enabled`
+true, `payout_blocker` would have found nothing missing, and the first live
+destination charge would have named an account that does not exist: the owner
+charged and the transfer with nowhere to go, every row valid.
+`stripe_account_livemode` and `stripe_platform_id` record it, and
+`payments.connected_account_is_foreign` is their one reader — a NULL mode
+counts as foreign, because not knowing which platform an account is on is not
+knowing it is this one. **Two columns, because neither alone is the identity:**
+a Stripe account keeps one `acct_…` across test and live, so the platform id
+does not tell the modes apart, and two *different* platforms in the same mode
+compare equal on the boolean — which the launch order itself reaches, since
+step 4 opens a new platform account under the new entity and testing it first
+means new test keys. `payments.platform_account_id()` resolves the current
+platform once and returning None means *not known*: never a match, never a
+mismatch, because a Stripe blip turning every vetted cleaner unpayable is the
+opposite failure and just as bad. It caches a success and **deliberately not a
+failure** — an outage must not become a permanent unknown for the life of the
+process — so the caller that asks about many rows resolves once and passes the
+answer down (`connected_account_is_foreign(..., platform=...)`, with an
+`UNRESOLVED` sentinel because a resolved *None* is an answer rather than an
+absence). Without that, an outage cost one full timeout per cleaner plus one
+more, and the console hung for minutes on the screen whose job is saying what
+is wrong. The charge path **refuses**,
+naming the remedy; the onboarding path **replaces**, because there somebody is
+deliberately connecting to the platform that is running now, and resetting the
+two flags keeps them refused until they actually finish. Migration 0009 does
+not backfill a guess.
+
+**Everything checked fails silently.** Anything that shouts on its own — a bad
+`DATABASE_URL`, a missing `SECRET_KEY` — already stops the boot in
+`app/preflight.py` and is not given a second home. What is here is the other
+kind: `os.path.ismount` on the upload directory, because a plain directory is
+writable and passes every naive test and is replaced on the next deploy, so the
+photo IDs vanish while their rows survive *one deploy after the mistake*; no
+admin user, because "an admin" resolves from the role and with none every alert
+is addressed to nobody; no `SMTP_HOST`, because every notification then stays
+`pending` and an owner learns their cleaner cancelled by arriving at a dirty
+house.
+
+**`task_runs` exists because the scheduled pass is the only part of this product
+that says nothing when it stops.** A cron service that was never created, or has
+been erroring since the last deploy, is indistinguishable from a quiet week —
+and the review reveal is load-bearing rather than a courtesy, so silence there
+is how refusing to answer becomes the way to bury a bad review. Inference does
+not work and that is worth writing down, because it is the obvious first idea:
+the newest notification and the newest calendar sync are both silent on a
+genuinely quiet pass, so "nothing happened" and "nothing ran" look identical.
+The pass records it itself — one row, overwritten, written **after** the work,
+because a pass that starts and dies is not evidence that anything was done.
+The write is one `INSERT ... ON CONFLICT DO UPDATE` rather than select-then-
+insert: this module promises the pass is safe to run as often as you like, and
+a manual run overlapping cron on a first deploy is precisely when there is no
+row yet — both would read `None`, both would insert, and the unique constraint
+would fail one of them *at commit*, after it had done all its real work.
 
 ## Working in this repo
 

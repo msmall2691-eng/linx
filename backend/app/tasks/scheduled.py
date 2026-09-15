@@ -35,16 +35,19 @@ from datetime import datetime, timedelta, timezone
 from time import monotonic
 
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.models.award import Award
 from app.models.property import Property
+from app.models.task_run import TaskRun
 from app.models.turnover import Turnover
 from app.services import (
     awards,
     calendars,
     geocoding,
+    launch,
     notifications,
     reviews,
     turnovers,
@@ -214,6 +217,57 @@ def sync_calendars(db: Session) -> tuple[int, int]:
     return created, stale
 
 
+def record_run(db: Session, *, started: float, result: dict[str, int]) -> None:
+    """Write down that this pass finished. **The pass is the only witness.**
+
+    Everything else in this product that stops announces itself: a failing
+    request throws, a failing deploy fails. A cron service that was never
+    created, or has been erroring since the last deploy, is indistinguishable
+    from a quiet week — and the review reveal is load-bearing rather than a
+    courtesy, so "quietly not running" is the expensive failure here.
+
+    Inferring it from other rows does not work, which is worth saying because
+    it is the obvious first idea: the newest notification and the newest
+    calendar sync are both silent on a genuinely quiet pass, so "nothing
+    happened" and "nothing ran" look identical. The pass records it itself, and
+    `app/services/launch.py` reads it.
+
+    **One statement, not select-then-insert.** This module's own docstring
+    promises the pass is safe to run as often as you like, and a manual run
+    overlapping cron — or two cron ticks on a first deploy — is exactly when
+    there is no row yet. Both passes would read `None`, both would insert, and
+    the unique constraint would fail one of them *at commit*: a pass that did
+    all of its real work and then died on the bookkeeping. The failure is most
+    likely on the very first deploy, which is the worst possible moment to
+    learn the readiness check cannot be trusted.
+
+    `ON CONFLICT (name) DO UPDATE` makes the database settle it. The last
+    writer wins, which is the right answer for a row whose whole meaning is
+    "most recently finished".
+    """
+    summary = ", ".join(f"{count} {label}" for label, count in result.items() if count)
+    values = {
+        "name": launch.SCHEDULED_TASK_NAME,
+        "finished_at": datetime.now(timezone.utc),
+        "duration_ms": int((monotonic() - started) * 1000),
+        "summary": summary or "nothing due",
+    }
+
+    statement = pg_insert(TaskRun).values(**values)
+    db.execute(
+        statement.on_conflict_do_update(
+            index_elements=[TaskRun.name],
+            set_={
+                "finished_at": statement.excluded.finished_at,
+                "duration_ms": statement.excluded.duration_ms,
+                "summary": statement.excluded.summary,
+                "updated_at": statement.excluded.finished_at,
+            },
+        )
+    )
+    db.commit()
+
+
 def run(db: Session, *, now: datetime | None = None) -> dict[str, int]:
     """One pass. Queue what is due, send everything owed, *then* read feeds.
 
@@ -233,13 +287,14 @@ def run(db: Session, *, now: datetime | None = None) -> dict[str, int]:
     nobody — which is rule 1 of the calendar module, and is what makes this
     reordering safe rather than merely convenient.
     """
+    started = monotonic()
     placed = place_unmapped_properties(db)
     reminders = send_reminders(db, now=now)
     unclaimed = alert_unclaimed(db, now=now)
     revealed = reveal_reviews(db, now=now)
     delivered = notifications.deliver_pending(db, limit=SCHEDULED_DRAIN_LIMIT)
     synced, stale_bookings = sync_calendars(db)
-    return {
+    result = {
         "placed": placed,
         "synced": synced,
         "stale_bookings": stale_bookings,
@@ -248,6 +303,11 @@ def run(db: Session, *, now: datetime | None = None) -> dict[str, int]:
         "revealed": revealed,
         "delivered": delivered,
     }
+    # **Last, and only on the way out.** Recording the start would make a pass
+    # that crashes every single time look perfectly healthy, which is the exact
+    # reassurance this row exists to refuse.
+    record_run(db, started=started, result=result)
+    return result
 
 
 def main() -> None:  # pragma: no cover - exercised through run()

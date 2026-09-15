@@ -45,12 +45,14 @@ from app.models.turnover import Turnover
 from app.models.user import User
 from app.schemas.console import (
     ConsoleSummaryOut,
+    LaunchCheckOut,
+    LaunchReadinessOut,
     LedgerOut,
     LedgerRowOut,
     UnclaimedTurnoverOut,
 )
 from app.schemas.dispute import AdminDisputeOut, DisputePartyOut, DisputeResolution
-from app.services import disputes, payments, turnovers
+from app.services import disputes, launch, payments, turnovers
 from app.services.turnovers import refresh_urgency
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -419,4 +421,44 @@ def ledger(
         # in flight, the other is money whose fate nobody knows yet.
         total_awaiting_cents=sum(row.awaiting_cents for row in rows),
         total_unknown_cents=sum(row.unknown_cents for row in rows),
+    )
+
+
+# --------------------------------------------------------------------------
+# Launch readiness (phase 9)
+# --------------------------------------------------------------------------
+
+
+@router.get("/launch", response_model=LaunchReadinessOut)
+def read_launch_readiness(
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+) -> LaunchReadinessOut:
+    """Whether this deployment is ready to take real money from real people.
+
+    The same function the deploy-time command reads
+    (`python -m app.tasks.launch_check`), so the screen and the command cannot
+    disagree — the rule the rest of this console already follows, for the same
+    reason: two answers to one question make both untrustworthy.
+
+    It lives on the console because a checklist that is only a command is a
+    checklist nobody runs after the first week.
+    """
+    del admin
+
+    checks = launch.run_checks(db)
+    return LaunchReadinessOut(
+        checks=[
+            LaunchCheckOut(
+                key=check.key,
+                title=check.title,
+                state=check.state.value,
+                detail=check.detail,
+                remedy=check.remedy,
+            )
+            for check in checks
+        ],
+        blocking_count=len(launch.blocking(checks)),
+        outstanding_count=len(launch.outstanding(checks)),
+        launchable=launch.is_launchable(checks),
     )

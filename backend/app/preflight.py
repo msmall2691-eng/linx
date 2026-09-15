@@ -45,8 +45,10 @@ def _load_settings():
         message = str(exc)
         if "SECRET_KEY" in message:
             _fail(
-                "SECRET_KEY is not set, or is still the development placeholder, "
-                "while ENVIRONMENT=production.\n"
+                "SECRET_KEY is missing, too short, or still the development "
+                "placeholder, while ENVIRONMENT=production.\n"
+                "  Anybody holding an ordinary token can forge an admin one "
+                "from a guessable signing key.\n"
                 "  Set it on the service to a real value:\n"
                 '    python -c "import secrets; print(secrets.token_urlsafe(48))"'
             )

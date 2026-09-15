@@ -16,6 +16,42 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 DEV_SECRET_KEY = "dev-only-insecure-secret-key-change-me"
 
+#: The shortest signing key this will accept in production.
+#:
+#: `secrets.token_urlsafe(48)` — what the remedy suggests — produces 64
+#: characters, so this floor refuses nothing anybody generated properly.
+MIN_SECRET_KEY_LENGTH = 32
+
+
+def weak_secret_key(value: str) -> str | None:
+    """Why this signing key is unusable in production, or None if it is fine.
+
+    **Not equal to the development placeholder is not the same as strong.**
+    The first version of this rule tested inequality against one constant, so
+    `SECRET_KEY=` and `SECRET_KEY=x` both passed it: the service booted and
+    signed every JWT with an attacker-guessable value. Anybody holding an
+    ordinary token could then forge an admin one, which is the whole of the
+    role gate.
+
+    Length is the floor rather than an entropy measure, deliberately. Nothing
+    here can tell a random 32-character string from a memorable one, and a
+    check that claimed to would be the same lie as a launch checklist turning
+    what it cannot see into a pass. What it *can* say is that the realistic
+    accidents — empty, a placeholder, a word somebody typed — are all short.
+    """
+    value = (value or "").strip()
+    if not value:
+        return "SECRET_KEY is empty."
+    if value == DEV_SECRET_KEY:
+        return "SECRET_KEY is still the development placeholder."
+    if len(value) < MIN_SECRET_KEY_LENGTH:
+        return (
+            f"SECRET_KEY is {len(value)} characters; it must be at least "
+            f"{MIN_SECRET_KEY_LENGTH}. Anybody holding an ordinary token can "
+            "forge an admin one from a guessable signing key."
+        )
+    return None
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -100,6 +136,22 @@ class Settings(BaseSettings):
     #: Express onboarding returns to. Empty means "work it out from the request",
     #: which is right in development and wrong behind a proxy in production.
     public_base_url: str | None = None
+    #: **The legal entity the Connect platform account belongs to** — the line
+    #: this project exists to hold, written down where the code can read it.
+    #:
+    #: A live key with this unset makes every mutating Stripe call refuse.
+    #: Nothing about test mode changes. That asymmetry is the whole point: the
+    #: failure being guarded against is not a bug, it is somebody pasting a
+    #: live key into a service that is already working and money starting to
+    #: move through the wrong tax identity — a change with no error, no failing
+    #: test, and consequences that surface at the end of the tax year.
+    #:
+    #: It is a free-text name rather than a boolean because "yes I confirm" is
+    #: a box anybody ticks, and typing the entity's actual name is a sentence
+    #: somebody has to mean. It cannot verify *whose* EIN the Stripe account
+    #: was opened under — nothing in this process can — so the launch check
+    #: reports it as declared rather than verified, and says so.
+    stripe_platform_entity: str | None = None
 
     # ---------------------------------------------------------------------
     # Reviews (phase 7)
@@ -131,6 +183,29 @@ class Settings(BaseSettings):
         description="Platform cut in basis points. Read by phase 6, stored now.",
     )
 
+    @field_validator("public_base_url", "smtp_host", mode="before")
+    @classmethod
+    def strip_surrounding_whitespace(cls, v):
+        """**One spelling, read by everybody.**
+
+        `launch._unusable_base_url` stripped before parsing and
+        `payments._app_base()` did not, so `PUBLIC_BASE_URL="https://linx.example "`
+        validated clean and then produced a Checkout return URL with a space
+        in the middle of it — the launch panel green while Stripe could not
+        use the value at all. The same class of bug as one feed URL spelled
+        three ways being three calendars: two readers comparing different
+        normalisations of one setting.
+
+        Normalising here rather than in either reader is what stops a third
+        reader arriving with a third opinion. An empty result becomes None, so
+        `PUBLIC_BASE_URL="   "` is *unset* rather than a blank string that
+        every truthiness test would pass.
+        """
+        if isinstance(v, str):
+            v = v.strip()
+            return v or None
+        return v
+
     @field_validator("database_url")
     @classmethod
     def normalize_database_url(cls, v: str) -> str:
@@ -147,9 +222,13 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def reject_dev_secret_in_production(self) -> "Settings":
-        if self.environment == "production" and self.secret_key == DEV_SECRET_KEY:
+        if self.environment != "production":
+            return self
+        problem = weak_secret_key(self.secret_key)
+        if problem:
             raise ValueError(
-                "SECRET_KEY must be set to a real value when ENVIRONMENT=production"
+                f"{problem} SECRET_KEY must be a real value of at least "
+                f"{MIN_SECRET_KEY_LENGTH} characters when ENVIRONMENT=production"
             )
         return self
 

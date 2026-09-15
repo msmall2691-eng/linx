@@ -60,6 +60,23 @@ def migrated_database() -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
+def clean_process_caches() -> Iterator[None]:
+    """Process-global caches are state too, and they outlive TRUNCATE.
+
+    `payments._PLATFORM_CACHE` remembers which Connect platform a secret key
+    resolved to. Every test shares one fake key, so without this a test that
+    resolves a platform decides the answer for every test after it — and the
+    suite passes or fails on ordering, which is the kind of test failure that
+    gets rerun rather than read.
+    """
+    from app.services import payments
+
+    payments._PLATFORM_CACHE.clear()
+    yield
+    payments._PLATFORM_CACHE.clear()
+
+
+@pytest.fixture(autouse=True)
 def clean_tables() -> Iterator[None]:
     """Empty every table between tests, without rebuilding the schema."""
     yield

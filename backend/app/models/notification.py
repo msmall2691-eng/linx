@@ -122,6 +122,13 @@ class Notification(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     failure_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: Which sender configuration delivered this — host, port and from-address,
+    #: never the password. A `SENT` row on its own proves *a* sender worked and
+    #: says nothing about the one configured now, so the launch check would
+    #: have gone on reporting ready after `SMTP_HOST` was changed to something
+    #: broken. Null on rows written before this existed, and on anything not
+    #: actually delivered.
+    sent_via: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     recipient: Mapped["User"] = relationship()
     turnover: Mapped["Turnover | None"] = relationship()
