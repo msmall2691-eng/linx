@@ -322,6 +322,11 @@ def deliver_pending(db: Session, *, limit: int = DRAIN_LIMIT) -> int:
         if sender.delivers:
             row.status = NotificationStatus.SENT
             row.sent_at = datetime.now(timezone.utc)
+            # Which configuration delivered it. The launch check asks for a
+            # success through the sender that is configured *now*, because a
+            # `SENT` row from a host since replaced is evidence about a system
+            # nobody is using.
+            row.sent_via = sender.identity
             delivered += 1
         else:
             # The logging sender. The row stays pending with an attempt on it,

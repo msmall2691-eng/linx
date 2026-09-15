@@ -151,6 +151,17 @@ class CleanerProfile(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     stripe_account_livemode: Mapped[bool | None] = mapped_column(
         Boolean, nullable=True
     )
+    #: The *platform* account the connected account above was created under.
+    #:
+    #: The mode alone is a floor rather than the identity: a Stripe account
+    #: keeps one `acct_…` across test and live, so this does not tell the modes
+    #: apart, and two different platforms in the same mode compare equal on the
+    #: boolean. Both together are the whole answer. Reachable from the launch
+    #: order — step 4 opens a new platform account under the new entity, and
+    #: testing it first means new test keys.
+    stripe_platform_id: Mapped[str | None] = mapped_column(
+        String(255), nullable=True
+    )
 
     #: Read-only. Computed by Postgres; assigning to it raises on flush.
     can_take_jobs: Mapped[bool] = mapped_column(

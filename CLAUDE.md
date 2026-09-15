@@ -1060,13 +1060,22 @@ own lie. And `PUBLIC_BASE_URL` was checked as a URL when it is an *origin*:
 `payments._app_base()` appends `/cleaner/profile` to it, so a query or fragment
 does not sit where a path can follow, and `https://linx.example#preview` sends
 the browser to the site root with the callback buried in the fragment — almost
-right, which is worse than nowhere.
+right, which is worse than nowhere. The same setting was also read in two
+spellings: the check stripped whitespace before parsing and `_app_base()` did
+not, so a trailing space validated clean and then sat in the middle of a
+Checkout return URL. It is normalised once in `config.py` instead, because
+normalising in either reader is what lets a third arrive with a third opinion —
+the same failure as one feed URL spelled three ways being three calendars.
 
 **`SMTP_HOST` set is not `SMTP_HOST` working**, so that check has three answers
 rather than two, the same shape as `_payment_proven`: no host blocks, a host
 with a delivered notification behind it is ready, and a host nobody has
 successfully sent through is `attention` — the honest description of a fresh
-deployment. An unreachable host, a refused credential or a sender address the
+deployment. The evidence is scoped to the sender configured *now*
+(`notifications.sent_via`, written from `delivery.Sender.identity` — host, port
+and from-address, never the password): a `SENT` row proves *a* sender worked,
+so without that tie, changing `SMTP_HOST` to something broken left yesterday's
+success standing as proof about a system nobody is using. An unreachable host, a refused credential or a sender address the
 relay rejects all fail at send time and every notification sits `failed`, which
 a check titled *Notifications are actually sent* used to report as ready.
 
@@ -1080,9 +1089,18 @@ cleaner would have carried a test-mode account with `stripe_payouts_enabled`
 true, `payout_blocker` would have found nothing missing, and the first live
 destination charge would have named an account that does not exist: the owner
 charged and the transfer with nowhere to go, every row valid.
-`stripe_account_livemode` records it, and `payments.connected_account_is_foreign`
-is its one reader — NULL counts as foreign, because not knowing which platform
-an account is on is not knowing it is this one. The charge path **refuses**,
+`stripe_account_livemode` and `stripe_platform_id` record it, and
+`payments.connected_account_is_foreign` is their one reader — a NULL mode
+counts as foreign, because not knowing which platform an account is on is not
+knowing it is this one. **Two columns, because neither alone is the identity:**
+a Stripe account keeps one `acct_…` across test and live, so the platform id
+does not tell the modes apart, and two *different* platforms in the same mode
+compare equal on the boolean — which the launch order itself reaches, since
+step 4 opens a new platform account under the new entity and testing it first
+means new test keys. `payments.platform_account_id()` resolves the current
+platform in one cached call rather than one per cleaner, and returning None
+means *not known*: never a match, never a mismatch, because a Stripe blip
+turning every vetted cleaner unpayable is the opposite failure and just as bad. The charge path **refuses**,
 naming the remedy; the onboarding path **replaces**, because there somebody is
 deliberately connecting to the platform that is running now, and resetting the
 two flags keeps them refused until they actually finish. Migration 0009 does

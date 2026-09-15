@@ -237,6 +237,39 @@ def _return_urls(path: str) -> tuple[str, str]:
     return f"{base}{path}?stripe=refresh", f"{base}{path}?stripe=return"
 
 
+#: Keyed by the secret key, so a switched or rotated key re-resolves instead
+#: of being answered from the previous platform's cache.
+_PLATFORM_CACHE: dict[str, str] = {}
+
+
+def platform_account_id() -> str | None:
+    """The Connect platform this process is talking to, or None if unknown.
+
+    **One call, not one per cleaner.** Asking `GET /accounts/{id}` about every
+    connected account would answer the same question N times and put N network
+    calls into an admin page load; the platform's own identity answers it once.
+
+    Cached for the process against the key that produced it, so rotating or
+    switching the key re-resolves rather than serving a stale answer. A Stripe
+    that cannot be reached returns None, which every caller must read as *not
+    known* — never as a match and never as a mismatch.
+    """
+    key = settings.stripe_secret_key or ""
+    cached = _PLATFORM_CACHE.get(key)
+    if cached is not None:
+        return cached
+    if not stripe_client.is_configured():
+        return None
+    try:
+        account = stripe_client.get("/account")
+    except stripe_client.StripeError:
+        return None
+    resolved = account.get("id")
+    if resolved:
+        _PLATFORM_CACHE[key] = resolved
+    return resolved
+
+
 def connected_account_is_foreign(profile: CleanerProfile) -> bool:
     """Does this profile hold an account belonging to a *different* platform?
 
@@ -258,7 +291,17 @@ def connected_account_is_foreign(profile: CleanerProfile) -> bool:
     """
     if not profile.stripe_account_id:
         return False
-    return profile.stripe_account_livemode is not stripe_client.live_mode()
+    if profile.stripe_account_livemode is not stripe_client.live_mode():
+        return True
+    # Two platforms in the same mode compare equal on the boolean, so the mode
+    # is a floor rather than the identity. The platform is compared only when
+    # both sides are known: an unresolved current platform (Stripe unreachable,
+    # no key) must not turn every cleaner unpayable, and a NULL stored id is a
+    # row from before this was recorded.
+    current = platform_account_id()
+    if current and profile.stripe_platform_id:
+        return profile.stripe_platform_id != current
+    return False
 
 
 def ensure_connected_account(db: Session, *, user: User, profile: CleanerProfile) -> str:
@@ -303,6 +346,10 @@ def ensure_connected_account(db: Session, *, user: User, profile: CleanerProfile
 
     profile.stripe_account_id = account["id"]
     profile.stripe_account_livemode = livemode
+    # Recorded here because this is the one moment we are already talking to
+    # the platform that owns the account. None when Stripe would not say, which
+    # leaves the mode as the floor rather than writing down a guess.
+    profile.stripe_platform_id = platform_account_id()
     # Both are facts about the account being replaced, and neither carries
     # over. A cleaner whose test-mode account was enabled has not been through
     # anything in live mode.

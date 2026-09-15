@@ -1754,3 +1754,82 @@ class TestAnAccountBelongsToAPlatform:
         payments.refresh_connect_status(db, profile)
         assert not [c for c in stripe.calls[before:] if c[1].startswith("/accounts/")]
         assert profile.stripe_payouts_enabled is True, "the row was rewritten"
+
+
+class TestTwoPlatformsInOneMode:
+    """The mode boolean is the floor; the platform is the identity.
+
+    A Stripe account keeps one `acct_…` id across test and live, so the
+    platform alone cannot tell the modes apart — and two different platforms in
+    the same mode compare equal on the boolean. Both together are the answer,
+    and the second half is reachable from the launch order: step 4 opens a new
+    platform account under the new entity, and testing it first means new
+    *test* keys.
+    """
+
+    def test_a_same_mode_platform_change_makes_the_account_foreign(
+        self, db: Session, stripe, make_cleaner, monkeypatch
+    ) -> None:
+        cleaner = make_cleaner(cleared=True)
+        profile = _payout_ready(db, cleaner)
+        profile.stripe_platform_id = "acct_the_platform_it_was_made_on"
+        db.commit()
+
+        stripe.responses["/account"] = {"id": "acct_the_platform_it_was_made_on"}
+        assert payments.payout_blocker(profile) is None
+
+        payments._PLATFORM_CACHE.clear()
+        stripe.responses["/account"] = {"id": "acct_a_different_platform"}
+        assert payments.connected_account_is_foreign(profile), (
+            "same mode, different platform — the boolean matched and nothing "
+            "compared the platforms"
+        )
+        assert payments.payout_blocker(profile) is not None
+
+    def test_an_unresolvable_platform_does_not_make_everyone_foreign(
+        self, db: Session, stripe, make_cleaner, monkeypatch
+    ) -> None:
+        """**None means not known.** A Stripe blip must not turn every vetted
+        cleaner unpayable — that is the opposite failure, and just as bad."""
+        cleaner = make_cleaner(cleared=True)
+        profile = _payout_ready(db, cleaner)
+        profile.stripe_platform_id = "acct_the_platform"
+        db.commit()
+
+        monkeypatch.setattr(payments, "platform_account_id", lambda: None)
+        assert not payments.connected_account_is_foreign(profile)
+        assert payments.payout_blocker(profile) is None
+
+    def test_a_row_predating_the_column_falls_back_to_the_mode(
+        self, db: Session, stripe, make_cleaner, monkeypatch
+    ) -> None:
+        cleaner = make_cleaner(cleared=True)
+        profile = _payout_ready(db, cleaner)
+        profile.stripe_platform_id = None
+        db.commit()
+
+        monkeypatch.setattr(payments, "platform_account_id", lambda: "acct_platform")
+        assert not payments.connected_account_is_foreign(profile)
+
+        monkeypatch.setattr(settings, "stripe_secret_key", "sk_live_real")
+        assert payments.connected_account_is_foreign(profile), (
+            "the mode floor stopped applying once the platform was unknown"
+        )
+
+    def test_onboarding_records_the_platform_it_created_on(
+        self, db: Session, stripe, client, make_cleaner
+    ) -> None:
+        cleaner = make_cleaner(cleared=True)
+        stripe.responses["/account"] = {"id": "acct_this_platform"}
+        stripe.responses["/accounts"] = {"id": "acct_new_connected"}
+
+        resp = client.post("/api/payouts/onboarding", headers=cleaner["auth"])
+        assert resp.status_code == 200, resp.text
+
+        profile = db.execute(
+            select(CleanerProfile).where(
+                CleanerProfile.user_id == uuid.UUID(cleaner["user"]["id"])
+            )
+        ).scalar_one()
+        assert profile.stripe_platform_id == "acct_this_platform"
+        assert profile.stripe_account_livemode is False

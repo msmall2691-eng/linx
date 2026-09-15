@@ -60,7 +60,7 @@ in `app/preflight.py` and is not repeated.
 | Notifications are actually sent | Three answers, not two. No `SMTP_HOST` blocks — every notification is then recorded, logged and left `pending`, and an owner learns their cleaner cancelled by arriving at a dirty house. A host with a delivered message behind it is ready. A host nobody has successfully sent through is *attention*: set is not reachable, and a bad host, a refused credential or a rejected sender address all fail at send time |
 | The scheduled pass ran recently | See below |
 | Stripe key, webhook secret, base URL | Without the webhook secret a checkout starts, the money moves at Stripe, and this database never hears. `PUBLIC_BASE_URL` must be a public https **origin** — return paths are appended to it, so a query or fragment would land after them and never be read as a path |
-| Payout accounts belong to this platform | Stripe objects are mode-scoped and the `acct_…` does not say which mode it came from. See step 6 of the order below — this is the one the launch sequence itself creates |
+| Payout accounts belong to this platform | Stripe objects are scoped to a platform *and* a mode, and the `acct_…` says neither. See step 6 of the order below — this is the one the launch sequence itself creates. Both are recorded, because a platform keeps one id across modes and two platforms in one mode compare equal on the mode |
 | A payment has settled here | Evidence, rather than a memory of having tested it |
 
 ### The scheduled pass

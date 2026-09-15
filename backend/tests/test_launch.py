@@ -25,7 +25,7 @@ from sqlalchemy.orm import Session
 
 from app.models.enums import UserRole
 from app.models.task_run import TaskRun
-from app.services import launch, stripe_client
+from app.services import delivery, launch, payments, stripe_client
 from app.services.launch import State
 
 
@@ -651,6 +651,7 @@ class TestSetIsNotTheSameAsDelivering:
                 dedupe_key=f"test:{uuid.uuid4()}",
                 subject="s",
                 body="b",
+                sent_via=delivery.get_sender().identity,
             )
         )
         db.commit()
@@ -744,8 +745,10 @@ class TestThePlatformTheAccountsAreOn:
         ).scalar_one()
         profile.stripe_account_id = "acct_from_test_mode"
         profile.stripe_account_livemode = False
+        profile.stripe_platform_id = "acct_platform"
         profile.stripe_payouts_enabled = True
         db.commit()
+        monkeypatch.setattr(payments, "platform_account_id", lambda: "acct_platform")
 
         # Still on the test key it was made under: nothing to say.
         assert (
@@ -770,3 +773,270 @@ class TestThePlatformTheAccountsAreOn:
         source = inspect.getsource(launch._stripe_account_modes)
         assert "connected_account_is_foreign" in source
         assert callable(payments.connected_account_is_foreign)
+
+
+class TestTheModeColumnIsAFloorNotAProof:
+    """A boolean cannot tell two same-mode platforms apart.
+
+    `stripe_account_livemode` catches the transition the launch order actually
+    prescribes — test mode on the deployed site, then the live key — because
+    those differ in mode. Step 4 opens a *new* Connect platform account under
+    the new entity, and testing that first means new **test** keys: two
+    platforms, one mode, one boolean, compared equal.
+    """
+
+    def _with_account(self, db: Session, make_cleaner, platform: str | None) -> None:
+        from app.models.cleaner_profile import CleanerProfile
+
+        cleaner = make_cleaner(cleared=True)
+        profile = db.execute(
+            select(CleanerProfile).where(
+                CleanerProfile.user_id == uuid.UUID(cleaner["user"]["id"])
+            )
+        ).scalar_one()
+        profile.stripe_account_id = f"acct_{uuid.uuid4().hex[:12]}"
+        profile.stripe_account_livemode = False
+        profile.stripe_platform_id = platform
+        profile.stripe_payouts_enabled = True
+        db.commit()
+
+    def test_a_same_mode_platform_change_blocks(
+        self, db: Session, ready_env, make_cleaner, monkeypatch
+    ) -> None:
+        self._with_account(db, make_cleaner, "acct_the_old_platform")
+        monkeypatch.setattr(payments, "platform_account_id", lambda: "acct_the_new_one")
+
+        check = _by_key(launch.run_checks(db), "stripe_account_modes")
+        assert check.state is State.BLOCKED, (
+            "a same-mode platform change reported ready — the mode booleans "
+            "matched and nothing compared the platforms"
+        )
+        assert check.remedy
+
+    def test_the_same_platform_is_ready(
+        self, db: Session, ready_env, make_cleaner, monkeypatch
+    ) -> None:
+        self._with_account(db, make_cleaner, "acct_platform")
+        monkeypatch.setattr(payments, "platform_account_id", lambda: "acct_platform")
+        check = _by_key(launch.run_checks(db), "stripe_account_modes")
+        assert check.state is State.READY
+
+    def test_an_unresolvable_platform_is_unverifiable_not_ready(
+        self, db: Session, ready_env, make_cleaner, monkeypatch
+    ) -> None:
+        """**The two-state mistake, in the check most able to make it.**
+
+        Stripe unreachable means nothing is known — and an unknown counted as
+        a pass is exactly what the fourth state exists to refuse.
+        """
+        self._with_account(db, make_cleaner, "acct_platform")
+        monkeypatch.setattr(payments, "platform_account_id", lambda: None)
+        check = _by_key(launch.run_checks(db), "stripe_account_modes")
+        assert check.state is State.UNVERIFIABLE
+        assert check in launch.outstanding(launch.run_checks(db))
+
+    def test_an_account_from_before_the_platform_was_recorded_is_unverifiable(
+        self, db: Session, ready_env, make_cleaner, monkeypatch
+    ) -> None:
+        """Right mode, unknown platform. Not a pass, because the mode is the
+        floor rather than the answer — and not a block, because nothing says
+        it is wrong."""
+        self._with_account(db, make_cleaner, None)
+        monkeypatch.setattr(payments, "platform_account_id", lambda: "acct_platform")
+        check = _by_key(launch.run_checks(db), "stripe_account_modes")
+        assert check.state is State.UNVERIFIABLE
+
+    def test_no_accounts_asks_stripe_nothing(
+        self, db: Session, ready_env, monkeypatch
+    ) -> None:
+        """Nothing to verify is ready, not unverifiable — and costs no call."""
+
+        def explode():
+            raise AssertionError("resolved the platform with nothing to compare")
+
+        monkeypatch.setattr(payments, "platform_account_id", explode)
+        assert (
+            _by_key(launch.run_checks(db), "stripe_account_modes").state is State.READY
+        )
+
+    def test_the_platform_costs_one_network_call_however_many_cleaners(
+        self, db: Session, ready_env, make_cleaner, monkeypatch
+    ) -> None:
+        """N cleaners must not mean N Stripe calls in an admin page load.
+
+        The predicate is asked per row — that is what makes it a single author
+        — so the cache in `platform_account_id` is what keeps the *network*
+        cost at one. This counts the calls that actually leave the process.
+        """
+        from app.services import payments as payments_module
+
+        for _ in range(3):
+            self._with_account(db, make_cleaner, "acct_platform")
+
+        payments_module._PLATFORM_CACHE.clear()
+        calls = []
+
+        def counted(path, **kwargs):
+            calls.append(path)
+            return {"id": "acct_platform"}
+
+        monkeypatch.setattr(stripe_client, "is_configured", lambda: True)
+        monkeypatch.setattr(stripe_client, "get", counted)
+
+        check = _by_key(launch.run_checks(db), "stripe_account_modes")
+        assert check.state is State.READY
+        assert calls.count("/account") == 1, (
+            f"asked Stripe for the platform {calls.count('/account')} times "
+            "with three cleaners on the list"
+        )
+        payments_module._PLATFORM_CACHE.clear()
+
+    def test_a_switched_key_is_not_answered_from_the_old_cache(
+        self, ready_env, monkeypatch
+    ) -> None:
+        """The cache is keyed by the secret key, because the whole failure this
+        guards is somebody changing which platform the key points at."""
+        from app.services import payments as payments_module
+
+        payments_module._PLATFORM_CACHE.clear()
+        monkeypatch.setattr(stripe_client, "is_configured", lambda: True)
+        monkeypatch.setattr(stripe_client, "get", lambda p, **kw: {"id": "acct_one"})
+        assert payments.platform_account_id() == "acct_one"
+
+        monkeypatch.setattr(ready_env, "stripe_secret_key", "sk_test_a_different_one")
+        monkeypatch.setattr(stripe_client, "get", lambda p, **kw: {"id": "acct_two"})
+        assert payments.platform_account_id() == "acct_two", (
+            "the new key was answered from the previous platform's cache"
+        )
+        payments_module._PLATFORM_CACHE.clear()
+
+    def test_an_unreachable_stripe_resolves_to_unknown_not_a_mismatch(
+        self, ready_env, monkeypatch
+    ) -> None:
+        """None must read as *not known* — never as a match, and never as a
+        mismatch that turns every cleaner unpayable during a Stripe blip."""
+        from app.services import payments as payments_module
+
+        payments_module._PLATFORM_CACHE.clear()
+
+        def unreachable(path, **kwargs):
+            raise stripe_client.StripeError("could not reach Stripe")
+
+        monkeypatch.setattr(stripe_client, "is_configured", lambda: True)
+        monkeypatch.setattr(stripe_client, "get", unreachable)
+        assert payments.platform_account_id() is None
+
+
+class TestEvidenceForTheSenderConfiguredNow:
+    """A `SENT` row proves *a* sender worked, not the one configured now.
+
+    Change `SMTP_HOST` to something broken after one successful send and the
+    count stays positive — historical success standing as proof about a system
+    nobody is using, on the check titled *Notifications are actually sent*.
+    """
+
+    def _sent_through(self, db: Session, admin_user, identity: str | None) -> None:
+        from app.models.enums import (
+            NotificationChannel,
+            NotificationEvent,
+            NotificationStatus,
+        )
+        from app.models.notification import Notification
+
+        db.add(
+            Notification(
+                recipient_id=admin_user["user"].id,
+                destination=admin_user["user"].email,
+                event=NotificationEvent.BID_RECEIVED,
+                channel=NotificationChannel.EMAIL,
+                status=NotificationStatus.SENT,
+                dedupe_key=f"test:{uuid.uuid4()}",
+                subject="s",
+                body="b",
+                sent_via=identity,
+            )
+        )
+        db.commit()
+
+    def _identity(self) -> str:
+        from app.services import delivery
+
+        return delivery.get_sender().identity
+
+    def test_a_send_through_the_current_sender_is_ready(
+        self, db: Session, ready_env, admin_user
+    ) -> None:
+        self._sent_through(db, admin_user, self._identity())
+        check = _by_key(launch.run_checks(db), "email")
+        assert check.state is State.READY
+
+    def test_a_send_through_a_replaced_sender_is_not(
+        self, db: Session, ready_env, admin_user, monkeypatch
+    ) -> None:
+        self._sent_through(db, admin_user, self._identity())
+        assert _by_key(launch.run_checks(db), "email").state is State.READY
+
+        monkeypatch.setattr(ready_env, "smtp_host", "a-different-relay.example")
+        check = _by_key(launch.run_checks(db), "email")
+        assert check.state is State.ATTENTION, (
+            "yesterday's success stood as evidence for a sender replaced since"
+        )
+        assert "has since been replaced" in check.detail
+
+    def test_a_row_from_before_the_column_is_not_evidence(
+        self, db: Session, ready_env, admin_user
+    ) -> None:
+        """Null is "not evidence for this", which is correct rather than a gap
+        — the migration deliberately does not backfill a guess."""
+        self._sent_through(db, admin_user, None)
+        assert _by_key(launch.run_checks(db), "email").state is State.ATTENTION
+
+    def test_the_identity_never_carries_the_password(self) -> None:
+        from app.services import delivery
+
+        sender = delivery.SmtpSender(
+            host="relay.example",
+            port=587,
+            username="user",
+            password="hunter2",
+            use_tls=True,
+            sender="linx@example",
+        )
+        assert "hunter2" not in sender.identity
+        assert "relay.example" in sender.identity
+
+
+class TestOneSpellingOfTheBaseUrl:
+    """`launch` stripped before parsing and `payments._app_base()` did not.
+
+    So `PUBLIC_BASE_URL="https://linx.example "` validated clean and then
+    produced a Checkout return URL with a space in the middle of it — the panel
+    green while Stripe could not use the value at all.
+    """
+
+    def test_the_setting_is_normalised_once_for_every_reader(self) -> None:
+        from app.config import Settings
+
+        s = Settings(
+            database_url="postgresql://x/y",
+            public_base_url="  https://linx.example  ",
+        )
+        assert s.public_base_url == "https://linx.example"
+
+    def test_whitespace_only_is_unset_rather_than_blank(self) -> None:
+        from app.config import Settings
+
+        s = Settings(database_url="postgresql://x/y", public_base_url="   ")
+        assert s.public_base_url is None
+
+    def test_the_check_and_the_payment_path_see_the_same_value(
+        self, db: Session, ready_env, monkeypatch
+    ) -> None:
+        """The assertion that would have caught it: compare what the check
+        validated against what the URL builder actually uses."""
+        from app.services import payments
+
+        monkeypatch.setattr(ready_env, "public_base_url", "https://linx.example")
+        assert _by_key(launch.run_checks(db), "public_base_url").state is State.READY
+        assert " " not in payments._app_base()
+        assert payments._app_base() == "https://linx.example"

@@ -48,6 +48,21 @@ class Sender:
     #: for a delivered email.
     delivers: bool = True
 
+    @property
+    def identity(self) -> str:
+        """Which configuration this is, recorded on what it delivers.
+
+        A `SENT` row proves *a* sender worked; without this it does not say
+        which, so changing `SMTP_HOST` to something broken left yesterday's
+        success standing as evidence for today's configuration. The launch
+        check reads it, which is the whole point — evidence that is not tied to
+        what it is evidence *for* is not evidence.
+
+        The password is deliberately not in it. This is stored on every
+        delivered row and read back onto a screen.
+        """
+        return "unknown"
+
     def send(self, message: Outgoing) -> None:  # pragma: no cover - interface
         raise NotImplementedError
 
@@ -56,6 +71,10 @@ class LoggingSender(Sender):
     """The launch posture: record it, log it, do not pretend it was sent."""
 
     delivers = False
+
+    @property
+    def identity(self) -> str:
+        return "log"
 
     def send(self, message: Outgoing) -> None:
         logger.info(
@@ -89,6 +108,12 @@ class SmtpSender(Sender):
         self.password = password
         self.use_tls = use_tls
         self.sender = sender
+
+    @property
+    def identity(self) -> str:
+        """Host, port and from-address — the three that decide whether a relay
+        accepts the message. Never the password."""
+        return f"{self.host}:{self.port} as {self.sender}"
 
     def send(self, message: Outgoing) -> None:
         email = EmailMessage()

@@ -183,6 +183,29 @@ class Settings(BaseSettings):
         description="Platform cut in basis points. Read by phase 6, stored now.",
     )
 
+    @field_validator("public_base_url", "smtp_host", mode="before")
+    @classmethod
+    def strip_surrounding_whitespace(cls, v):
+        """**One spelling, read by everybody.**
+
+        `launch._unusable_base_url` stripped before parsing and
+        `payments._app_base()` did not, so `PUBLIC_BASE_URL="https://linx.example "`
+        validated clean and then produced a Checkout return URL with a space
+        in the middle of it — the launch panel green while Stripe could not
+        use the value at all. The same class of bug as one feed URL spelled
+        three ways being three calendars: two readers comparing different
+        normalisations of one setting.
+
+        Normalising here rather than in either reader is what stops a third
+        reader arriving with a third opinion. An empty result becomes None, so
+        `PUBLIC_BASE_URL="   "` is *unset* rather than a blank string that
+        every truthiness test would pass.
+        """
+        if isinstance(v, str):
+            v = v.strip()
+            return v or None
+        return v
+
     @field_validator("database_url")
     @classmethod
     def normalize_database_url(cls, v: str) -> str:

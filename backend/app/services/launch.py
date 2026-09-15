@@ -50,7 +50,7 @@ from app.models.enums import NotificationStatus
 from app.models.notification import Notification
 from app.models.payment import PaymentIn
 from app.models.task_run import TaskRun
-from app.services import notifications, payments, stripe_client
+from app.services import delivery, notifications, payments, stripe_client
 
 #: The name the scheduled pass records itself under.
 SCHEDULED_TASK_NAME = "scheduled"
@@ -264,6 +264,64 @@ def _stripe_mode() -> Check:
     )
 
 
+def _stripe_accounts_verified(profiles: list) -> Check:
+    """**The mode is a floor, not the identity, so this compares platforms.**
+
+    `stripe_account_livemode` catches the transition the launch order actually
+    prescribes — test mode on the deployed site, then the live key — because
+    those two differ in mode. It cannot catch a change of *platform* within one
+    mode, and that is reachable here: step 4 opens a new Connect platform
+    account under the new entity, and testing it first means new **test** keys.
+    Two same-mode platforms compare equal on a boolean.
+
+    `payments.platform_account_id()` is one call for the whole check rather
+    than one per cleaner, because the platform's own identity answers the
+    question once. An unresolved platform leaves this **unverifiable** rather
+    than ready: counting "could not ask" as a pass is the two-state mistake in
+    the check most able to make it.
+    """
+    count = len(profiles)
+    current = payments.platform_account_id()
+    if not current:
+        return Check(
+            "stripe_account_modes",
+            "Payout accounts belong to this platform",
+            State.UNVERIFIABLE,
+            f"{count} cleaner(s) hold a connected account created in this "
+            "mode, but the configured Stripe platform could not be read, so "
+            "whether the accounts belong to it is unknown.",
+            "Run the check again with a reachable Stripe key.",
+        )
+
+    # No second comparison here. An account on another platform is already
+    # foreign to `connected_account_is_foreign`, which the caller asked before
+    # reaching this, and restating the rule is how the screen and the runtime
+    # come to disagree about the same cleaner. What is left for this function
+    # is the states that predicate cannot express: it answers True or False,
+    # and "I could not find out" is neither.
+    unrecorded = [p for p in profiles if p.stripe_platform_id is None]
+    if unrecorded:
+        return Check(
+            "stripe_account_modes",
+            "Payout accounts belong to this platform",
+            State.UNVERIFIABLE,
+            f"{len(unrecorded)} of {count} connected account(s) predate the "
+            "platform being recorded, so nothing here can say which one they "
+            "belong to. They are in the right *mode*, which is the floor "
+            "rather than the answer.",
+            "Have those cleaners connect payouts again if this platform has "
+            "ever been changed within one mode.",
+        )
+
+    return Check(
+        "stripe_account_modes",
+        "Payout accounts belong to this platform",
+        State.READY,
+        f"All {count} connected account(s) were created under {current}, the "
+        "platform configured now.",
+    )
+
+
 def _stripe_account_modes(db: Session) -> Check:
     """Do any cleaners hold a connected account from the other platform?
 
@@ -281,16 +339,18 @@ def _stripe_account_modes(db: Session) -> Check:
     profiles = db.execute(
         select(CleanerProfile).where(CleanerProfile.stripe_account_id.is_not(None))
     ).scalars().all()
-    foreign = [p for p in profiles if payments.connected_account_is_foreign(p)]
-
-    if not foreign:
+    if not profiles:
         return Check(
             "stripe_account_modes",
             "Payout accounts belong to this platform",
             State.READY,
-            f"{len(profiles)} cleaner(s) have a connected account, and every "
-            "one of them was created on the platform now configured.",
+            "No cleaner has connected a payout account yet.",
         )
+
+    foreign = [p for p in profiles if payments.connected_account_is_foreign(p)]
+
+    if not foreign:
+        return _stripe_accounts_verified(profiles)
 
     return Check(
         "stripe_account_modes",
@@ -490,18 +550,46 @@ def _email_sender(db: Session) -> Check:
             "Set SMTP_HOST and its credentials.",
         )
 
+    # **Scoped to the sender configured now.** A `SENT` row proves that *a*
+    # sender worked; changing SMTP_HOST, the port or the from-address to
+    # something broken used to leave yesterday's success standing as evidence
+    # about today's configuration. `Sender.identity` is what ties the two
+    # together, and rows written before it existed are null — which reads as
+    # "not evidence for this", correctly.
+    identity = delivery.get_sender().identity
     sent = db.execute(
         select(func.count())
         .select_from(Notification)
-        .where(Notification.status == NotificationStatus.SENT)
+        .where(
+            Notification.status == NotificationStatus.SENT,
+            Notification.sent_via == identity,
+        )
     ).scalar_one()
     if sent:
         return Check(
             "email",
             "Notifications are actually sent",
             State.READY,
-            f"SMTP_HOST is {settings.smtp_host}, and {sent} notification(s) "
-            "have been delivered from this database.",
+            f"{sent} notification(s) have been delivered through {identity}, "
+            "which is the sender configured now.",
+        )
+
+    delivered_by_something_else = db.execute(
+        select(func.count())
+        .select_from(Notification)
+        .where(Notification.status == NotificationStatus.SENT)
+    ).scalar_one()
+    if delivered_by_something_else:
+        return Check(
+            "email",
+            "Notifications are actually sent",
+            State.ATTENTION,
+            f"{delivered_by_something_else} notification(s) have been "
+            f"delivered from this database, but none through {identity}. A "
+            "success recorded against a sender that has since been replaced "
+            "says nothing about the one configured now.",
+            "Trigger one real notification and confirm it arrives through the "
+            "current sender.",
         )
 
     failed = db.execute(
