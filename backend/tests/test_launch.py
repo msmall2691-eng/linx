@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import threading
+import uuid
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -409,3 +410,95 @@ class TestTwoPassesAtOnce:
             )
         ).scalar_one()
         assert count == 1, "still one row answering one question"
+
+
+class TestTheCheckAsksRatherThanCopies:
+    """**A readiness check that re-derives a rule is a second author of it.**
+
+    The console rule from phase 8 applies here for the same reason: a screen
+    that disagrees with the alert somebody was sent makes both untrustworthy,
+    and there is no way to tell which is lying. These two assert the check is
+    reading the owning function rather than a copy that happens to agree today.
+    """
+
+    def test_a_deactivated_admin_does_not_count_as_a_recipient(
+        self, db: Session, ready_env
+    ) -> None:
+        """**The check said yes to precisely the failure it exists to catch.**
+
+        `notifications.admins` requires `is_active`; counting `role == ADMIN`
+        was half the rule. A database holding only deactivated admins reported
+        that somebody receives the alerts while every one of them resolved to
+        an empty list.
+        """
+        from app.core.security import hash_password
+        from app.models.user import User
+
+        db.add(
+            User(
+                email="retired@example.com",
+                hashed_password=hash_password("x"),
+                full_name="Retired Admin",
+                role=UserRole.ADMIN,
+                is_active=False,
+            )
+        )
+        db.commit()
+
+        check = _by_key(launch.run_checks(db), "admin")
+        assert check.state is State.BLOCKED, (
+            "a deactivated admin was counted as somebody who receives alerts"
+        )
+        assert "active admin" in check.detail
+
+        # And an active one settles it — the same query the sender runs.
+        db.add(
+            User(
+                email="working@example.com",
+                hashed_password=hash_password("x"),
+                full_name="Working Admin",
+                role=UserRole.ADMIN,
+            )
+        )
+        db.commit()
+        assert _by_key(launch.run_checks(db), "admin").state is State.READY
+
+    def test_settled_means_what_payments_says_it_means(
+        self, db: Session, ready_env, monkeypatch, make_open_turnover
+    ) -> None:
+        """`payments.settled()` is the single author of "has this been
+        collected", and this asserts the check *reads* it.
+
+        **A real payment row is what makes this discriminating.** Patching the
+        set and asserting the answer stays `attention` proves nothing against
+        an empty table — a hardcoded copy also counts zero and also says
+        `attention`, so the test would pass either way. With a row present, a
+        copy keeps answering from its own list and never flips.
+        """
+        from app.models.enums import PaymentStatus
+        from app.models.payment import PaymentIn
+        from app.services import payments
+
+        job = make_open_turnover()
+        db.add(
+            PaymentIn(
+                turnover_id=uuid.UUID(job["turnover"]["id"]),
+                amount_cents=20_000,
+                platform_fee_cents=3_000,
+                status=PaymentStatus.PENDING,
+            )
+        )
+        db.commit()
+
+        # Nothing has settled: `pending` is not in the real set.
+        assert _by_key(launch.run_checks(db), "payment_proven").state is State.ATTENTION
+
+        # Redefine what settled means, and the check must follow.
+        monkeypatch.setattr(
+            payments, "SETTLED_STATUSES", frozenset({PaymentStatus.PENDING})
+        )
+        moved = _by_key(launch.run_checks(db), "payment_proven")
+        assert moved.state is State.READY, (
+            "the check did not follow `payments.SETTLED_STATUSES`, so it is "
+            "answering from a copy of the set rather than from its owner"
+        )

@@ -43,11 +43,9 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.config import DEV_SECRET_KEY, settings
-from app.models.enums import PaymentStatus, UserRole
 from app.models.payment import PaymentIn
 from app.models.task_run import TaskRun
-from app.models.user import User
-from app.services import stripe_client
+from app.services import notifications, payments, stripe_client
 
 #: The name the scheduled pass records itself under.
 SCHEDULED_TASK_NAME = "scheduled"
@@ -289,7 +287,12 @@ def _payment_proven(db: Session) -> Check:
     settled = db.execute(
         select(func.count())
         .select_from(PaymentIn)
-        .where(PaymentIn.status.in_([PaymentStatus.SUCCEEDED, PaymentStatus.REFUNDED]))
+        # `payments.SETTLED_STATUSES`, not a hand-written copy of it. The same
+        # mistake as the admin count above, one function over, and currently
+        # latent only because the two lists happen to agree: `settled()` is the
+        # single author of "has this been collected", and a second spelling of
+        # its set is a disagreement waiting for somebody to edit one of them.
+        .where(PaymentIn.status.in_(tuple(payments.SETTLED_STATUSES)))
     ).scalar_one()
     return _check(
         "payment_proven",
@@ -381,17 +384,26 @@ def _admin_exists(db: Session) -> Check:
     every admin alert resolves to nobody and is silently addressed to an empty
     list — the vetting queue, the unclaimed alarm, every dispute.
     """
-    admins = db.execute(
-        select(func.count()).select_from(User).where(User.role == UserRole.ADMIN)
-    ).scalar_one()
+    # **Ask the sender, do not re-derive its rule.** Counting `role == ADMIN`
+    # was a second copy of the recipient rule that happened to be missing half
+    # of it: `notifications.admins` also requires `is_active`, so a database
+    # holding only deactivated admins made this check report ready while every
+    # alert it is about resolved to an empty list — the check saying yes to
+    # precisely the failure it exists to catch.
+    #
+    # Adding `is_active` here would have fixed today and left the second copy
+    # in place. Calling the function means the next change to who counts as a
+    # recipient arrives here on its own.
+    recipients = notifications.admins(db)
     return _check(
         "admin",
         "Somebody receives the admin alerts",
-        admins > 0,
-        when_true=f"{admins} admin account(s).",
-        when_false="There is no admin user. Every alert addressed to 'an admin' "
-        "— vetting, unclaimed jobs, disputes, no-shows — resolves to nobody.",
-        remedy="Create an admin user.",
+        bool(recipients),
+        when_true=f"{len(recipients)} active admin account(s).",
+        when_false="There is no active admin user. Every alert addressed to "
+        "'an admin' — vetting, unclaimed jobs, disputes, no-shows — resolves "
+        "to nobody.",
+        remedy="Create an admin user, or reactivate one.",
     )
 
 

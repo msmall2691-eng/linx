@@ -1025,6 +1025,16 @@ something is merely unexamined. Three items are permanently in that state: whose
 entity the Connect account belongs to, whether anybody has walked a candidate
 through Checkr, and whether a human actually works the dispute inbox.
 
+**The check asks the function that owns each rule rather than re-deriving it**
+— the console rule from phase 8, for the same reason, and it was got wrong
+twice. `_admin_exists` counted `role == ADMIN` while `notifications.admins`
+also requires `is_active`, so a database holding only deactivated admins
+reported that somebody receives the alerts while every one of them resolved to
+an empty list: the check saying yes to precisely the failure it exists to
+catch. `_payment_proven` hand-copied `{succeeded, refunded}`, which *is*
+`payments.SETTLED_STATUSES` — latent only because the two agreed. Both now call
+the owner, so the next change to either rule arrives here on its own.
+
 **Everything checked fails silently.** Anything that shouts on its own — a bad
 `DATABASE_URL`, a missing `SECRET_KEY` — already stops the boot in
 `app/preflight.py` and is not given a second home. What is here is the other
