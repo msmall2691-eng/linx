@@ -1189,14 +1189,49 @@ class TestTheSenderIdentityCoversEverySetting:
         assert "hunter2" not in identity
         assert "user" not in identity.replace("linx@example", "")
 
-    def test_the_digest_is_salted_rather_than_a_bare_password_hash(self) -> None:
-        """Two deployments sharing a password must not share a digest, or the
-        digest is a lookup key for the password."""
+    def test_the_fingerprint_is_not_an_offline_password_oracle(self) -> None:
+        """**Salting is not enough here.**
+
+        `sent_via` is stored in the database and rendered on an admin screen,
+        and the host and port are printed beside the digest while usernames are
+        guessable — so a fast hash salted with public values stops a
+        precomputed table and nothing else. Anybody who could read the column
+        held a verifier for guessing the SMTP password, which is an exposure
+        the field itself created.
+
+        Keyed under `SECRET_KEY`, the digest is uncomputable without the
+        application secret, so this asserts the secret actually participates.
+        """
         import hashlib
 
-        bare = hashlib.sha256(b"hunter2").hexdigest()[:12]
-        assert bare not in self._sender().identity
-        assert (
-            self._sender().identity.split("#")[-1]
-            != self._sender(host="another-relay.example").identity.split("#")[-1]
-        )
+        from app.config import settings
+
+        identity = self._sender().identity
+        assert hashlib.sha256(b"hunter2").hexdigest()[:12] not in identity
+
+        original = settings.secret_key
+        try:
+            settings.secret_key = "a-completely-different-application-secret"
+            assert self._sender().identity != identity, (
+                "the secret does not participate, so the digest is computable "
+                "by anyone holding the public fields"
+            )
+        finally:
+            settings.secret_key = original
+
+    @pytest.mark.parametrize(
+        ("left", "right"),
+        [
+            ({"username": "a|b", "password": "c"}, {"username": "a", "password": "b|c"}),
+            ({"username": "a", "password": ""}, {"username": "", "password": "a"}),
+            ({"host": "a.example", "sender": "b@example"},
+             {"host": "a.example\u0000b@example", "sender": ""}),
+        ],
+    )
+    def test_the_fields_cannot_be_confused_with_each_other(
+        self, left: dict, right: dict
+    ) -> None:
+        """Joining on a delimiter is not injective: two different, perfectly
+        valid configurations serialise to the same bytes, so switching between
+        them would leave old evidence standing."""
+        assert self._sender(**left).identity != self._sender(**right).identity

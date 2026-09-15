@@ -1073,9 +1073,16 @@ with a delivered notification behind it is ready, and a host nobody has
 successfully sent through is `attention` — the honest description of a fresh
 deployment. The evidence is scoped to the sender configured *now*
 (`notifications.sent_via`, written from `delivery.Sender.identity` — every
-setting that decides whether a delivery succeeds, with the credentials as a
-salted digest rather than plaintext, because this is read back onto an admin
-screen and a password on a screen is a password in a screenshot; host, port and
+setting that decides whether a delivery succeeds, with the credentials as an
+HMAC under `SECRET_KEY` rather than plaintext, because this is read back onto an
+admin screen and a password on a screen is a password in a screenshot — and
+**keyed rather than merely salted**, since the host and port are printed beside
+the digest and usernames are guessable, so a fast salted hash would have handed
+anybody who could read the column an offline oracle for the SMTP password.
+Rotating `SECRET_KEY` re-reads past deliveries as "a sender since replaced",
+which is the conservative direction. The material is JSON rather than a
+delimiter join, because `"|".join` is not injective — username `a|b` with
+password `c` and username `a` with password `b|c` are the same bytes; host, port and
 from-address alone left `SMTP_USERNAME`, `SMTP_PASSWORD` and `SMTP_USE_TLS`
 able to change underneath it): a `SENT` row proves *a* sender worked,
 so without that tie, changing `SMTP_HOST` to something broken left yesterday's

@@ -20,6 +20,8 @@ that leaves a person wondering whether they were told.
 from __future__ import annotations
 
 import hashlib
+import hmac
+import json
 import logging
 import smtplib
 from dataclasses import dataclass
@@ -121,28 +123,49 @@ class SmtpSender(Sender):
         the same staleness this field exists to stop, one setting over.
 
         The readable half names the host so the launch check can say which
-        relay it means. The credentials go through a digest instead: this is
-        written to every delivered row and read back onto an admin screen, and
-        a password on a screen is a password in a screenshot.
+        relay it means. The credentials go through a fingerprint instead: this
+        is written to every delivered row and read back onto an admin screen,
+        and a password on a screen is a password in a screenshot.
 
-        It is **salted with the host, port and username** rather than being a
-        bare hash of the password, so the digest cannot be matched against a
-        precomputed table — the same reasoning as `source_feed_key` being a
-        digest because the feed URL is a credential. Truncated because what is
-        needed is "did this change", not a cryptographic commitment.
+        **Keyed, not merely salted.** The version before this hashed the
+        credentials with the host, port and username as salt, which stops a
+        precomputed table and nothing else: the host and port are printed
+        beside the digest, usernames are guessable, and SHA-256 is fast — so
+        anybody who could read `sent_via` held an offline oracle for guessing
+        the SMTP password. That is a *new* exposure, created by the field that
+        was supposed to make the launch check honest. HMAC under
+        `SECRET_KEY` keeps the identity comparable while making it useless to
+        anyone without the application secret.
+
+        Rotating `SECRET_KEY` therefore re-reads every past delivery as having
+        gone through "a sender since replaced", and the check drops to
+        `attention`. That is the conservative direction — it asks for one more
+        real notification rather than claiming readiness — and rotating the
+        signing key already invalidates every session, so it is not a quiet day.
+
+        **Encoded, not delimited.** `"|".join(...)` is not injective: username
+        `a|b` with password `c` and username `a` with password `b|c` produce
+        the same bytes, so switching between two valid configurations could
+        leave the identity unchanged. JSON of a fixed-length list escapes its
+        own separators, which is the whole property needed.
         """
-        secrets_fingerprint = hashlib.sha256(
-            "|".join(
-                [
-                    self.host,
-                    str(self.port),
-                    self.username or "",
-                    self.password or "",
-                    "tls" if self.use_tls else "plain",
-                ]
-            ).encode()
+        material = json.dumps(
+            [
+                self.host,
+                self.port,
+                self.username,
+                self.password,
+                self.use_tls,
+                self.sender,
+            ],
+            separators=(",", ":"),
+        )
+        fingerprint = hmac.new(
+            (settings.secret_key or "").encode(),
+            material.encode(),
+            hashlib.sha256,
         ).hexdigest()[:12]
-        return f"{self.host}:{self.port} as {self.sender} #{secrets_fingerprint}"
+        return f"{self.host}:{self.port} as {self.sender} #{fingerprint}"
 
     def send(self, message: Outgoing) -> None:
         email = EmailMessage()
