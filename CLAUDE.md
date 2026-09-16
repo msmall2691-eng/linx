@@ -281,6 +281,24 @@ cleaner has for pricing, so it is asked for and shown on the board.
 The privacy boundary below does not soften for a home — it matters more.
 Somebody lives there.
 
+**And the front door has three audiences, not two.** Reopening residential made
+the product serve a second kind of owner and left `Landing.jsx` describing only
+the first — a hero about guests leaving at 11, a closing button reading "I own
+a rental", and a signup role to match. Everything worked; a home owner reading
+it would simply have concluded, on the evidence in front of them, that this was
+an Airbnb product. That failure is invisible to the whole test suite, because
+the page renders perfectly.
+
+The fix is the shape already used for cleaners rather than a broader hero: a
+section of their own, a preview of their own (`HomePreview` — a home's job is a
+different card, not a rental's with the checkin blanked out) and a door of their
+own, plus one **signpost** above the fold so nobody leaves before reaching it. A
+hedged hero would cost the sharp case and still not name the home out loud.
+`tests/e2e/test_landing.py` asserts each audience reaches a signup form that has
+not just told them they took a wrong turn — and that the page promises no
+recurring schedule, which is the one thing a home owner would assume and v1
+deliberately does not do.
+
 ### Several jobs at once, for the owner a feed cannot serve
 
 A booking calendar is the fast path onto the board, and **two kinds of owner

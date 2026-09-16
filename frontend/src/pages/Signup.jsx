@@ -11,12 +11,16 @@ const MIN_PASSWORD_LENGTH = 10
 const ROLES = [
   {
     value: 'owner',
-    label: 'I own a rental',
-    hint: 'Post turnovers and pick a cleaner.',
+    // One role covers a short-term rental and a home. The label says both out
+    // loud because the landing page sends "I own a home" here, and a form that
+    // then asks whether you own a rental has just told that person they took a
+    // wrong turn.
+    label: 'I have a place to clean',
+    hint: 'A rental or a home — post jobs and pick a cleaner.',
     heading: 'What happens next',
     points: [
-      'Add your property — nickname, address, and anything a cleaner needs to know.',
-      'Post a turnover with the checkout and the next checkin.',
+      'Add your property — a short-term rental or a home, with anything a cleaner needs to know.',
+      'Post a job: a turnover between guests, or the date a home is due a clean.',
       'Cleaners near you bid. You see their price, their rating and whether their vetting is finished.',
       'You pay when the job is marked done. Not when you book it.',
     ],
