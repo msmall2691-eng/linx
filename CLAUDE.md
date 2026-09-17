@@ -289,15 +289,35 @@ it would simply have concluded, on the evidence in front of them, that this was
 an Airbnb product. That failure is invisible to the whole test suite, because
 the page renders perfectly.
 
-The fix is the shape already used for cleaners rather than a broader hero: a
-section of their own, a preview of their own (`HomePreview` — a home's job is a
-different card, not a rental's with the checkin blanked out) and a door of their
-own, plus one **signpost** above the fold so nobody leaves before reaching it. A
-hedged hero would cost the sharp case and still not name the home out loud.
-`tests/e2e/test_landing.py` asserts each audience reaches a signup form that has
-not just told them they took a wrong turn — and that the page promises no
-recurring schedule, which is the one thing a home owner would assume and v1
-deliberately does not do.
+The first fix kept the rental hero and gave the home a section of its own
+further down, with a signpost above the fold — the shape the page already used
+for cleaners. **That was wrong, and it is worth keeping written down why:** it
+is an Airbnb page with an annex. The hero is the only part most people read, so
+a second audience addressed below the fold is a second audience not addressed.
+
+**The page shows instead of saying.** The headline names what all three
+audiences actually arrived worrying about — somebody you would trust with your
+keys — and `SwitchablePreview` puts a rental's job and a home's in the same
+square inch, so "is this for someone like me" is answered by a picture rather
+than a paragraph. That switch is what let the homes section, the signpost and
+most of the page's prose be deleted rather than rewritten. `HomePreview` is a
+different card, not a rental's with the checkin blanked out: no window, no
+`same_day` rung, and the scope of work a rental's does not carry.
+
+**The visuals are inline SVG in `components/Icons.jsx`, deliberately not a
+package** — an icon library ships hundreds of glyphs to render seven, and this
+is a landing page. `components/UrgencyLadder.jsx` draws the ladder, which is
+the product's distinctive signal and was the one thing the page never showed.
+Its bar is the *time left*, so it shrinks as the rung gets hotter — a bar that
+grew with urgency would read backwards — and it takes the four `urgency.*`
+colors from the Tailwind config that the badges use, so the picture and the
+badge cannot drift into different palettes.
+
+`tests/e2e/test_landing.py` asserts each audience reaches a signup form that
+has not just told them they took a wrong turn, that the switch actually
+switches, and two honesty rules: the page promises no recurring schedule (the
+one thing a home owner would assume and v1 deliberately does not do) and claims
+no volume it cannot back up.
 
 ### Several jobs at once, for the owner a feed cannot serve
 

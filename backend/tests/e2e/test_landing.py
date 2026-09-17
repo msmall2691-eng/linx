@@ -1,15 +1,15 @@
 """The front door, clicked through in a browser — once per audience.
 
-There are three people this page has to work for: an owner with a short-term
-rental, an owner with a home, and a cleaner. The first and the third have had
-a door of their own since the page existed. The second did not, and the failure
-was invisible to every test in this suite, because the page rendered perfectly
-and simply described a product a home owner would conclude was not for them.
+Three people arrive here: an owner with a short-term rental, an owner with a
+home, and a cleaner. The first and third have had a door since the page
+existed. The second did not, and the failure was invisible to every other test
+in this suite, because the page rendered perfectly and simply described a
+product a home owner would conclude was not for them.
 
-So these tests are about **reachability, not wording**: each audience gets from
-the front page to a signup form that has not just told them they took a wrong
-turn. Copy is asserted only where the copy is the feature — the signpost, and
-the one claim about repeating that the product deliberately does not support.
+These tests are about **reachability and honesty, not wording**: each audience
+gets to a signup form that fits them, the page shows a home's job rather than
+only claiming to serve one, and it promises nothing the product does not do.
+Copy is asserted only where the copy *is* the feature.
 """
 
 from __future__ import annotations
@@ -25,97 +25,130 @@ pytestmark = pytest.mark.e2e
 
 
 class TestEveryAudienceHasADoor:
-    """Three doors, and each one lands somewhere that fits the person."""
+    """Two doors for three people, because a home and a rental sign up alike."""
 
-    def test_a_rental_owner_reaches_the_owner_signup(self, page, live_server):
+    def test_an_owner_reaches_the_owner_signup(self, page, live_server):
         page.goto(live_server)
         page.get_by_test_id("owner-cta").click()
         page.wait_for_url(re.compile(r"/signup"))
         expect(page.locator("#full_name")).to_be_visible()
         assert page.locator("input[name=role][value=owner]").is_checked()
 
-    def test_a_home_owner_reaches_the_same_signup_and_is_not_told_otherwise(
+    def test_the_owner_role_names_a_home_as_well_as_a_rental(
         self, page, live_server
     ):
-        """The journey this page was missing, and it crosses two screens.
+        """The door is only half of it.
 
-        The door is only half of it. A button reading "I own a home" that
-        lands on a form headed "I own a rental" has taken the trouble to
-        welcome somebody and then told them they are in the wrong place — so
-        the assertion is on where they arrive, not only that they can leave.
+        A page that welcomes somebody with a house and then hands them a form
+        headed "I own a rental" has taken the trouble to invite them and then
+        told them they are in the wrong place — so the assertion is on where
+        they arrive, not only that they can leave.
         """
         page.goto(live_server)
-        page.get_by_test_id("home-cta").click()
+        page.get_by_test_id("owner-cta").click()
         page.wait_for_url(re.compile(r"/signup"))
-        assert page.locator("input[name=role][value=owner]").is_checked()
 
-        # The role they just chose must name them rather than exclude them.
         chosen = page.locator("label", has=page.locator("input[value=owner]"))
         text = chosen.inner_text().lower()
         assert "home" in text, "the owner role does not mention a home at all"
         assert "i own a rental" not in text
 
-    def test_a_cleaner_still_reaches_the_cleaner_signup(self, page, live_server):
-        """A regression guard: the cleaner's section was edited for this too."""
+    def test_a_cleaner_reaches_the_cleaner_signup(self, page, live_server):
         page.goto(live_server)
         page.get_by_test_id("cleaner-cta").click()
         page.wait_for_url(re.compile(r"/signup"))
         assert page.locator("input[name=role][value=cleaner]").is_checked()
 
-    def test_the_closing_row_offers_all_three(self, page, live_server):
+    def test_the_cleaners_own_section_has_a_door_too(self, page, live_server):
         page.goto(live_server)
-        page.get_by_test_id("home-owner-cta").click()
+        page.get_by_test_id("cleaner-cta-footer").click()
         page.wait_for_url(re.compile(r"/signup"))
-        assert page.locator("input[name=role][value=owner]").is_checked()
+        assert page.locator("input[name=role][value=cleaner]").is_checked()
 
 
-class TestNobodyLeavesBeforeTheirSection:
-    """The hero is about guests arriving at 4, which is not a home's problem."""
+class TestTheHeroShowsBothKindsOfJob:
+    """The switch is what makes one page serve two kinds of owner.
 
-    def test_the_signpost_reaches_the_home_section(self, page, live_server):
-        """A `#homes` link with no `id="homes"` lints clean, builds clean, and
-        silently does nothing — which is exactly the failure the signpost
-        exists to prevent, arriving by a different route."""
+    It replaced a section further down the page, which is a real trade: a
+    section is always present and a switch has to be operated. So these assert
+    the switch actually switches, rather than that a button exists.
+    """
+
+    def test_it_opens_on_a_rental(self, page, live_server):
         page.goto(live_server)
-        signpost = page.get_by_test_id("homes-signpost")
-        expect(signpost).to_be_visible()
-        assert signpost.get_attribute("href") == "#homes"
-        expect(page.locator("#homes")).to_have_count(1)
+        expect(page.get_by_test_id("preview-rental")).to_have_attribute(
+            "aria-pressed", "true"
+        )
 
-    def test_the_home_section_carries_its_own_preview(self, page, live_server):
-        """Its own screen, like the cleaner's — not the rental card with the
-        checkin blanked out, which is what a home's job actually is not."""
+    def test_switching_to_a_home_shows_a_home_s_job(self, page, live_server):
+        """Not the rental card with the checkin blanked out — a different card.
+
+        A home has no next guest, so its job carries no window; it carries the
+        scope of work instead, which is the thing a cleaner pricing one needs
+        and a rental's card does not have.
+        """
         page.goto(live_server)
-        homes = page.locator("#homes")
-        expect(homes).to_contain_text("Clean due")
-        # A home has no next guest, so its preview may not show one.
-        assert "checkin" not in homes.inner_text().lower()
+        page.get_by_test_id("preview-home").click()
+
+        expect(page.get_by_test_id("preview-home")).to_have_attribute(
+            "aria-pressed", "true"
+        )
+        hero = page.locator("section").first
+        expect(hero).to_contain_text("Clean due")
+        expect(hero).to_contain_text("Deep clean")
+        # A home has no guest arriving, so the card may not mention one.
+        assert "checkin" not in hero.inner_text().lower()
+
+    def test_switching_back_restores_the_rental(self, page, live_server):
+        page.goto(live_server)
+        page.get_by_test_id("preview-home").click()
+        page.get_by_test_id("preview-rental").click()
+        hero = page.locator("section").first
+        expect(hero).to_contain_text("checkin")
+
+
+class TestTheLadderIsOnThePage:
+    """The product's core signal, which the page used not to show at all."""
+
+    def test_all_four_rungs_are_drawn(self, page, live_server):
+        page.goto(live_server)
+        ladder = page.get_by_test_id("urgency-ladder")
+        expect(ladder).to_be_visible()
+        for rung in ("Standard", "Soon", "Urgent", "Same day"):
+            expect(ladder).to_contain_text(rung)
 
 
 class TestItPromisesOnlyWhatTheProductDoes:
-    """The page's own standing rule, applied to the newest claims on it."""
+    """The page's standing rule, applied to its newest claims."""
 
     def test_nothing_on_it_promises_a_recurring_schedule(self, page, live_server):
         """Recurring schedules are out of scope for v1, and a home owner is
-        exactly who would assume otherwise. `create_many` writes the dates it
-        was given and then forgets it did — so "every other Tuesday" is a
-        promise this page must not make, in any of its spellings."""
+        exactly who would assume otherwise — "every other Tuesday" is the first
+        thing you want from a house cleaner. `create_many` writes the dates it
+        was given and then forgets it did, so this is a promise the page must
+        not make, in any of its spellings."""
         page.goto(live_server)
         body = page.locator("body").inner_text().lower()
         for claim in ("recurring", "weekly clean", "every week", "on repeat"):
             assert claim not in body, f"the landing page promises {claim!r}"
-        # And says so plainly rather than merely staying quiet.
-        expect(page.locator("#homes")).to_contain_text("Nothing repeats on its own")
 
     def test_the_board_really_does_carry_both(self, page, live_server):
-        """The cleaner's section now says home cleans appear on the board. That
-        is only true because `board.py` filters on distance and status and not
-        on property type — a claim resting on the *absence* of a line of code,
+        """The cleaner's section says home cleans appear on the board. That is
+        true only because `board.py` filters on distance and status and not on
+        property type — a claim resting on the *absence* of a line of code,
         which is the kind that goes stale without anything failing."""
         from app.api.routes import board as board_module
 
-        source = board_module.__file__
-        with open(source, encoding="utf-8") as handle:
+        with open(board_module.__file__, encoding="utf-8") as handle:
             text = handle.read()
         assert "Property.property_type ==" not in text
         assert "property_type !=" not in text
+
+    def test_it_says_nothing_about_how_many_people_use_it(self, page, live_server):
+        """No invented volume. The first cleaner to sign up finds out the real
+        number immediately, and a page that implied a crowd has spent its
+        credibility before they have posted anything."""
+        page.goto(live_server)
+        body = page.locator("body").inner_text().lower()
+        for boast in ("trusted by", "join thousands", "customers served", "5-star"):
+            assert boast not in body, f"the landing page boasts {boast!r}"
