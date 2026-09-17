@@ -1,7 +1,11 @@
 import { Link } from 'react-router-dom'
 import { useEffect, useState } from 'react'
 
-import { CleanerPreview, OwnerPreview } from '../components/ProductPreview.jsx'
+import {
+  CleanerPreview,
+  HomePreview,
+  OwnerPreview,
+} from '../components/ProductPreview.jsx'
 import { apiFetch } from '../lib/api.js'
 
 /**
@@ -12,6 +16,16 @@ import { apiFetch } from '../lib/api.js'
  * either, so this one picks a side: owners are the ones with the problem that
  * has a date on it. Cleaners get their own section, their own preview and their
  * own call to action rather than a smaller share of the same paragraph.
+ *
+ * **There are three audiences, not two, and a home is the third.** Residential
+ * was reopened, so an owner whose place is somebody's house can use all of
+ * this — and read a hero about guests leaving at 11 and conclude, correctly on
+ * the evidence in front of them, that it is an Airbnb product. The fix is the
+ * same shape as the one for cleaners rather than a broader hero: a section of
+ * their own, a preview of their own and a door of their own. A hedged hero
+ * would cost the sharp case and still not name the home out loud. What the
+ * hero does carry is a **signpost** — one line, above the fold, so nobody is
+ * turned away before the section that is for them.
  *
  * Everything claimed here is something the product does today. No invented
  * volume, no "trusted by hundreds" — the first cleaners to sign up will find
@@ -48,7 +62,7 @@ export default function Landing() {
         <div className="grid items-center gap-10 lg:grid-cols-2">
           <div>
             <p className="text-sm font-semibold uppercase tracking-wide text-brand-600">
-              {region ? `Now serving ${region}` : 'Short-term rental turnovers'}
+              {region ? `Now serving ${region}` : 'Rental turnovers and home cleans'}
             </p>
             <h1 className="mt-3 text-4xl font-bold tracking-tight sm:text-5xl">
               Your guests leave at 11. The next ones arrive at 4.
@@ -70,6 +84,17 @@ export default function Landing() {
             <p className="mt-4 text-sm text-slate-500">
               Free to post. No subscription, no lead fees.
             </p>
+
+            {/* The signpost, not a hedge. A home owner who reads the headline
+                above has every reason to think this is an Airbnb product, and
+                they would leave before reaching the section written for them. */}
+            <p className="mt-2 text-sm text-slate-500">
+              Not a rental?{' '}
+              <a href="#homes" className="text-brand-700 underline" data-testid="homes-signpost">
+                Homes get cleaned here too
+              </a>
+              .
+            </p>
           </div>
 
           <div className="lg:pl-6">
@@ -83,10 +108,11 @@ export default function Landing() {
         <div className="mx-auto max-w-6xl px-4 py-14">
           <h2 className="text-2xl font-bold tracking-tight">How it works</h2>
           <ol className="mt-8 grid gap-8 sm:grid-cols-3">
-            <Step number="1" title="Post the window">
-              Checkout time and the next checkin. The tighter the gap, the higher the
-              job sits on every cleaner&rsquo;s board — a same-day turnaround is
-              flagged as one.
+            <Step number="1" title="Post the job">
+              For a rental, the checkout and the next checkin — the tighter the gap,
+              the higher it sits on every cleaner&rsquo;s board, and a same-day
+              turnaround is flagged as one. For a home, simply when the clean is
+              due, and the sooner it is, the higher it sits.
             </Step>
             <Step number="2" title="Pick from the bids">
               Cleaners name their own price. You see their rating, whether their
@@ -100,6 +126,60 @@ export default function Landing() {
         </div>
       </section>
 
+      {/* --- the home owner's door, the same shape as the cleaner's --- */}
+      <section id="homes" className="border-b border-slate-200 bg-slate-50">
+        <div className="mx-auto max-w-6xl px-4 py-16">
+          <div className="grid items-center gap-10 lg:grid-cols-2">
+            <div>
+              <p className="text-sm font-semibold uppercase tracking-wide text-brand-600">
+                For homes
+              </p>
+              <h2 className="mt-3 text-3xl font-bold tracking-tight">
+                No guests. Just a house that needs cleaning.
+              </h2>
+              <p className="mt-4 text-lg text-slate-600">
+                Same cleaners, same vetting, same pay-when-it&rsquo;s-done. A home has
+                no checkout and nobody arriving at 4 — so you say when the clean is
+                due, and that is the whole difference.
+              </p>
+
+              <ul className="mt-6 space-y-2 text-slate-600">
+                <li>
+                  · A standard clean, a deep clean, or a move-out — you pick, and the
+                  cleaners bidding can see which.
+                </li>
+                <li>
+                  · Square footage is optional. Plenty of people genuinely
+                  don&rsquo;t know it, and a guessed number is worse than none.
+                </li>
+                {/* Recurring schedules are out of scope for v1, and this is the
+                    one place somebody would assume otherwise. Saying it plainly
+                    is cheaper than the support email, and `create_many` is a real
+                    answer rather than an apology. */}
+                <li>
+                  · Nothing repeats on its own yet — you post the dates you want.
+                  You can post a season of them in one go.
+                </li>
+              </ul>
+
+              <div className="mt-8">
+                <Link
+                  to="/signup?role=owner"
+                  className="btn-primary inline-flex"
+                  data-testid="home-cta"
+                >
+                  Post a clean for your home
+                </Link>
+              </div>
+            </div>
+
+            <div className="lg:pl-6">
+              <HomePreview />
+            </div>
+          </div>
+        </div>
+      </section>
+
       {/* --- trust, which is the actual objection --- */}
       <section className="mx-auto max-w-6xl px-4 py-14">
         <h2 className="text-2xl font-bold tracking-tight">
@@ -107,6 +187,11 @@ export default function Landing() {
         </h2>
         <p className="mt-2 max-w-2xl text-slate-600">
           That is the whole objection, so here is exactly what stands behind it.
+          {/* The boundary does not soften for a home — it matters more, because
+              somebody lives there. The section that follows is the same for
+              both, and this is the sentence that says so out loud. */}{' '}
+          None of it is different for a home. If anything it matters more there,
+          because somebody lives in it.
         </p>
 
         <div className="mt-8 grid gap-6 sm:grid-cols-2 lg:grid-cols-4">
@@ -153,9 +238,9 @@ export default function Landing() {
                 Pick your own jobs. Name your own price.
               </h2>
               <p className="mt-4 text-lg text-slate-300">
-                Turnovers near you, with the time, the size and what the owner budgeted
-                — before you bid. No bidding wars on a lead you paid for, because you
-                never pay for a lead.
+                Turnovers and home cleans near you, with the time, the size and what
+                the owner budgeted — before you bid. No bidding wars on a lead you
+                paid for, because you never pay for a lead.
               </p>
 
               <ul className="mt-6 space-y-2 text-slate-300">
@@ -192,9 +277,15 @@ export default function Landing() {
           One region, so the cleaners on here are actually near you. If that is where
           your place is, this is for you.
         </p>
+        {/* Two of these go to the same place, deliberately. The question the
+            button answers is "is this for someone like me", which routing does
+            not answer and a label does. */}
         <div className="mt-8 flex flex-wrap justify-center gap-3">
           <Link to="/signup?role=owner" className="btn-primary">
             I own a rental
+          </Link>
+          <Link to="/signup?role=owner" className="btn-primary" data-testid="home-owner-cta">
+            I own a home
           </Link>
           <Link to="/signup?role=cleaner" className="btn-secondary">
             I clean

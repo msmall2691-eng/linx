@@ -112,3 +112,62 @@ export function CleanerPreview() {
     </Frame>
   )
 }
+
+/**
+ * A home's job, which is a different card rather than the same card with a
+ * field missing.
+ *
+ * A home has no next guest, so there is no window and no `same_day` rung — the
+ * urgency is read on how soon the clean itself is due, which is the same
+ * measure a standing vacancy uses. The scope is the thing a rental's card does
+ * not carry at all: a standard clean and a move-out are different jobs, and a
+ * cleaner pricing one needs to know which.
+ */
+export function HomePreview() {
+  return (
+    <Frame label="Your home clean">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <p className="font-semibold">Maple Street</p>
+          <p className="mt-0.5 text-sm text-slate-600">
+            Clean due Thu 10:00 am
+          </p>
+        </div>
+        <UrgencyBadge urgency="soon" />
+      </div>
+
+      <p className="mt-3 inline-flex rounded-lg bg-slate-100 px-2 py-1 text-xs font-medium text-slate-700">
+        Deep clean · 3 bed · 1,400 sq ft
+      </p>
+
+      <p className="mt-4 text-xs font-medium uppercase tracking-wide text-slate-500">
+        2 bids
+      </p>
+      <ul className="mt-2 space-y-2">
+        {[
+          { name: 'Rowan P.', price: '$210', rating: '4.8', reviews: '9 reviews' },
+          { name: 'Alex D.', price: '$235', rating: '5.0', reviews: '3 reviews' },
+        ].map((bid) => (
+          <li
+            key={bid.name}
+            className="flex items-center justify-between gap-3 rounded-lg border border-slate-200 px-3 py-2"
+          >
+            <div className="min-w-0">
+              <p className="text-sm font-medium">{bid.name}</p>
+              <p className="text-xs text-slate-500">
+                <span className="text-amber-500">★ {bid.rating} · </span>
+                {bid.reviews} · Vetting complete
+              </p>
+            </div>
+            <div className="flex shrink-0 items-center gap-2">
+              <span className="text-sm font-semibold">{bid.price}</span>
+              <span className="rounded-lg bg-brand-600 px-2 py-1 text-xs font-semibold text-white">
+                Accept
+              </span>
+            </div>
+          </li>
+        ))}
+      </ul>
+    </Frame>
+  )
+}
