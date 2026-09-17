@@ -71,15 +71,22 @@ function Feed({ feed, propertyId, onChanged, timeZone }) {
           >
             {busy ? 'Reading…' : 'Sync now'}
           </button>
+          {/* Removing is reversible now: the calendar is archived rather than
+              deleted, so the jobs it proposed keep pointing at it and pasting
+              the same address back reconnects *this* feed instead of proposing
+              every booking a second time. The label says so, because an owner
+              who thinks removal is final will not try. */}
           <button
             type="button"
             className="btn-secondary text-red-700"
             disabled={busy}
+            title="The jobs it already proposed stay. Add the same address again to reconnect."
             onClick={() =>
               act(`/properties/${propertyId}/calendars/${feed.id}`, {
                 method: 'DELETE',
               })
             }
+            data-testid="remove-calendar"
           >
             Remove
           </button>

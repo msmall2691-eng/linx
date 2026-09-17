@@ -82,6 +82,32 @@ class PropertyCalendar(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         Boolean, nullable=False, default=True, server_default="true"
     )
 
+    #: When the owner disconnected this feed — **removal is an archive, not a
+    #: delete**, and that is what gives feed identity something stable to hang
+    #: on.
+    #:
+    #: A feed's identity is not observable from outside: the export URL rotates,
+    #: the event UIDs are arbitrary feed-local strings, and the one genuinely
+    #: stable thing is this row's id. Deleting the row threw that away, so
+    #: reconnecting found nothing of its own and proposed every booking again —
+    #: one stay, two jobs. Three separate keys were tried to work around it and
+    #: each had an edge at one end or the other, because they were all
+    #: reconstructions of an identity that had been destroyed rather than kept.
+    #:
+    #: So the row survives, `turnovers.source_calendar_id` keeps pointing at it,
+    #: and reconnecting the same URL reactivates *this* calendar. The unique
+    #: constraint on `(property_id, url)` is what makes that findable: an
+    #: archived row still holds its URL, so a second add on the same URL lands
+    #: on this row rather than creating a rival.
+    #:
+    #: **Distinct from `is_active`, deliberately.** That is the owner's pause
+    #: switch: still connected, still on the panel, not being read right now.
+    #: This one means gone from the panel. Conflating them would make "pause"
+    #: and "remove" the same button with two labels.
+    removed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+
     # --- what happened last time, kept visible -----------------------------
     #
     # A sync that quietly stops working looks exactly like a calendar with no

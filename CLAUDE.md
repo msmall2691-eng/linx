@@ -332,7 +332,7 @@ It is deliberately **not a second calendar source**. It writes no
 `property_calendars` row, claims no `external_ref`, and is never reconciled
 against anything afterwards: the owner said these dates once, and from then on
 the rows are ordinary turnovers they own. Everything in `calendars.py` about
-identity, adoption and vanishing bookings exists because a feed keeps
+identity, reconnection and vanishing bookings exists because a feed keeps
 *talking*; a list somebody typed does not, and borrowing that machinery would
 have meant maintaining rules with nothing behind them.
 
@@ -398,18 +398,8 @@ one sentence: **linx owns the turnover; the listing site owns the booking.**
    goes, because nothing was staffed for it. A posted or awarded job stays and
    is *reported* — a guest cancelling does not get to cancel a cleaner.
 4. **Identity is the event's UID *and* its RECURRENCE-ID, not its dates** —
-   unique on `(source_calendar_id, external_ref)`. **It survives the calendar
-   being removed**: deleting a feed is `ON DELETE SET NULL` because a job
-   outlives the calendar that proposed it, and re-adding the same feed is the
-   *documented* way to change its URL — so `reconcile` adopts an orphan on the
-   same property carrying the same event id **and the same
-   `turnovers.source_feed_key`** rather than proposing the booking a second
-   time. Without adoption, remove-and-re-add turned one stay into two jobs;
-   without the feed key, adoption reached too far — UIDs are arbitrary
-   feed-local strings, so two listings on one property whose feeds reuse one
-   would hand each other's jobs over. The key is a digest rather than the URL
-   because the URL is a credential. A booking whose dates move is
-   one booking; without that it becomes a second job while the first sits
+   unique on `(source_calendar_id, external_ref)`. A booking whose dates move
+   is one booking; without that it becomes a second job while the first sits
    orphaned. The RECURRENCE-ID half is iCalendar's own rule rather than a
    workaround: an overridden occurrence legitimately repeats its parent's UID,
    and reading the UID alone made two events one identity — so both rows were
@@ -421,6 +411,48 @@ one sentence: **linx owns the turnover; the listing site owns the booking.**
    identity too long for `external_ref` is **hashed, never truncated** — two long
    UIDs sharing a prefix would truncate to the same identity, which is the one
    thing identity may never do.
+
+   **Removal archives the calendar rather than deleting it, and that is what
+   makes the identity above stable.** A feed has no identity observable from
+   outside: the export URL rotates, the UIDs are arbitrary feed-local strings,
+   and the one genuinely stable thing is the calendar row. Deleting it threw
+   that away, so reconnecting found nothing of its own and proposed every
+   booking again — one stay, two jobs. Three different keys were tried to
+   reconstruct identity afterwards and each had an edge at one end or the
+   other, because they were all reconstructions of something that should not
+   have been destroyed. `turnovers.source_feed_key` was the last of them and is
+   gone; so is the adoption pass in `reconcile`.
+
+   So `calendars.archive` stamps `property_calendars.removed_at` and the row
+   stays, with every turnover still pointing at it — there is no window in
+   which a job's source is unknown. `calendars.reconnect` brings it back when
+   the owner pastes the same address again, which is what an owner actually
+   does rather than pressing a reactivate button. **The unique constraint on
+   `(property_id, url)` is the mechanism**: an archived row still holds its
+   URL, so a second add collides with it, and whether that collision is a
+   reconnect or a genuine duplicate depends only on whether the row it hit is
+   archived. Reconnect locks the row before reading its state, `populate_existing`
+   included, because two adds of the same archived URL would otherwise both see
+   it archived and both reactivate.
+
+   **`removed_at` is not `is_active`.** That one is the owner's pause switch —
+   still connected, still on the panel, not being read right now. Conflating
+   them would make pause and remove the same button with two labels, so
+   `_gate` refuses each separately and in different words: a paused feed is
+   turned back on, a removed one is reconnected. `for_property` hides archived
+   rows from the panel and `active_calendars` excludes them from the scheduled
+   pass, which matters more than it looks — archived rows live forever, so
+   without that the pass would fetch every feed any owner ever disconnected.
+
+   Two consequences worth naming. `_refresh_if_present` used to ask "is the row
+   still there", because a concurrent DELETE made it vanish; rows do not vanish
+   now, so it asks whether the feed is still *connected* — the race changed
+   shape rather than going away, and a check written against the old shape
+   would have reported a cheerful count of jobs for a feed the owner had just
+   removed. And nothing in the product deletes a `Property` either, so the
+   `ON DELETE SET NULL` on `turnovers.source_calendar_id` is now unreachable in
+   normal operation. It stays as a safety net for a row deleted by hand, but it
+   is no longer load-bearing and should not be read as though it were.
 5. **An unreadable feed changes nothing.** "The feed is empty" legitimately
    deletes drafts, so "the feed did not load" must never look the same. A
    failure is recorded on the calendar row and every turnover is left alone.
