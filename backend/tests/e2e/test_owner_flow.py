@@ -251,3 +251,38 @@ def test_connecting_a_calendar_refreshes_the_jobs_beside_it(page, live_server) -
         page.get_by_test_id("add-calendar").click()
 
     assert reread.value is not None
+
+
+def test_removing_a_feed_and_pasting_it_back_reconnects_it(page, live_server) -> None:
+    """**Removal archives the calendar, and the owner's way back is the
+    address**, not a button on a row that is no longer on their screen.
+
+    That is the whole interaction issue #18 turned on, and it is exactly the
+    kind that endpoint tests cannot see: `tests/test_calendars.py` proves
+    `reconnect` returns the same row and proposes nothing new, but it cannot
+    prove the panel lets somebody *reach* it. If Remove left the card on screen,
+    or the form refused the address it had just removed, every one of those
+    tests would still pass while the feature was unusable.
+
+    The URL is deliberately unfetchable — `_refuse_private_address` correctly
+    refuses loopback, so a feed this process could serve is not available here.
+    What is pinned is the flow: the card goes, the same address is accepted
+    again rather than refused as a duplicate, and one card comes back.
+    """
+    _signup_owner(page, live_server)
+    _add_property(page, live_server, nickname="Reconnect Cottage")
+
+    url = "https://example.invalid/reconnect.ics"
+    expect(page.get_by_test_id("calendar-feeds")).to_be_visible()
+    page.get_by_test_id("calendar-url").fill(url)
+    page.get_by_test_id("add-calendar").click()
+    expect(page.get_by_test_id("calendar-feed")).to_have_count(1)
+
+    page.get_by_test_id("remove-calendar").click()
+    expect(page.get_by_test_id("calendar-feed")).to_have_count(0)
+
+    # The same address again. A live duplicate is a 409 and would leave the
+    # count at zero with an error on screen; a reconnect brings the row back.
+    page.get_by_test_id("calendar-url").fill(url)
+    page.get_by_test_id("add-calendar").click()
+    expect(page.get_by_test_id("calendar-feed")).to_have_count(1)
