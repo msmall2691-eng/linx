@@ -1,3 +1,5 @@
+import { useState } from 'react'
+
 import UrgencyBadge from './UrgencyBadge.jsx'
 
 /**
@@ -169,5 +171,54 @@ export function HomePreview() {
         ))}
       </ul>
     </Frame>
+  )
+}
+
+/**
+ * The hero's preview, with a switch between the two kinds of job.
+ *
+ * **This is how the page is universal without hedging.** The alternative was
+ * more words — a headline trying to name a rental and a home at once, which
+ * names neither, or a second section most people never scroll to. A switch
+ * shows both in the same square inch and lets somebody pick the one that is
+ * theirs, which is the question they actually arrived with.
+ *
+ * Both are real shapes the product produces. A home has no next guest, so its
+ * card has no window and no `same_day` rung, and it carries the scope of work
+ * a rental's does not — which is the whole difference, shown rather than
+ * explained.
+ */
+export function SwitchablePreview() {
+  const [kind, setKind] = useState('rental')
+
+  return (
+    <div>
+      <div
+        className="mb-3 inline-flex rounded-lg bg-slate-100 p-1"
+        role="group"
+        aria-label="Kind of place"
+      >
+        {[
+          { value: 'rental', label: 'Short-term rental' },
+          { value: 'home', label: 'A home' },
+        ].map((option) => (
+          <button
+            key={option.value}
+            type="button"
+            onClick={() => setKind(option.value)}
+            aria-pressed={kind === option.value}
+            data-testid={`preview-${option.value}`}
+            className={`rounded-md px-3 py-1.5 text-sm font-medium transition ${
+              kind === option.value
+                ? 'bg-white text-ink shadow-sm'
+                : 'text-slate-500 hover:text-slate-700'
+            }`}
+          >
+            {option.label}
+          </button>
+        ))}
+      </div>
+      {kind === 'rental' ? <OwnerPreview /> : <HomePreview />}
+    </div>
   )
 }

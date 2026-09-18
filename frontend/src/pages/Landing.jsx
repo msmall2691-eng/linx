@@ -2,47 +2,65 @@ import { Link } from 'react-router-dom'
 import { useEffect, useState } from 'react'
 
 import {
-  CleanerPreview,
-  HomePreview,
-  OwnerPreview,
-} from '../components/ProductPreview.jsx'
+  CalendarPlus,
+  CardCheck,
+  IdCard,
+  Key,
+  PriceTag,
+  ShieldCheck,
+  TwoNotes,
+} from '../components/Icons.jsx'
+import { CleanerPreview, SwitchablePreview } from '../components/ProductPreview.jsx'
+import UrgencyLadder from '../components/UrgencyLadder.jsx'
 import { apiFetch } from '../lib/api.js'
 
 /**
  * The front door.
  *
- * **Written for property owners, with a real door for cleaners.** A two-sided
- * marketplace landing page that hedges between both audiences says nothing to
- * either, so this one picks a side: owners are the ones with the problem that
- * has a date on it. Cleaners get their own section, their own preview and their
- * own call to action rather than a smaller share of the same paragraph.
+ * **One page for everybody who arrives at it**, which is three people: an owner
+ * with a short-term rental, an owner with a home, and a cleaner. The earlier
+ * version led with a rental — "your guests leave at 11" — and gave the home its
+ * own section further down. That was a deliberate call and it was the wrong
+ * one: it is an Airbnb page with an annex, and somebody whose place is a house
+ * reads the first screen and leaves.
  *
- * **There are three audiences, not two, and a home is the third.** Residential
- * was reopened, so an owner whose place is somebody's house can use all of
- * this — and read a hero about guests leaving at 11 and conclude, correctly on
- * the evidence in front of them, that it is an Airbnb product. The fix is the
- * same shape as the one for cleaners rather than a broader hero: a section of
- * their own, a preview of their own and a door of their own. A hedged hero
- * would cost the sharp case and still not name the home out loud. What the
- * hero does carry is a **signpost** — one line, above the fold, so nobody is
- * turned away before the section that is for them.
+ * The fix is not a longer headline naming both. It is **showing instead of
+ * saying**: the hero preview switches between a rental's job and a home's, so
+ * the page answers "is this for someone like me" with a picture in the time it
+ * takes to read six words. A switch is smaller than a paragraph and says more.
  *
- * Everything claimed here is something the product does today. No invented
- * volume, no "trusted by hundreds" — the first cleaners to sign up will find
- * out immediately, and a promise the product breaks on day one is worse than a
- * quieter one it keeps.
+ * **Prose is the thing being cut.** Everything here that survived is either a
+ * picture, a number, or a sentence that would cost somebody money if it were
+ * missing. The trust cards went from three sentences each to one, because the
+ * previous version explained the reasoning behind a policy on a page whose job
+ * is to say the policy exists.
+ *
+ * Everything claimed here is still something the product does today. No
+ * invented volume, no "trusted by hundreds" — the first cleaners to sign up
+ * find out immediately, and a promise broken on day one is worse than a
+ * quieter one kept.
  */
-function Step({ number, title, children }) {
+function Step({ icon: Icon, title, children }) {
   return (
-    <li className="flex gap-4">
-      <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-brand-100 text-sm font-bold text-brand-700">
-        {number}
+    <li>
+      <span className="inline-flex h-11 w-11 items-center justify-center rounded-xl bg-brand-50 text-brand-600">
+        <Icon />
       </span>
-      <div>
-        <h3 className="font-semibold">{title}</h3>
-        <p className="mt-1 text-sm text-slate-600">{children}</p>
-      </div>
+      <h3 className="mt-3 font-semibold">{title}</h3>
+      <p className="mt-1 text-sm text-slate-600">{children}</p>
     </li>
+  )
+}
+
+function TrustCard({ icon: Icon, title, children }) {
+  return (
+    <div className="card">
+      <span className="inline-flex h-10 w-10 items-center justify-center rounded-lg bg-brand-50 text-brand-600">
+        <Icon className="h-5 w-5" />
+      </span>
+      <h3 className="mt-3 font-semibold">{title}</h3>
+      <p className="mt-1 text-sm text-slate-600">{children}</p>
+    </div>
   )
 }
 
@@ -57,205 +75,140 @@ export default function Landing() {
 
   return (
     <div>
-      {/* --- hero: owners first --- */}
-      <section className="mx-auto max-w-6xl px-4 pb-8 pt-16">
+      {/* --- hero: one headline, for anybody with a place and a date --- */}
+      <section className="mx-auto max-w-6xl px-4 pb-10 pt-16">
         <div className="grid items-center gap-10 lg:grid-cols-2">
           <div>
             <p className="text-sm font-semibold uppercase tracking-wide text-brand-600">
-              {region ? `Now serving ${region}` : 'Rental turnovers and home cleans'}
+              {region ? `Now serving ${region}` : 'Vetted local cleaners'}
             </p>
             <h1 className="mt-3 text-4xl font-bold tracking-tight sm:text-5xl">
-              Your guests leave at 11. The next ones arrive at 4.
+              Somebody you&rsquo;d trust with your keys.
             </h1>
             <p className="mt-4 text-lg text-slate-600">
-              Post the turnover. Vetted local cleaners name their price. You pick one,
-              and you pay when the job is done — not before.
+              Post the job. Vetted local cleaners bid. You pick one — and pay
+              when it&rsquo;s done.
             </p>
 
             <div className="mt-8 flex flex-wrap gap-3">
               <Link to="/signup?role=owner" className="btn-primary" data-testid="owner-cta">
-                Post your first turnover
+                Find a cleaner
               </Link>
-              <Link to="/login" className="btn-secondary">
-                Log in
+              <Link
+                to="/signup?role=cleaner"
+                className="btn-secondary"
+                data-testid="cleaner-cta"
+              >
+                Work as a cleaner
               </Link>
             </div>
 
             <p className="mt-4 text-sm text-slate-500">
               Free to post. No subscription, no lead fees.
             </p>
-
-            {/* The signpost, not a hedge. A home owner who reads the headline
-                above has every reason to think this is an Airbnb product, and
-                they would leave before reaching the section written for them. */}
-            <p className="mt-2 text-sm text-slate-500">
-              Not a rental?{' '}
-              <a href="#homes" className="text-brand-700 underline" data-testid="homes-signpost">
-                Homes get cleaned here too
-              </a>
-              .
-            </p>
           </div>
 
+          {/* The switch is the argument. A rental's job and a home's job, in
+              the same square inch, so nobody has to be told which they are. */}
           <div className="lg:pl-6">
-            <OwnerPreview />
+            <SwitchablePreview />
           </div>
         </div>
       </section>
 
-      {/* --- how it works, for owners --- */}
+      {/* --- how it works: three pictures, three lines --- */}
       <section className="border-y border-slate-200 bg-white">
         <div className="mx-auto max-w-6xl px-4 py-14">
           <h2 className="text-2xl font-bold tracking-tight">How it works</h2>
           <ol className="mt-8 grid gap-8 sm:grid-cols-3">
-            <Step number="1" title="Post the job">
-              For a rental, the checkout and the next checkin — the tighter the gap,
-              the higher it sits on every cleaner&rsquo;s board, and a same-day
-              turnaround is flagged as one. For a home, simply when the clean is
-              due, and the sooner it is, the higher it sits.
+            <Step icon={CalendarPlus} title="Post the job">
+              A turnover between guests, or a clean at home. You say when.
             </Step>
-            <Step number="2" title="Pick from the bids">
-              Cleaners name their own price. You see their rating, whether their
-              vetting is finished, and what they said — then you choose.
+            <Step icon={PriceTag} title="Cleaners bid">
+              They name their price. You see it next to their rating and their
+              vetting.
             </Step>
-            <Step number="3" title="Pay when it&rsquo;s done">
-              The card is charged when your cleaner marks the job complete. If they
-              cancel, nothing was charged and the job goes straight back out.
+            <Step icon={CardCheck} title="Pay when it’s done">
+              Charged when your cleaner marks the job complete. Never before.
             </Step>
           </ol>
         </div>
       </section>
 
-      {/* --- the home owner's door, the same shape as the cleaner's --- */}
-      <section id="homes" className="border-b border-slate-200 bg-slate-50">
-        <div className="mx-auto max-w-6xl px-4 py-16">
-          <div className="grid items-center gap-10 lg:grid-cols-2">
-            <div>
-              <p className="text-sm font-semibold uppercase tracking-wide text-brand-600">
-                For homes
-              </p>
-              <h2 className="mt-3 text-3xl font-bold tracking-tight">
-                No guests. Just a house that needs cleaning.
-              </h2>
-              <p className="mt-4 text-lg text-slate-600">
-                Same cleaners, same vetting, same pay-when-it&rsquo;s-done. A home has
-                no checkout and nobody arriving at 4 — so you say when the clean is
-                due, and that is the whole difference.
-              </p>
-
-              <ul className="mt-6 space-y-2 text-slate-600">
-                <li>
-                  · A standard clean, a deep clean, or a move-out — you pick, and the
-                  cleaners bidding can see which.
-                </li>
-                <li>
-                  · Square footage is optional. Plenty of people genuinely
-                  don&rsquo;t know it, and a guessed number is worse than none.
-                </li>
-                {/* Recurring schedules are out of scope for v1, and this is the
-                    one place somebody would assume otherwise. Saying it plainly
-                    is cheaper than the support email, and `create_many` is a real
-                    answer rather than an apology. */}
-                <li>
-                  · Nothing repeats on its own yet — you post the dates you want.
-                  You can post a season of them in one go.
-                </li>
-              </ul>
-
-              <div className="mt-8">
-                <Link
-                  to="/signup?role=owner"
-                  className="btn-primary inline-flex"
-                  data-testid="home-cta"
-                >
-                  Post a clean for your home
-                </Link>
-              </div>
-            </div>
-
-            <div className="lg:pl-6">
-              <HomePreview />
-            </div>
-          </div>
-        </div>
-      </section>
-
-      {/* --- trust, which is the actual objection --- */}
+      {/* --- the urgency ladder, which is the thing nobody else has --- */}
       <section className="mx-auto max-w-6xl px-4 py-14">
-        <h2 className="text-2xl font-bold tracking-tight">
-          Somebody is going into your house
-        </h2>
-        <p className="mt-2 max-w-2xl text-slate-600">
-          That is the whole objection, so here is exactly what stands behind it.
-          {/* The boundary does not soften for a home — it matters more, because
-              somebody lives there. The section that follows is the same for
-              both, and this is the sentence that says so out loud. */}{' '}
-          None of it is different for a home. If anything it matters more there,
-          because somebody lives in it.
-        </p>
+        <div className="grid gap-10 lg:grid-cols-[1fr_1.4fr] lg:items-center">
+          <div>
+            <h2 className="text-2xl font-bold tracking-tight">
+              The tightest jobs rise to the top
+            </h2>
+            <p className="mt-3 text-slate-600">
+              Every job is ranked by how little time is left on it. A cleaner
+              opening the board sees the desperate ones first — which is why
+              posting late still gets answered.
+            </p>
+          </div>
+          <UrgencyLadder />
+        </div>
+      </section>
 
-        <div className="mt-8 grid gap-6 sm:grid-cols-2 lg:grid-cols-4">
-          <div className="card">
-            <h3 className="font-semibold">A person checks the ID</h3>
-            <p className="mt-2 text-sm text-slate-600">
-              Not an algorithm. Someone looks at a photo ID and a reference before a
-              cleaner can bid at all. It takes a day or two, deliberately.
-            </p>
-          </div>
-          <div className="card">
-            <h3 className="font-semibold">A real background check</h3>
-            <p className="mt-2 text-sm text-slate-600">
-              A photo ID confirms who somebody is, not what they have done. Both have
-              to clear before anyone can bid on your place.
-            </p>
-          </div>
-          <div className="card">
-            <h3 className="font-semibold">Your address stays yours</h3>
-            <p className="mt-2 text-sm text-slate-600">
-              Cleaners bidding see the town and the job — not your street address,
-              and never your gate code. Those appear when you hire someone.
-            </p>
-          </div>
-          <div className="card">
-            <h3 className="font-semibold">Reviews you can believe</h3>
-            <p className="mt-2 text-sm text-slate-600">
-              Neither side sees the other&rsquo;s review until both are written, so
-              nobody writes a pre-emptive bad one to get ahead of yours.
-            </p>
+      {/* --- trust: four icons, four lines --- */}
+      <section className="border-t border-slate-200 bg-white">
+        <div className="mx-auto max-w-6xl px-4 py-14">
+          <h2 className="text-2xl font-bold tracking-tight">
+            Somebody is going into your place
+          </h2>
+          <p className="mt-2 text-slate-600">
+            A rental or the house you live in — the line is the same.
+          </p>
+
+          <div className="mt-8 grid gap-6 sm:grid-cols-2 lg:grid-cols-4">
+            <TrustCard icon={IdCard} title="A person checks the ID">
+              Not an algorithm. A human reviews a photo ID and a reference
+              before anyone can bid.
+            </TrustCard>
+            <TrustCard icon={ShieldCheck} title="A real background check">
+              An ID says who somebody is, not what they&rsquo;ve done. Both have
+              to clear.
+            </TrustCard>
+            <TrustCard icon={Key} title="Your address stays yours">
+              Cleaners bidding see the town, not your street — and never your
+              gate code.
+            </TrustCard>
+            <TrustCard icon={TwoNotes} title="Reviews you can believe">
+              Neither side sees the other&rsquo;s until both are written.
+            </TrustCard>
           </div>
         </div>
       </section>
 
-      {/* --- the cleaner's door, not a footnote --- */}
+      {/* --- the cleaner's door --- */}
       <section className="border-t border-slate-200 bg-slate-900 text-white">
         <div className="mx-auto max-w-6xl px-4 py-16">
           <div className="grid items-center gap-10 lg:grid-cols-2">
             <div>
-              <p className="text-sm font-semibold uppercase tracking-wide text-brand-300">
+              <p className="text-sm font-semibold uppercase tracking-wide text-brand-100">
                 For cleaners
               </p>
               <h2 className="mt-3 text-3xl font-bold tracking-tight">
                 Pick your own jobs. Name your own price.
               </h2>
               <p className="mt-4 text-lg text-slate-300">
-                Turnovers and home cleans near you, with the time, the size and what
-                the owner budgeted — before you bid. No bidding wars on a lead you
-                paid for, because you never pay for a lead.
+                Rental turnovers and home cleans near you, with the time, the
+                size and the owner&rsquo;s budget — before you bid.
               </p>
 
               <ul className="mt-6 space-y-2 text-slate-300">
-                <li>· You set your own travel radius and your own prices.</li>
+                <li>· You set your travel radius and your prices.</li>
                 <li>· Paid through Stripe when you mark the job done.</li>
-                <li>· The platform&rsquo;s cut comes out of the price you set, and you
-                  see it before you bid.</li>
-                <li>· Vetting is a day or two, and one person reviews it.</li>
+                <li>· You never pay for a lead.</li>
               </ul>
 
               <div className="mt-8">
                 <Link
                   to="/signup?role=cleaner"
                   className="btn inline-flex bg-white text-slate-900 hover:bg-slate-100"
-                  data-testid="cleaner-cta"
+                  data-testid="cleaner-cta-footer"
                 >
                   Join the bench
                 </Link>
@@ -273,22 +226,15 @@ export default function Landing() {
         <h2 className="text-2xl font-bold tracking-tight">
           {region ? `Built for ${region}` : 'Built for one region at a time'}
         </h2>
-        <p className="mx-auto mt-3 max-w-xl text-slate-600">
-          One region, so the cleaners on here are actually near you. If that is where
-          your place is, this is for you.
+        <p className="mx-auto mt-3 max-w-md text-slate-600">
+          One region, so the cleaners on here are actually near you.
         </p>
-        {/* Two of these go to the same place, deliberately. The question the
-            button answers is "is this for someone like me", which routing does
-            not answer and a label does. */}
         <div className="mt-8 flex flex-wrap justify-center gap-3">
           <Link to="/signup?role=owner" className="btn-primary">
-            I own a rental
-          </Link>
-          <Link to="/signup?role=owner" className="btn-primary" data-testid="home-owner-cta">
-            I own a home
+            Find a cleaner
           </Link>
           <Link to="/signup?role=cleaner" className="btn-secondary">
-            I clean
+            Work as a cleaner
           </Link>
         </div>
       </section>
