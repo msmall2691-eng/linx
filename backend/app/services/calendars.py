@@ -1168,3 +1168,99 @@ def reconnect(
     calendar.last_error = None
     db.commit()
     return calendar
+
+
+def change_url(
+    db: Session, *, calendar_id: uuid.UUID, property_id: uuid.UUID, url: str
+) -> PropertyCalendar:
+    """Point an existing feed somewhere else, keeping its jobs.
+
+    **This is only safe because removal stopped destroying the row.** While a
+    calendar was deleted on removal, the URL was the closest thing a job had to
+    a stable source, so editing it in place would have left every turnover
+    keyed to a calendar claiming a source it never came from. Identity is the
+    row's own id now; the URL is merely where to look. A provider rotating an
+    export link — the case that used to force a remove-and-re-add, and duplicate
+    every booking in the process — is an edit.
+
+    Three things happen together, and each of them is the answer to "what does
+    this row still know that is now untrue?"
+
+    1. **The epoch is bumped, not reset.** A sync already out on the network
+       captured the old epoch and is holding bookings from the *old* address;
+       committing those into this calendar would fill it with another
+       listing's stays. Bumping is exactly what `sync_epoch` is for — "has
+       anything happened since I looked?" — and a URL change is the largest
+       thing that can happen to a feed. Resetting to zero would be the
+       opposite: it could collide with an in-flight value and make a stale
+       snapshot look current, which is the trap `reconnect` names too.
+    2. **The last-read state is cleared.** `last_synced_at`, the booking count,
+       the error and the stale count all describe the address that is no longer
+       connected. Left in place the panel would report "Last read an hour ago ·
+       14 bookings" about a feed nobody has ever read, which is the one thing
+       those numbers exist to prevent.
+    3. **Nothing happens to the turnovers.** The jobs the old address proposed
+       are the owner's, exactly as they are after a removal. On the next sync
+       the new feed will not have their events, so an untouched draft goes and
+       a posted or awarded one is kept and counted in `last_stale_kept` — the
+       ordinary vanishing-booking policy, which already says what to do when a
+       job has no booking behind it any more. That is the honest outcome for a
+       repoint at a genuinely different listing, and a no-op for a rotated URL
+       on the same one, where the UIDs come back unchanged.
+
+    Raises `CalendarError` rather than returning a sentinel, so the reasons a
+    repoint is refused read the same way as every other refusal in this module.
+    """
+    calendar, prop = _claim(db, calendar_id, property_id)
+    if calendar is None or prop is None or calendar.removed_at is not None:
+        db.rollback()
+        raise CalendarError("That calendar is not connected to this property.")
+
+    # **`refuse_ineligible`, not `_gate`.** They answer different questions:
+    # `_gate` is "may this feed be read", and a *paused* feed may not be read
+    # while its address is still perfectly fine to correct — an owner who
+    # switched a feed off to stop it erroring should be able to fix the link
+    # before switching it back on. What the two share is asked from its one
+    # author rather than copied, which is the rule that retired a whole family
+    # of findings here.
+    refuse_ineligible(prop)
+
+    if calendar.url == url:
+        # Not an error, and deliberately not a write either: an owner who
+        # pressed save without changing anything must not lose their read
+        # history to a no-op. Canonicalisation is what makes this comparison
+        # mean "the same request" rather than "the same string".
+        db.rollback()
+        return calendar
+
+    # The constraint is the invariant; this read is only for the sentence. A
+    # concurrent add does not take the property lock, so it can still land
+    # between here and the commit — which is why `IntegrityError` is caught in
+    # the route rather than assumed impossible.
+    rival = db.execute(
+        select(PropertyCalendar).where(
+            PropertyCalendar.property_id == property_id,
+            PropertyCalendar.url == url,
+            PropertyCalendar.id != calendar_id,
+        )
+    ).scalars().first()
+    if rival is not None:
+        db.rollback()
+        if rival.removed_at is not None:
+            raise CalendarError(
+                "That address belongs to a calendar you removed. Add it again "
+                "to reconnect that one — its jobs are still yours."
+            )
+        raise CalendarError(
+            "That address is already connected to this property."
+        )
+
+    calendar.url = url
+    calendar.sync_epoch = calendar.sync_epoch + 1
+    calendar.last_synced_at = None
+    calendar.last_error = None
+    calendar.last_booking_count = None
+    calendar.last_stale_kept = None
+    db.commit()
+    db.refresh(calendar)
+    return calendar

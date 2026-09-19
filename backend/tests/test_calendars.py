@@ -2454,3 +2454,265 @@ class TestTheEpochIsTheWholeConcurrencyStory:
         db.expire_all()
         # The newer read took it to 2; the discarded one must not have touched it.
         assert db.get(PropertyCalendar, calendar_id).sync_epoch == 2
+
+
+class TestAFeedCanBeRepointed:
+    """Changing where a feed points, which used to mean remove and re-add.
+
+    **The refusal it replaces was load-bearing right up until it wasn't.**
+    While removal deleted the calendar row, a job's only stable link to its
+    source was the URL, so editing it in place would have left every turnover
+    keyed to a calendar claiming an origin it never had. Archiving made the
+    row's own id the identity, and the refusal became the thing forcing owners
+    through the one path that duplicated every booking — a provider rotates an
+    export link, the owner removes and re-adds, and one stay becomes two jobs.
+
+    So these are about the three things a repoint has to get right: the jobs
+    survive, an in-flight read of the *old* address cannot land afterwards, and
+    the row stops claiming to know things that were true of a different feed.
+    """
+
+    def _repoint(self, client: TestClient, owner: dict, prop_id: str, cal_id, url: str):
+        return client.put(
+            f"/api/properties/{prop_id}/calendars/{cal_id}/url",
+            json={"url": url},
+            headers=owner["auth"],
+        )
+
+    def test_the_jobs_it_proposed_keep_pointing_at_it(
+        self, client: TestClient, make_user, db: Session
+    ) -> None:
+        """The whole point. A repoint is not a removal in disguise."""
+        owner = make_user(role="owner")
+        prop = _property(client, owner)
+        calendar = _calendar(db, prop["id"])
+        calendars.sync(db, calendar, client=_fake_client(_feed_for(10)))
+
+        turnovers = db.execute(select(Turnover)).scalars().all()
+        assert len(turnovers) == 1
+        job_id = turnovers[0].id
+
+        resp = self._repoint(
+            client, owner, prop["id"], calendar.id, "https://example.test/b.ics"
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["url"] == "https://example.test/b.ics"
+        assert resp.json()["id"] == str(calendar.id)
+
+        db.expire_all()
+        job = db.get(Turnover, job_id)
+        assert job is not None
+        assert job.source_calendar_id == calendar.id
+
+    def test_a_read_already_in_flight_against_the_old_address_is_discarded(
+        self, client: TestClient, make_user, db: Session
+    ) -> None:
+        """**The one that is easy to miss.**
+
+        A sync captures `sync_epoch` before it goes to the network. If the URL
+        changes while it is out there, the bookings it comes back holding are
+        another listing's — and nothing else in the sequence would notice,
+        because the row is locked, the property is fine and the feed is on.
+        Bumping the epoch is what makes that snapshot stale by definition, and
+        it is why the repoint bumps rather than resets: a reset to zero could
+        collide with an in-flight value and make the stale snapshot look
+        current.
+        """
+        owner = make_user(role="owner")
+        prop = _property(client, owner)
+        calendar = _calendar(db, prop["id"])
+        before = calendar.sync_epoch
+
+        # The repoint happens while this fetch is "in flight": the client is
+        # built from the old feed, and the URL changes before it is applied.
+        stale_snapshot = _fake_client(_feed_for(10))
+        self._repoint(
+            client, owner, prop["id"], calendar.id, "https://example.test/moved.ics"
+        )
+        db.expire_all()
+        db.refresh(calendar)
+        assert calendar.sync_epoch == before + 1
+
+        # Hand `sync` the epoch it captured before the change, the way a real
+        # in-flight read holds it.
+        calendar.sync_epoch = before
+        result = calendars.sync(db, calendar, client=stale_snapshot)
+
+        assert result.created == 0
+        db.expire_all()
+        assert db.execute(select(Turnover)).scalars().all() == []
+
+    def test_it_stops_claiming_to_have_read_the_old_address(
+        self, client: TestClient, make_user, db: Session
+    ) -> None:
+        """"Last read an hour ago · 14 bookings" about a feed nobody has ever
+        read is exactly the lie those numbers exist to prevent."""
+        owner = make_user(role="owner")
+        prop = _property(client, owner)
+        calendar = _calendar(db, prop["id"])
+        calendars.sync(db, calendar, client=_fake_client(_feed_for(10)))
+        db.refresh(calendar)
+        assert calendar.last_synced_at is not None
+        assert calendar.last_booking_count == 1
+
+        resp = self._repoint(
+            client, owner, prop["id"], calendar.id, "https://example.test/b.ics"
+        )
+
+        assert resp.json()["last_synced_at"] is None
+        assert resp.json()["last_booking_count"] is None
+        assert resp.json()["last_error"] is None
+        assert resp.json()["last_stale_kept"] is None
+
+    def test_saving_the_same_address_keeps_the_read_history(
+        self, client: TestClient, make_user, db: Session
+    ) -> None:
+        """An owner who opened the field and pressed save without editing has
+        changed nothing, and must not be charged the wipe for it."""
+        owner = make_user(role="owner")
+        prop = _property(client, owner)
+        calendar = _calendar(db, prop["id"])
+        calendars.sync(db, calendar, client=_fake_client(_feed_for(10)))
+        db.refresh(calendar)
+        epoch = calendar.sync_epoch
+
+        resp = self._repoint(
+            client, owner, prop["id"], calendar.id, calendar.url
+        )
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["last_booking_count"] == 1
+        db.expire_all()
+        db.refresh(calendar)
+        assert calendar.sync_epoch == epoch
+
+    def test_the_same_address_spelled_differently_is_still_the_same_address(
+        self, client: TestClient, make_user, db: Session
+    ) -> None:
+        """Canonicalisation is what makes "did this change?" answerable.
+
+        Without it, re-pasting the same link with a trailing `#fragment` reads
+        as a different feed, wipes the history and bumps the epoch — for an
+        address that resolves to exactly the same request.
+        """
+        owner = make_user(role="owner")
+        prop = _property(client, owner)
+        calendar = _calendar(db, prop["id"], url="https://example.test/a.ics")
+        calendars.sync(db, calendar, client=_fake_client(_feed_for(10)))
+        db.refresh(calendar)
+        epoch = calendar.sync_epoch
+
+        resp = self._repoint(
+            client, owner, prop["id"], calendar.id, "https://EXAMPLE.test:443/a.ics#x"
+        )
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["last_booking_count"] == 1
+        db.expire_all()
+        db.refresh(calendar)
+        assert calendar.sync_epoch == epoch
+
+    def test_it_refuses_an_address_another_live_feed_already_has(
+        self, client: TestClient, make_user, db: Session
+    ) -> None:
+        """Two calendars on one URL is the duplicate the constraint exists to
+        stop: identity is (calendar, event), so every booking would arrive
+        twice under two different calendar ids."""
+        owner = make_user(role="owner")
+        prop = _property(client, owner)
+        first = _calendar(db, prop["id"], url="https://example.test/a.ics")
+        _calendar(db, prop["id"], url="https://example.test/b.ics")
+
+        resp = self._repoint(
+            client, owner, prop["id"], first.id, "https://example.test/b.ics"
+        )
+
+        assert resp.status_code == 409
+        assert "already connected" in resp.json()["detail"]
+        db.expire_all()
+        db.refresh(first)
+        assert first.url == "https://example.test/a.ics"
+
+    def test_an_archived_feeds_address_says_reconnect_rather_than_duplicate(
+        self, client: TestClient, make_user, db: Session
+    ) -> None:
+        """Different refusal, because the way out is different — and taking the
+        address would strand the archived row's jobs on a calendar that is
+        about to be read as somebody else's listing."""
+        owner = make_user(role="owner")
+        prop = _property(client, owner)
+        gone = _calendar(db, prop["id"], url="https://example.test/gone.ics")
+        calendars.archive(db, gone)
+        live = _calendar(db, prop["id"], url="https://example.test/live.ics")
+
+        resp = self._repoint(
+            client, owner, prop["id"], live.id, "https://example.test/gone.ics"
+        )
+
+        assert resp.status_code == 409
+        assert "removed" in resp.json()["detail"]
+        assert "reconnect" in resp.json()["detail"].lower()
+
+    def test_an_archived_calendar_cannot_be_repointed(
+        self, client: TestClient, make_user, db: Session
+    ) -> None:
+        """It is off the owner's screen, so operating on it by id would be
+        exposing the bookkeeping as a feature."""
+        owner = make_user(role="owner")
+        prop = _property(client, owner)
+        calendar = _calendar(db, prop["id"])
+        calendars.archive(db, calendar)
+
+        resp = self._repoint(
+            client, owner, prop["id"], calendar.id, "https://example.test/b.ics"
+        )
+
+        assert resp.status_code == 404
+
+    def test_a_paused_feed_can_still_have_its_link_corrected(
+        self, client: TestClient, make_user, db: Session
+    ) -> None:
+        """Switched off is not removed. An owner who paused a feed *because* it
+        was erroring should be able to fix the address before turning it back
+        on — which is why this asks `refuse_ineligible` rather than `_gate`."""
+        owner = make_user(role="owner")
+        prop = _property(client, owner)
+        calendar = _calendar(db, prop["id"])
+        calendar.is_active = False
+        db.commit()
+
+        resp = self._repoint(
+            client, owner, prop["id"], calendar.id, "https://example.test/b.ics"
+        )
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["is_active"] is False
+
+    def test_somebody_elses_calendar_is_not_found(
+        self, client: TestClient, make_user, db: Session
+    ) -> None:
+        owner = make_user(role="owner")
+        intruder = make_user(role="owner")
+        prop = _property(client, owner)
+        calendar = _calendar(db, prop["id"])
+
+        resp = self._repoint(
+            client, intruder, prop["id"], calendar.id, "https://example.test/b.ics"
+        )
+
+        assert resp.status_code == 404
+
+    def test_it_will_not_point_a_feed_at_something_that_is_not_a_feed(
+        self, client: TestClient, make_user, db: Session
+    ) -> None:
+        """The same validator the add path uses — this string becomes an
+        outbound request from our server."""
+        owner = make_user(role="owner")
+        prop = _property(client, owner)
+        calendar = _calendar(db, prop["id"])
+
+        resp = self._repoint(
+            client, owner, prop["id"], calendar.id, "file:///etc/passwd"
+        )
+
+        assert resp.status_code == 422

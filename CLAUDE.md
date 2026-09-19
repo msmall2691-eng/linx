@@ -489,9 +489,23 @@ sync wrote every owner's credential into the application log until
 the leak happens in two processes (the web app for the Sync button, the
 scheduled task) and this module is imported by both, so configuring it at each
 entry point would be two places to keep in step.
-The URL is also not editable in place: changing it would keep the calendar's id
-while pointing it at different bookings, so every turnover keyed to it would
-claim a source it never came from.
+**The URL is editable, and only because removal stopped destroying the row.**
+While a calendar was deleted on removal, a job's only stable link to its source
+*was* the URL, so editing it in place would have left every turnover claiming an
+origin it never had — and the refusal was right. Once identity is the row's own
+id, the URL is merely where to look, and the refusal had become the thing
+forcing an owner whose provider rotated an export link through the one path that
+duplicated every booking. `calendars.change_url` has its own endpoint rather than
+a field on the PATCH, because it is not a settings tweak: it **bumps
+`sync_epoch`**, which is exactly what that counter is for — a read already out on
+the network is holding another listing's stays, and bumping makes its snapshot
+stale by definition (resetting to zero would do the opposite, colliding with an
+in-flight value). It **clears the last-read state**, since "Last read an hour ago
+· 14 bookings" about an address nobody has ever read is the lie those numbers
+exist to prevent. And it **does nothing to the turnovers**: on the next sync the
+new feed has none of their events, so an untouched draft goes and a posted one is
+kept and counted in `last_stale_kept` — the ordinary vanishing-booking policy,
+which already says what to do about a job with no booking behind it.
 
 **It is also a place this server connects to**, which makes the field a request
 forgery primitive unless it is guarded. Two rules, both in `calendars.py`:
@@ -646,8 +660,17 @@ third model again rather than a widened board shape — the address and the acce
 notes are in it because somebody has to open the door. Access follows the *live*
 award, decided in one place: cancel the booking and the access notes come back
 empty, and the job's own detail endpoint answers 404. The owner's identity stays
-withheld either way; phase 5's notifications are how the two sides reach each
-other.
+withheld either way — **including inside the message thread**, which is the
+easiest place in the product to undo it. `messages.visible_sender` is the single
+author of what a reader is shown, so the cleaner's copy of an owner's message
+says "the owner", and the notification body says the same: an email signed with
+the owner's name is the same leak by a different route. A screen that worked the
+label out from a user id would be a second author on the boundary, and the
+version that leaks renders perfectly.
+
+Messaging follows the **live** award, exactly as the address and the access
+notes do — bidding is not a relationship, so there is no channel before an award
+and none after it ends.
 
 **Vetting documents are never on a public path.** Uploads get a generated key
 (never a client-supplied filename, which is a path-traversal primitive), are
@@ -841,19 +864,46 @@ in `app/models/enums.py` holds exactly these and nothing else:
 - Review received (both directions, once visible)
 - Dispute raised → an admin **and the person who raised it** (added in phase 8)
 - Dispute resolved → both parties, carrying the admin's note
+- Cleaner is on the way → owner
 
-**All fifteen have a sender.** Nothing is declared-and-unwired any more;
+**All sixteen have a sender.** Nothing is declared-and-unwired any more;
 the test that guarded that has flipped to guarding the other direction — a new
 enum value with nothing behind it fails, which is the conversation adding one is
 supposed to start.
 
-**The list has grown twice, both times on purpose.** `job_completed` was added in phase 6
+**The list has grown three times, each time on purpose.** `job_completed` was added in phase 6
 alongside the transition it belongs to. Before money hung off completion, "the
 cleaner says it is done" was nobody's business; now an owner who is never told
 is an owner who never pays, and a cleaner who did the work and hears nothing.
 Adding it meant a migration and a failing test, which is exactly the
 conversation a new event is supposed to start — the list being closed is what
 makes opening it a decision.
+
+`cleaner_en_route` was the third (phase 10). `started_at` and `completed_at`
+both report something that has already happened; neither can answer the question
+an owner actually asks on the morning of a turnover, which is *is anybody
+coming*. Without it that signal exists only on a screen the owner may not be
+looking at, and the fallback is the phone call this product exists to replace.
+It goes to the owner and nobody else — no admin copy, because an inbox that
+receives every cleaner leaving the house is an inbox nobody reads the
+cancellations in.
+
+**Three job signals, and only one of them notifies.** `awards.set_out`,
+`start_job` and `complete_job` write `en_route_at`, `started_at` and
+`completed_at`; `frontend/src/components/JobProgress.jsx` renders all three to
+*both* sides, because "is anybody coming" and "what have I told them" are the
+same three facts and two renderings would eventually disagree about what a
+missing timestamp means.
+
+**None of them is a position, and that is a decision rather than a gap.**
+Continuous location on an independent contractor is a different product, with
+its own consent, retention and disclosure questions — and a coordinate column
+added quietly alongside a timestamp is exactly how that product would arrive
+without any of them being asked. What is stored is a time somebody wrote by
+pressing a button. `set_out` is idempotent on the first press for the same
+reason a second tap in a driveway is not a correction, and it stays available
+*after* arrival: a cleaner who forgot on the road and taps it on the doorstep
+has told the truth late, which beats the owner hearing nothing.
 
 `app/services/notifications.py` is the one place that decides any of this.
 Phase 4's `app/services/alerts.py` is gone, replaced by it.

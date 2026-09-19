@@ -675,6 +675,97 @@ def turnover_unclaimed(
     )
 
 
+def cleaner_en_route(
+    db: Session, turnover: Turnover, prop: Property, award: Award
+) -> list[Notification]:
+    """The cleaner is on their way — the sixteenth event.
+
+    It goes to the owner and to nobody else. There is no admin copy: this is
+    an ordinary job going ordinarily well, and an inbox that receives every
+    cleaner leaving the house is an inbox nobody reads the cancellations in.
+
+    **Keyed on the award**, like every other key here, so "fires once per
+    transition" is a property of the database rather than of the caller
+    remembering.
+    """
+    owner = owner_of(db, turnover)
+    if owner is None:
+        return []
+
+    return queue(
+        db,
+        NotificationEvent.CLEANER_EN_ROUTE,
+        recipients=[owner],
+        subject=f"Your cleaner is on the way: {_where(prop)}",
+        body=(
+            f"{award.cleaner_name} is on the way to this job.\n\n"
+            f"Where: {_where(prop)}\n"
+            f"Checkout: {_when(turnover.checkout_at)}\n\n"
+            "You will hear again when they arrive and when the job is done."
+        ),
+        dedupe_scope=str(award.id),
+    )
+
+
+def message_received(
+    db: Session,
+    *,
+    turnover: Turnover,
+    prop: Property,
+    award: Award,
+    message,
+    sender: User,
+) -> list[Notification]:
+    """Somebody sent a message on a booked job — the seventeenth event.
+
+    **The delivery mechanism, not a convenience on top of one.** There is no
+    push channel in this product, so a thread nobody is emailed about is a
+    thread each side has to remember to go and look at, which is how the first
+    unanswered "which gate?" becomes a phone call.
+
+    Keyed on the **message's own id**, which is different from every other key
+    here on purpose: those exist to stop one transition being announced twice,
+    and each message is genuinely a separate thing to be told about.
+
+    The body is included rather than teased, because a notification that says
+    only "you have a message" makes somebody log in to read one sentence. The
+    boundary is respected in whose name is on it — `_from_label` gives the
+    cleaner's copy "the owner", matching `messages.visible_sender`.
+    """
+    people = _both_sides(db, turnover, award)
+    if people is None:
+        return []
+    owner, cleaner = people
+    recipient = cleaner if sender.id == owner.id else owner
+    from_label = "The owner" if sender.id == owner.id else sender.full_name
+
+    return queue(
+        db,
+        NotificationEvent.MESSAGE_RECEIVED,
+        recipients=[recipient],
+        subject=f"Message about {_where(prop)}",
+        body=(
+            f"{from_label} sent you a message about this job.\n\n"
+            f"Where: {_where(prop)}\n"
+            f"Checkout: {_when(turnover.checkout_at)}\n\n"
+            f"\u201c{message.body}\u201d\n\n"
+            "Open the job to reply."
+        ),
+        dedupe_scope=str(message.id),
+    )
+
+
+def _both_sides(
+    db: Session, turnover: Turnover, award: Award
+) -> tuple[User, User] | None:
+    """The owner and the booked cleaner, or nothing if either has gone."""
+    owner = owner_of(db, turnover)
+    cleaner = db.get(User, award.cleaner_id)
+    if owner is None or cleaner is None:
+        return None
+    return owner, cleaner
+
+
 def job_completed(
     db: Session, turnover: Turnover, prop: Property, award: Award
 ) -> list[Notification]:

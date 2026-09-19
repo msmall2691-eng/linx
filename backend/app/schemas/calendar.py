@@ -17,6 +17,72 @@ from urllib.parse import urlsplit, urlunsplit
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
+def canonical_feed_url(v: str) -> str:
+    """**Refuse anything that is not an http(s) URL**, and spell it one way.
+
+    This string becomes an outbound request from our server, so a `file://`
+    or `http://169.254.169.254/...` here is somebody using the product to
+    read things it can reach and they cannot. Scheme-checking is not the
+    whole of SSRF defence, but accepting arbitrary schemes is not defensible
+    at all.
+
+    `webcal://` is the same feed with a different scheme — listing sites
+    hand it out for one-click subscription — so it is rewritten rather than
+    refused, which is what the owner meant.
+
+    **The stored string is canonicalised, because uniqueness has to mean the
+    same thing the network does.** `uq_property_calendars_property_url` is
+    what stops one feed becoming two calendars — and therefore every booking
+    becoming two drafts under two calendar ids — but it compares strings,
+    not requests. Three ways the same request is spelled differently:
+
+    * a **fragment**, which is never sent in an HTTP request at all;
+    * the **scheme and host in different case**, which are case-insensitive;
+    * an **explicit default port**, `:443` on https or `:80` on http.
+
+    The path, query, and any credentials are left exactly as they are: those
+    *are* case-sensitive, and a listing site's export links carry a token in
+    one of them.
+    """
+    url = v.strip()
+    if url.lower().startswith("webcal://"):
+        url = "https://" + url[len("webcal://") :]
+    if not url.lower().startswith(("http://", "https://")):
+        raise ValueError("A calendar link must start with http:// or https://")
+
+    parts = urlsplit(url)
+    scheme = parts.scheme.lower()
+    host = (parts.hostname or "").lower()
+    if not host:
+        raise ValueError("That calendar link has no host in it.")
+
+    # **An IPv6 literal keeps its brackets.** `parts.hostname` strips them,
+    # and a bare `2606:4700:4700::1111` is not a host — re-parsing it reads
+    # everything after the first colon as a port and raises, so the stored
+    # URL could never be fetched again.
+    if ":" in host:
+        host = f"[{host}]"
+
+    default_port = 443 if scheme == "https" else 80
+    netloc = host if parts.port in (None, default_port) else f"{host}:{parts.port}"
+    if parts.username:
+        credentials = parts.username
+        if parts.password:
+            credentials = f"{credentials}:{parts.password}"
+        netloc = f"{credentials}@{netloc}"
+
+    # An empty path and "/" are the same request target, so they must be
+    # the same string — otherwise `https://host` and `https://host/` are two
+    # calendars pointing at one feed, and every booking becomes two drafts.
+    path = parts.path or "/"
+
+    # Fragment dropped by never putting it back.
+    url = urlunsplit((scheme, netloc, path, parts.query, ""))
+    if len(url) < 10:
+        raise ValueError("That does not look like a calendar link.")
+    return url
+
+
 class CalendarCreate(BaseModel):
     """Point us at a listing's export link."""
 
@@ -29,82 +95,44 @@ class CalendarCreate(BaseModel):
     @field_validator("url")
     @classmethod
     def must_be_http(cls, v: str) -> str:
-        """**Refuse anything that is not an http(s) URL.**
-
-        This string becomes an outbound request from our server, so a `file://`
-        or `http://169.254.169.254/...` here is somebody using the product to
-        read things it can reach and they cannot. Scheme-checking is not the
-        whole of SSRF defence, but accepting arbitrary schemes is not defensible
-        at all.
-
-        `webcal://` is the same feed with a different scheme — listing sites
-        hand it out for one-click subscription — so it is rewritten rather than
-        refused, which is what the owner meant.
-
-        **The stored string is canonicalised, because uniqueness has to mean the
-        same thing the network does.** `uq_property_calendars_property_url` is
-        what stops one feed becoming two calendars — and therefore every booking
-        becoming two drafts under two calendar ids — but it compares strings,
-        not requests. Three ways the same request is spelled differently:
-
-        * a **fragment**, which is never sent in an HTTP request at all;
-        * the **scheme and host in different case**, which are case-insensitive;
-        * an **explicit default port**, `:443` on https or `:80` on http.
-
-        The path, query, and any credentials are left exactly as they are: those
-        *are* case-sensitive, and a listing site's export links carry a token in
-        one of them.
-        """
-        url = v.strip()
-        if url.lower().startswith("webcal://"):
-            url = "https://" + url[len("webcal://") :]
-        if not url.lower().startswith(("http://", "https://")):
-            raise ValueError("A calendar link must start with http:// or https://")
-
-        parts = urlsplit(url)
-        scheme = parts.scheme.lower()
-        host = (parts.hostname or "").lower()
-        if not host:
-            raise ValueError("That calendar link has no host in it.")
-
-        # **An IPv6 literal keeps its brackets.** `parts.hostname` strips them,
-        # and a bare `2606:4700:4700::1111` is not a host — re-parsing it reads
-        # everything after the first colon as a port and raises, so the stored
-        # URL could never be fetched again.
-        if ":" in host:
-            host = f"[{host}]"
-
-        default_port = 443 if scheme == "https" else 80
-        netloc = host if parts.port in (None, default_port) else f"{host}:{parts.port}"
-        if parts.username:
-            credentials = parts.username
-            if parts.password:
-                credentials = f"{credentials}:{parts.password}"
-            netloc = f"{credentials}@{netloc}"
-
-        # An empty path and "/" are the same request target, so they must be
-        # the same string — otherwise `https://host` and `https://host/` are two
-        # calendars pointing at one feed, and every booking becomes two drafts.
-        path = parts.path or "/"
-
-        # Fragment dropped by never putting it back.
-        url = urlunsplit((scheme, netloc, path, parts.query, ""))
-        if len(url) < 10:
-            raise ValueError("That does not look like a calendar link.")
-        return url
+        return canonical_feed_url(v)
 
 
 class CalendarUpdate(BaseModel):
-    """Rename it or switch it off. The URL is not editable.
+    """Rename it or switch it off.
 
-    Changing the URL in place would keep the calendar's id while pointing it at
-    different bookings, and every turnover it had created would still be keyed
-    to it — jobs from one listing claiming to come from another. Removing and
-    re-adding is one more click and cannot produce that.
+    **The URL is not here, and that is not an oversight.** Changing where a
+    feed points is a different kind of act from renaming it: it throws away
+    everything this row knows about its last read, and it has to interrupt any
+    fetch already in flight against the old address. A field on a general
+    update would let that happen as a side effect of a rename. See
+    `PUT /{calendar_id}/url` and `calendars.change_url`.
     """
 
     label: str | None = Field(default=None, min_length=1, max_length=80)
     is_active: bool | None = None
+
+
+class CalendarUrlIn(BaseModel):
+    """Point an existing feed at a different address.
+
+    **Editable only because removal stopped destroying the row.** While a
+    calendar was deleted on removal, a feed's identity had to be reconstructed
+    from something observable, and the URL was the only candidate — so changing
+    it would have orphaned every job keyed to it. Now identity is the row's own
+    id, the URL is merely where to look, and a provider rotating an export link
+    is an edit rather than a remove-and-re-add that duplicated every booking.
+    """
+
+    url: str = Field(min_length=10, max_length=2000)
+
+    @field_validator("url")
+    @classmethod
+    def must_be_http(cls, v: str) -> str:
+        # The same single author as the add path. Two canonicalisers would be
+        # two opinions about whether a URL is the one already on this row, and
+        # the whole point of canonicalising is that one feed has one spelling.
+        return canonical_feed_url(v)
 
 
 class CalendarOut(BaseModel):

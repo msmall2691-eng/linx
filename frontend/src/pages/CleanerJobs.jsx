@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react'
 
+import MessageThread from '../components/MessageThread.jsx'
+import JobProgress from '../components/JobProgress.jsx'
 import Alert from '../components/Alert.jsx'
 import EmptyState from '../components/EmptyState.jsx'
 import { JobSchedule, ScopeBadge } from '../components/JobScope.jsx'
@@ -21,11 +23,12 @@ import { showsUrgency } from '../lib/turnover.js'
  * comes back with the access notes empty, which is why this screen renders
  * whatever the field holds rather than deciding for itself.
  */
-function Job({ job, timeZone, onCancel, onStart, onComplete, busy }) {
+function Job({ job, timeZone, onCancel, onStart, onComplete, onSetOut, busy }) {
   const [confirming, setConfirming] = useState(false)
   const [reason, setReason] = useState('')
   const property = job.property
   const cancelled = Boolean(job.cancelled_at)
+  const enRoute = Boolean(job.en_route_at)
   const started = Boolean(job.started_at)
   const done = Boolean(job.completed_at)
 
@@ -127,10 +130,39 @@ function Job({ job, timeZone, onCancel, onStart, onComplete, busy }) {
           complaints — a lockbox code that was wrong, somebody home who should
           not have been — are about jobs that went badly, which are exactly the
           ones nobody marks complete. */}
+      {/* Not on a cancelled booking: there is nobody to reach, the
+          endpoint says so with a 404, and an unconditional fetch would log a
+          console error on a card that is working perfectly. */}
+      {!cancelled && <MessageThread turnoverId={job.turnover_id} />}
+
       <DisputePanel turnoverId={job.turnover_id} />
+
+      {/* What the owner can see, shown to the cleaner too, so "what have I
+          told them" needs no guessing. One component for both sides. */}
+      {!cancelled && (
+        <div className="mt-6 border-t border-slate-200 pt-4">
+          <JobProgress award={job} timeZone={timeZone} cancelled={cancelled} />
+        </div>
+      )}
 
       {!cancelled && !done && (
         <div className="mt-6 flex flex-wrap gap-2 border-t border-slate-200 pt-4">
+          {/* The only one of the three that reaches the owner as it happens,
+              because it is the only one about the future. It stays available
+              after arrival: a cleaner who forgot on the road and taps it on
+              the doorstep has told the truth late, which beats the owner
+              never hearing. */}
+          {!enRoute && (
+            <button
+              type="button"
+              onClick={() => onSetOut(job.turnover_id)}
+              disabled={busy}
+              className="btn-secondary"
+              data-testid="on-my-way"
+            >
+              I&rsquo;m on my way
+            </button>
+          )}
           {!started && (
             <button
               type="button"
@@ -326,6 +358,7 @@ export default function CleanerJobs() {
               job={job}
               timeZone={timeZone}
               onCancel={cancelJob}
+              onSetOut={(id) => act(id, 'on-my-way')}
               onStart={(id) => act(id, 'start')}
               onComplete={(id) => act(id, 'complete')}
               busy={busy}

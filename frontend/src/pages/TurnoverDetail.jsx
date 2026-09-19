@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 
+import MessageThread from '../components/MessageThread.jsx'
+import JobProgress from '../components/JobProgress.jsx'
 import Alert from '../components/Alert.jsx'
 import PaymentPanel from '../components/PaymentPanel.jsx'
 import Rating from '../components/Rating.jsx'
@@ -301,6 +303,16 @@ export default function TurnoverDetail() {
           cancellation — the cases the backend went out of its way to allow.
           It self-hides when the server says there is nobody to dispute with,
           so the server decides and this does not second-guess it. */}
+      {/* **Only mounted when there is a booking to talk through.** The
+          endpoint answers 404 when there is not — correctly, since "not yours"
+          and "not there" must look the same — and an unconditional fetch on
+          every turnover page turns that into a console error on a screen where
+          nothing is wrong. The server is still the judge: if this is wrong the
+          panel hides itself. */}
+      {turnover.award && !turnover.award.cancelled_at && (
+        <MessageThread turnoverId={turnoverId} />
+      )}
+
       <DisputePanel turnoverId={turnoverId} />
 
       {turnover.award && (
@@ -320,6 +332,19 @@ export default function TurnoverDetail() {
           <p className="mt-1 text-xs text-slate-500">
             Accepted {formatDateTime(turnover.award.awarded_at, timeZone)}
           </p>
+
+          {/* **The answer to "is anybody coming".** The email is the push; this
+              is where an owner looks afterwards, and a timestamp no screen
+              reads is a timestamp that does not exist. Hidden on a cancelled
+              booking, where a half-finished timeline reads as a job still
+              running. */}
+          <div className="mt-4 border-t border-brand-200 pt-4">
+            <JobProgress
+              award={turnover.award}
+              timeZone={timeZone}
+              cancelled={Boolean(turnover.award.cancelled_at)}
+            />
+          </div>
 
           <div className="mt-4 flex flex-wrap gap-2">
             {confirmingNoShow ? (

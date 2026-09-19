@@ -186,6 +186,7 @@ def _serialize_job(award: Award, turnover: Turnover, prop: Property) -> AwardedJ
         agreed_price_cents=award.agreed_price_cents,
         awarded_at=award.awarded_at,
         started_at=award.started_at,
+        en_route_at=award.en_route_at,
         completed_at=award.completed_at,
         cancelled_at=award.cancelled_at,
         cancellation_reason=award.cancellation_reason,
@@ -316,6 +317,29 @@ def cancel_my_job(
         select(Property).where(Property.id == turnover.property_id)
     ).scalar_one()
     return _serialize_job(award, turnover, prop)
+
+
+@router.post("/jobs/{turnover_id}/on-my-way", response_model=AwardedJobOut)
+def i_am_on_my_way(
+    turnover_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_role(UserRole.CLEANER)),
+) -> AwardedJobOut:
+    """Tell the owner you are on the way.
+
+    The one job signal that answers a question about the future, and so the
+    one that sends anything. It is a timestamp from a button press, not a
+    position — see `Award.en_route_at`.
+    """
+    turnover, award = _lock_my_job(db, turnover_id, user)
+    try:
+        awards.set_out(db, turnover=turnover, award=award)
+    except awards.AwardConflict as conflict:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=conflict.detail
+        ) from None
+
+    return _serialize_job(award, turnover, _property_of(db, turnover))
 
 
 @router.post("/jobs/{turnover_id}/start", response_model=AwardedJobOut)

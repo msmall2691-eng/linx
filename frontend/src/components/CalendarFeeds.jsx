@@ -26,6 +26,11 @@ const HELP = {
 function Feed({ feed, propertyId, onChanged, timeZone }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  // Editing the link is behind a toggle rather than always on screen: it is a
+  // rare act with real consequences, and a permanently open input invites the
+  // paste that repoints a feed at somebody else's listing.
+  const [editing, setEditing] = useState(false)
+  const [draftUrl, setDraftUrl] = useState(feed.url)
 
   async function act(path, options) {
     setBusy(true)
@@ -35,6 +40,35 @@ function Feed({ feed, propertyId, onChanged, timeZone }) {
       await onChanged()
     } catch (err) {
       setError(err.message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function saveUrl(event) {
+    event.preventDefault()
+    setBusy(true)
+    setError('')
+    try {
+      await apiFetch(`/properties/${propertyId}/calendars/${feed.id}/url`, {
+        method: 'PUT',
+        body: { url: draftUrl.trim() },
+      })
+      // **Read it straight away**, for the reason the add form does: an owner
+      // who has just pasted an address finds out here whether it works, rather
+      // than tomorrow when no jobs appeared. It is a second request rather
+      // than something the endpoint does, so that one path reads a feed on
+      // demand and one error handler explains it.
+      await apiFetch(`/properties/${propertyId}/calendars/${feed.id}/sync`, {
+        method: 'POST',
+      })
+      setEditing(false)
+      await onChanged()
+    } catch (err) {
+      // The address was saved even if the read failed — the panel below will
+      // show the reason on the row, the same as any other failed sync.
+      setError(err.message)
+      await onChanged()
     } finally {
       setBusy(false)
     }
@@ -52,10 +86,23 @@ function Feed({ feed, propertyId, onChanged, timeZone }) {
       <div className="flex flex-wrap items-start justify-between gap-2">
         <div className="min-w-0">
           <p className="font-medium">{feed.label}</p>
-          {/* The URL is shown truncated: it is the owner's own secret, and
-              seeing enough of it to recognise which listing it is beats
-              hiding it entirely. */}
+          {/* The URL is shown: it is the owner's own secret, and seeing
+              enough of it to recognise which listing it is beats hiding it
+              entirely. */}
           <p className="mt-0.5 break-all text-xs text-slate-500">{feed.url}</p>
+          {!editing && (
+            <button
+              type="button"
+              className="mt-1 text-xs font-medium text-brand-600 hover:underline"
+              onClick={() => {
+                setDraftUrl(feed.url)
+                setEditing(true)
+              }}
+              data-testid="edit-calendar-url"
+            >
+              Change link
+            </button>
+          )}
         </div>
         <div className="flex shrink-0 gap-2">
           <button
@@ -92,6 +139,50 @@ function Feed({ feed, propertyId, onChanged, timeZone }) {
           </button>
         </div>
       </div>
+
+      {editing && (
+        <form onSubmit={saveUrl} className="mt-3" data-testid="calendar-url-form">
+          <label htmlFor={`feed-url-${feed.id}`} className="field-label">
+            Export link
+          </label>
+          <input
+            id={`feed-url-${feed.id}`}
+            value={draftUrl}
+            onChange={(e) => setDraftUrl(e.target.value)}
+            className="field-input"
+            data-testid="calendar-url-input"
+          />
+          {/* Said plainly, because it is the one surprising consequence: the
+              jobs stay, and the ones the old listing proposed will come up as
+              having no booking behind them on the next read. */}
+          <p className="mt-1 text-xs text-slate-500">
+            The jobs this feed already proposed stay yours. If the new link is a
+            different listing, drafts from the old one are dropped and anything
+            already posted is flagged for you to check.
+          </p>
+          <div className="mt-2 flex gap-2">
+            <button
+              type="submit"
+              className="btn-primary"
+              disabled={busy || draftUrl.trim().length === 0}
+              data-testid="save-calendar-url"
+            >
+              {busy ? 'Saving…' : 'Save and read it'}
+            </button>
+            <button
+              type="button"
+              className="btn-secondary"
+              disabled={busy}
+              onClick={() => {
+                setEditing(false)
+                setError('')
+              }}
+            >
+              Cancel
+            </button>
+          </div>
+        </form>
+      )}
 
       <p className="mt-2 text-xs text-slate-500" data-testid="calendar-status">
         {feed.last_synced_at

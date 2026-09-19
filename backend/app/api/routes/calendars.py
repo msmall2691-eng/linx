@@ -28,6 +28,7 @@ from app.schemas.calendar import (
     CalendarCreate,
     CalendarOut,
     CalendarUpdate,
+    CalendarUrlIn,
     SyncOut,
 )
 from app.services import calendars
@@ -314,6 +315,50 @@ def sync_calendar(
     return _answer(calendar, result)
 
 
+@router.put("/{calendar_id}/url", response_model=CalendarOut)
+def change_calendar_url(
+    property_id: uuid.UUID,
+    calendar_id: uuid.UUID,
+    payload: CalendarUrlIn,
+    db: Session = Depends(get_db),
+    owner: User = Depends(require_owner),
+) -> PropertyCalendar:
+    """Point this feed at a different address, keeping its jobs.
+
+    **Its own endpoint rather than a field on the PATCH**, because it is not a
+    settings tweak: it invalidates any read already in flight and throws away
+    everything the row knows about its last sync. Hidden inside a general
+    update, a rename could do that as a side effect.
+
+    It deliberately does **not** sync. The add endpoint does, because there the
+    owner has just typed an address and a bad one should fail on the screen
+    they typed it on — but that read is also what makes add slow, and here the
+    screen presses Sync itself straight afterwards, through the same path with
+    the same error handling. One place reads a feed on demand.
+    """
+    # 404s an archived calendar and anything that is not this owner's, before
+    # any of the service's own refusals are reached.
+    _owned_calendar(db, property_id, calendar_id, owner)
+    try:
+        return calendars.change_url(
+            db, calendar_id=calendar_id, property_id=property_id, url=payload.url
+        )
+    except calendars.CalendarError as refused:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=refused.detail
+        ) from None
+    except IntegrityError:
+        # The pre-check inside `change_url` reads without a lock, and an add
+        # does not take the property lock at all, so the same address can land
+        # between the two. The constraint is what actually holds the invariant;
+        # this is it doing its job rather than a case that cannot happen.
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="That address is already connected to this property.",
+        ) from None
+
+
 @router.patch("/{calendar_id}", response_model=CalendarOut)
 def update_calendar(
     property_id: uuid.UUID,
@@ -322,7 +367,7 @@ def update_calendar(
     db: Session = Depends(get_db),
     owner: User = Depends(require_owner),
 ) -> PropertyCalendar:
-    """Rename it, or switch it off. The URL is deliberately not editable."""
+    """Rename it, or switch it off. The URL has its own endpoint above."""
     calendar = _owned_calendar(db, property_id, calendar_id, owner)
     for field, value in payload.model_dump(exclude_unset=True).items():
         if value is not None:

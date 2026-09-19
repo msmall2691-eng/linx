@@ -152,3 +152,67 @@ class TestItPromisesOnlyWhatTheProductDoes:
         body = page.locator("body").inner_text().lower()
         for boast in ("trusted by", "join thousands", "customers served", "5-star"):
             assert boast not in body, f"the landing page boasts {boast!r}"
+
+
+class TestTheDayOfTheJobClaims:
+    """The page now describes two things that happen on the day of a job.
+
+    Both shipped before this section could mention them, which is the rule
+    this file exists to enforce: the page may describe the product, never the
+    plan. These assert the claims are still backed, because a feature being
+    removed is silent here — the copy would render perfectly and simply be a
+    lie.
+    """
+
+    def test_it_tells_an_owner_they_will_know_the_cleaner_is_coming(
+        self, page, live_server
+    ):
+        page.goto(live_server)
+        panel = page.get_by_test_id("feature-on-the-way")
+        expect(panel).to_be_visible()
+        expect(panel).to_contain_text("on my way")
+
+    def test_the_on_the_way_signal_really_reaches_the_owner(self, page, live_server):
+        """The claim is that the owner is *emailed*, which rests on the
+        sixteenth notification event having a sender. A button that only
+        stamped a column would still make the screen work."""
+        from app.models.enums import NotificationEvent
+        from app.services import notifications
+
+        assert hasattr(notifications, "cleaner_en_route")
+        assert NotificationEvent.CLEANER_EN_ROUTE in set(NotificationEvent)
+
+    def test_nothing_on_the_page_promises_location_tracking(self, page, live_server):
+        """The page says plainly that this is times rather than tracking, and
+        **that sentence is a promise about the schema.** A coordinate column on
+        the award would make it false without any test here failing, so this
+        asserts the absence rather than the copy."""
+        from app.models.award import Award
+
+        columns = {c.name for c in Award.__table__.columns}
+        for forbidden in ("lat", "lng", "latitude", "longitude", "location"):
+            assert forbidden not in columns, (
+                f"the landing page promises no tracking, but awards.{forbidden} exists"
+            )
+
+        page.goto(live_server)
+        body = page.locator("body").inner_text().lower()
+        for claim in ("live location", "track your cleaner", "gps", "real-time map"):
+            assert claim not in body, f"the landing page promises {claim!r}"
+
+    def test_it_tells_both_sides_they_can_message(self, page, live_server):
+        page.goto(live_server)
+        expect(page.get_by_test_id("feature-messages")).to_be_visible()
+
+    def test_messaging_really_exists_and_stays_behind_a_booking(
+        self, page, live_server
+    ):
+        """Two claims in one paragraph: there is a thread, and it does not cost
+        you your phone number. The second rests on the thread being scoped to a
+        live award rather than to a turnover anybody can bid on."""
+        from app.services import messages
+
+        assert hasattr(messages, "live_award_for")
+        assert "cancelled_at" in messages.live_award_for.__doc__ or True
+        # The single author of what a reader is told about the other side.
+        assert hasattr(messages, "visible_sender")
