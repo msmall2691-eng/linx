@@ -230,6 +230,7 @@ class NotificationEvent(str, Enum):
     DISPUTE_RAISED = "dispute_raised"
     DISPUTE_RESOLVED = "dispute_resolved"
     CLEANER_EN_ROUTE = "cleaner_en_route"
+    MESSAGE_RECEIVED = "message_received"
 
 
 class NotificationChannel(str, Enum):

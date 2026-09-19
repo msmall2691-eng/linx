@@ -660,8 +660,17 @@ third model again rather than a widened board shape — the address and the acce
 notes are in it because somebody has to open the door. Access follows the *live*
 award, decided in one place: cancel the booking and the access notes come back
 empty, and the job's own detail endpoint answers 404. The owner's identity stays
-withheld either way; phase 5's notifications are how the two sides reach each
-other.
+withheld either way — **including inside the message thread**, which is the
+easiest place in the product to undo it. `messages.visible_sender` is the single
+author of what a reader is shown, so the cleaner's copy of an owner's message
+says "the owner", and the notification body says the same: an email signed with
+the owner's name is the same leak by a different route. A screen that worked the
+label out from a user id would be a second author on the boundary, and the
+version that leaks renders perfectly.
+
+Messaging follows the **live** award, exactly as the address and the access
+notes do — bidding is not a relationship, so there is no channel before an award
+and none after it ends.
 
 **Vetting documents are never on a public path.** Uploads get a generated key
 (never a client-supplied filename, which is a path-traversal primitive), are

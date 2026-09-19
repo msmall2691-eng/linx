@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 
+import MessageThread from '../components/MessageThread.jsx'
 import JobProgress from '../components/JobProgress.jsx'
 import Alert from '../components/Alert.jsx'
 import PaymentPanel from '../components/PaymentPanel.jsx'
@@ -302,6 +303,8 @@ export default function TurnoverDetail() {
           cancellation — the cases the backend went out of its way to allow.
           It self-hides when the server says there is nobody to dispute with,
           so the server decides and this does not second-guess it. */}
+      <MessageThread turnoverId={turnoverId} />
+
       <DisputePanel turnoverId={turnoverId} />
 
       {turnover.award && (

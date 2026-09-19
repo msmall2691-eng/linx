@@ -22,6 +22,7 @@ from app.api.routes import (
     cleaners,
     console,
     disputes,
+    messages,
     health,
     payments,
     properties,
@@ -72,6 +73,7 @@ api_router.include_router(console.router)
 api_router.include_router(payments.router)
 api_router.include_router(reviews.router)
 api_router.include_router(disputes.router)
+api_router.include_router(messages.router)
 app.include_router(api_router)
 
 

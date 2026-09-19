@@ -30,6 +30,7 @@ from app.models.enums import (
     UserRole,
     VerificationStatus,
 )
+from app.models.message import JobMessage
 from app.models.notification import Notification
 from app.models.payment import PaymentIn, Payout
 from app.models.property import Property
@@ -50,6 +51,7 @@ __all__ = [
     "Document",
     "DocumentStatus",
     "DocumentType",
+    "JobMessage",
     "Notification",
     "NotificationChannel",
     "NotificationEvent",

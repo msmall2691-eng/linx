@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 
+import MessageThread from '../components/MessageThread.jsx'
 import JobProgress from '../components/JobProgress.jsx'
 import Alert from '../components/Alert.jsx'
 import EmptyState from '../components/EmptyState.jsx'
@@ -129,6 +130,8 @@ function Job({ job, timeZone, onCancel, onStart, onComplete, onSetOut, busy }) {
           complaints — a lockbox code that was wrong, somebody home who should
           not have been — are about jobs that went badly, which are exactly the
           ones nobody marks complete. */}
+      <MessageThread turnoverId={job.turnover_id} />
+
       <DisputePanel turnoverId={job.turnover_id} />
 
       {/* What the owner can see, shown to the cleaner too, so "what have I

@@ -530,6 +530,7 @@ class TestTheListItself:
             "dispute_raised",
             "dispute_resolved",
             "cleaner_en_route",
+            "message_received",
         }
 
     def test_every_declared_event_now_has_a_sender(self) -> None:
@@ -560,6 +561,7 @@ class TestTheListItself:
             NotificationEvent.DISPUTE_RAISED: n.dispute_raised,
             NotificationEvent.DISPUTE_RESOLVED: n.dispute_resolved,
             NotificationEvent.CLEANER_EN_ROUTE: n.cleaner_en_route,
+            NotificationEvent.MESSAGE_RECEIVED: n.message_received,
         }
         assert set(senders) == set(NotificationEvent), (
             "an event is declared with nothing to fire it"
