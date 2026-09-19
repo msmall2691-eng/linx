@@ -303,7 +303,15 @@ export default function TurnoverDetail() {
           cancellation — the cases the backend went out of its way to allow.
           It self-hides when the server says there is nobody to dispute with,
           so the server decides and this does not second-guess it. */}
-      <MessageThread turnoverId={turnoverId} />
+      {/* **Only mounted when there is a booking to talk through.** The
+          endpoint answers 404 when there is not — correctly, since "not yours"
+          and "not there" must look the same — and an unconditional fetch on
+          every turnover page turns that into a console error on a screen where
+          nothing is wrong. The server is still the judge: if this is wrong the
+          panel hides itself. */}
+      {turnover.award && !turnover.award.cancelled_at && (
+        <MessageThread turnoverId={turnoverId} />
+      )}
 
       <DisputePanel turnoverId={turnoverId} />
 

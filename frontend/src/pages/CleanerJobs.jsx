@@ -130,7 +130,10 @@ function Job({ job, timeZone, onCancel, onStart, onComplete, onSetOut, busy }) {
           complaints — a lockbox code that was wrong, somebody home who should
           not have been — are about jobs that went badly, which are exactly the
           ones nobody marks complete. */}
-      <MessageThread turnoverId={job.turnover_id} />
+      {/* Not on a cancelled booking: there is nobody to reach, the
+          endpoint says so with a 404, and an unconditional fetch would log a
+          console error on a card that is working perfectly. */}
+      {!cancelled && <MessageThread turnoverId={job.turnover_id} />}
 
       <DisputePanel turnoverId={job.turnover_id} />
 

@@ -522,6 +522,8 @@ class TestTheNotification:
             NotificationEvent.REVIEW_RECEIVED: notifications.review_received,
             NotificationEvent.DISPUTE_RAISED: notifications.dispute_raised,
             NotificationEvent.DISPUTE_RESOLVED: notifications.dispute_resolved,
+            NotificationEvent.CLEANER_EN_ROUTE: notifications.cleaner_en_route,
+            NotificationEvent.MESSAGE_RECEIVED: notifications.message_received,
         }
         assert set(senders) == set(NotificationEvent)
 

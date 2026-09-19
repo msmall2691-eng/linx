@@ -55,6 +55,12 @@ EXPECTED_TABLES = {
     # table should be a decision somebody makes out loud rather than a file that
     # appears.
     "property_calendars",
+    # Messages between an owner and the cleaner booked on their job. This
+    # table is the one that reopened a v1 scope decision — "in-app messaging is
+    # out of scope" — so it failing this assertion first is exactly right: a
+    # table that arrives as a file nobody argued about is how scope moves
+    # without anybody choosing to move it.
+    "job_messages",
     # Phase 8. A dispute is the one thing in this product deliberately *not*
     # resolved by code: it is a disagreement between two people that a human
     # decides, and the table exists so the decision has somewhere to live and
@@ -514,7 +520,7 @@ class TestReviewsStayHiddenByDefault:
         db.rollback()
 
 
-def test_a_rebuilt_enum_keeps_every_value_its_parent_revision_had() -> None:
+def test_every_rebuilt_enum_keeps_every_value_its_parent_revision_had() -> None:
     """**A downgrade must land on the schema the parent revision actually had.**
 
     `0007_disputes` cannot remove a value from `notification_event` — Postgres
@@ -525,25 +531,48 @@ def test_a_rebuilt_enum_keeps_every_value_its_parent_revision_had() -> None:
     that had ever recorded one, and on an empty database succeeded while
     leaving 0006 with a type that could not represent its own events.
 
-    Checked by arithmetic rather than by listing the values a second time: a
-    list here that had to be kept in step with the migration's list would be
-    the same mistake with an extra place to make it.
+    **This used to check only `0007`, and the arithmetic it used was the reason
+    it had to.** It asserted `remaining == today - added`, which is true only
+    while that revision is the newest one touching the enum — so the first
+    migration to add an event after it broke the test rather than finding a bug
+    in itself. That is the same class of mistake the test exists to catch: a
+    rule written against one moment in the schema's history, silently wrong
+    from the next one on.
+
+    So it walks every revision that rebuilds the type, and for each one
+    reconstructs its parent's enum as *today's values minus everything added by
+    that revision and all the ones after it*. Still arithmetic rather than a
+    second list to keep in step — just arithmetic that knows where in the
+    history it is standing.
     """
     import importlib.util
 
-    path = Path(__file__).resolve().parents[1] / "alembic" / "versions" / "0007_disputes.py"
-    spec = importlib.util.spec_from_file_location("_m0007", path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    versions = Path(__file__).resolve().parents[1] / "alembic" / "versions"
+    # Revision files are numerically prefixed, so name order is history order.
+    rebuilders = []
+    for path in sorted(versions.glob("*.py")):
+        source = path.read_text()
+        if "remaining = [" not in source or "NEW_EVENTS" not in source:
+            continue
+        spec = importlib.util.spec_from_file_location(f"_m{path.stem}", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        remaining = set(
+            re.findall(r'"([a-z_]+)"', source.split("remaining = [")[1].split("]")[0])
+        )
+        rebuilders.append((path.name, set(module.NEW_EVENTS), remaining))
 
-    source = path.read_text()
-    remaining = set(re.findall(r'"([a-z_]+)"', source.split("remaining = [")[1].split("]")[0]))
-    added = set(module.NEW_EVENTS)
+    assert rebuilders, "no migration rebuilds notification_event any more"
+
     today = {event.value for event in NotificationEvent}
-
-    assert added <= today, "the migration adds an event the enum does not have"
-    assert remaining == today - added, (
-        "the rebuilt type is not the parent revision's type: "
-        f"missing {sorted(today - added - remaining)}, "
-        f"unexpected {sorted(remaining - (today - added))}"
-    )
+    for index, (name, added, remaining) in enumerate(rebuilders):
+        assert added <= today, f"{name} adds an event the enum does not have"
+        # Everything this revision added, plus everything every later revision
+        # added — which together is exactly what its parent did not have.
+        added_from_here = set().union(*(a for _, a, _ in rebuilders[index:]))
+        expected = today - added_from_here
+        assert remaining == expected, (
+            f"{name}: the rebuilt type is not the parent revision's type: "
+            f"missing {sorted(expected - remaining)}, "
+            f"unexpected {sorted(remaining - expected)}"
+        )

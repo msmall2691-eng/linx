@@ -275,7 +275,12 @@ def test_a_cancelled_booking_leaves_both_sides_able_to_complain(
     cleaner_page.goto(f"{base_url}/jobs")
     expect(cleaner_page.get_by_test_id("job")).to_have_count(1)
     cleaner_page.get_by_test_id("cancel-job").click()
-    cleaner_page.get_by_role("textbox").fill("My van is off the road.")
+    # Named rather than "the textbox on the page": the card carries a message
+    # thread as well now, and a locator that assumed one textarea was one
+    # feature away from matching the wrong one.
+    cleaner_page.get_by_placeholder("My van is off the road.").fill(
+        "My van is off the road."
+    )
     cleaner_page.get_by_test_id("confirm-cancel-job").click()
 
     # The card stays on screen rather than vanishing with the booking — which
@@ -330,7 +335,12 @@ def test_acting_on_one_booking_leaves_the_other_alone(
     # --- back out ---------------------------------------------------------
     cleaner_page.goto(f"{base_url}/jobs")
     cleaner_page.get_by_test_id("cancel-job").click()
-    cleaner_page.get_by_role("textbox").fill("My van is off the road.")
+    # Named rather than "the textbox on the page": the card carries a message
+    # thread as well now, and a locator that assumed one textarea was one
+    # feature away from matching the wrong one.
+    cleaner_page.get_by_placeholder("My van is off the road.").fill(
+        "My van is off the road."
+    )
     cleaner_page.get_by_test_id("confirm-cancel-job").click()
     expect(cleaner_page.get_by_test_id("job")).to_have_count(1)
 

@@ -93,3 +93,32 @@ export function CardCheck(props) {
     </Glyph>
   )
 }
+
+export function Chat(props) {
+  return (
+    <Glyph {...props}>
+      <path d="M3.5 6.5a2 2 0 0 1 2-2h13a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H9l-4 3.5V15.5H5.5a2 2 0 0 1-2-2Z" />
+      <path d="M8 9h8M8 12h5" />
+    </Glyph>
+  )
+}
+
+export function Route(props) {
+  return (
+    <Glyph {...props}>
+      <circle cx="6" cy="6" r="2.5" />
+      <circle cx="18" cy="18" r="2.5" />
+      <path d="M6 8.5v3a4 4 0 0 0 4 4h5.5" />
+      <path d="M13.5 13 16 15.5 13.5 18" />
+    </Glyph>
+  )
+}
+
+export function Clock(props) {
+  return (
+    <Glyph {...props}>
+      <circle cx="12" cy="12" r="8.5" />
+      <path d="M12 7.5V12l3 2" />
+    </Glyph>
+  )
+}
