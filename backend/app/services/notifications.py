@@ -675,6 +675,38 @@ def turnover_unclaimed(
     )
 
 
+def cleaner_en_route(
+    db: Session, turnover: Turnover, prop: Property, award: Award
+) -> list[Notification]:
+    """The cleaner is on their way — the sixteenth event.
+
+    It goes to the owner and to nobody else. There is no admin copy: this is
+    an ordinary job going ordinarily well, and an inbox that receives every
+    cleaner leaving the house is an inbox nobody reads the cancellations in.
+
+    **Keyed on the award**, like every other key here, so "fires once per
+    transition" is a property of the database rather than of the caller
+    remembering.
+    """
+    owner = owner_of(db, turnover)
+    if owner is None:
+        return []
+
+    return queue(
+        db,
+        NotificationEvent.CLEANER_EN_ROUTE,
+        recipients=[owner],
+        subject=f"Your cleaner is on the way: {_where(prop)}",
+        body=(
+            f"{award.cleaner_name} is on the way to this job.\n\n"
+            f"Where: {_where(prop)}\n"
+            f"Checkout: {_when(turnover.checkout_at)}\n\n"
+            "You will hear again when they arrive and when the job is done."
+        ),
+        dedupe_scope=str(award.id),
+    )
+
+
 def job_completed(
     db: Session, turnover: Turnover, prop: Property, award: Award
 ) -> list[Notification]:

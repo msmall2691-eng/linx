@@ -155,9 +155,10 @@ class AwardedJobOut(BaseModel):
     #: Integer cents, frozen when the bid was accepted.
     agreed_price_cents: int
     awarded_at: datetime
-    #: The cleaner said they were on site, and that the job was done. The
-    #: second one is what makes the turnover payable, so it is on the shape the
-    #: cleaner's own screen reads rather than inferred from the status.
+    #: The cleaner said they were on their way, on site, and done. The first
+    #: is the only one the owner is notified about — it is the only one about
+    #: the future — and the third is what makes the turnover payable.
+    en_route_at: datetime | None
     started_at: datetime | None
     completed_at: datetime | None
     cancelled_at: datetime | None

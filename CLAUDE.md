@@ -855,19 +855,46 @@ in `app/models/enums.py` holds exactly these and nothing else:
 - Review received (both directions, once visible)
 - Dispute raised → an admin **and the person who raised it** (added in phase 8)
 - Dispute resolved → both parties, carrying the admin's note
+- Cleaner is on the way → owner
 
-**All fifteen have a sender.** Nothing is declared-and-unwired any more;
+**All sixteen have a sender.** Nothing is declared-and-unwired any more;
 the test that guarded that has flipped to guarding the other direction — a new
 enum value with nothing behind it fails, which is the conversation adding one is
 supposed to start.
 
-**The list has grown twice, both times on purpose.** `job_completed` was added in phase 6
+**The list has grown three times, each time on purpose.** `job_completed` was added in phase 6
 alongside the transition it belongs to. Before money hung off completion, "the
 cleaner says it is done" was nobody's business; now an owner who is never told
 is an owner who never pays, and a cleaner who did the work and hears nothing.
 Adding it meant a migration and a failing test, which is exactly the
 conversation a new event is supposed to start — the list being closed is what
 makes opening it a decision.
+
+`cleaner_en_route` was the third (phase 10). `started_at` and `completed_at`
+both report something that has already happened; neither can answer the question
+an owner actually asks on the morning of a turnover, which is *is anybody
+coming*. Without it that signal exists only on a screen the owner may not be
+looking at, and the fallback is the phone call this product exists to replace.
+It goes to the owner and nobody else — no admin copy, because an inbox that
+receives every cleaner leaving the house is an inbox nobody reads the
+cancellations in.
+
+**Three job signals, and only one of them notifies.** `awards.set_out`,
+`start_job` and `complete_job` write `en_route_at`, `started_at` and
+`completed_at`; `frontend/src/components/JobProgress.jsx` renders all three to
+*both* sides, because "is anybody coming" and "what have I told them" are the
+same three facts and two renderings would eventually disagree about what a
+missing timestamp means.
+
+**None of them is a position, and that is a decision rather than a gap.**
+Continuous location on an independent contractor is a different product, with
+its own consent, retention and disclosure questions — and a coordinate column
+added quietly alongside a timestamp is exactly how that product would arrive
+without any of them being asked. What is stored is a time somebody wrote by
+pressing a button. `set_out` is idempotent on the first press for the same
+reason a second tap in a driveway is not a correction, and it stays available
+*after* arrival: a cleaner who forgot on the road and taps it on the doorstep
+has told the truth late, which beats the owner hearing nothing.
 
 `app/services/notifications.py` is the one place that decides any of this.
 Phase 4's `app/services/alerts.py` is gone, replaced by it.

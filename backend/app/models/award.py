@@ -87,6 +87,20 @@ class Award(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
 
+    #: The cleaner says they are on their way. **The only one of these three
+    #: that is about the future**, which is what makes it worth a column and a
+    #: notification: `started_at` and `completed_at` report what has already
+    #: happened, and an owner on the morning of a turnover is asking whether
+    #: anybody is coming.
+    #:
+    #: It is a timestamp somebody wrote by pressing a button, and deliberately
+    #: **not a position**. Continuous location on an independent contractor is a
+    #: different product with its own consent, retention and disclosure
+    #: questions; a coordinate column added alongside this one is how that
+    #: product arrives without any of them being asked.
+    en_route_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     #: The cleaner says they are on site. Nothing hangs off it but the screen —
     #: it exists so "started" and "finished" are two facts rather than one.
     started_at: Mapped[datetime | None] = mapped_column(

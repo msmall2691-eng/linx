@@ -217,6 +217,46 @@ def accept_bid(db: Session, *, turnover: Turnover, bid_id: uuid.UUID) -> Award:
     return award
 
 
+def set_out(db: Session, *, turnover: Turnover, award: Award) -> Award:
+    """The cleaner is on their way. **The turnover row must already be locked.**
+
+    The only one of the three job signals that is about the future, which is
+    why it is the one that notifies. `started_at` and `completed_at` report
+    what has happened; an owner on the morning of a turnover is asking whether
+    anybody is coming, and until now the only way to answer that was the phone
+    call this product exists to replace.
+
+    **Idempotent, and the first tap is the one that counts.** A second press on
+    a phone in a driveway is not a correction, and re-stamping it would move
+    "left at 9:05" to whenever they last fidgeted with the screen. It also must
+    not send the owner a second message saying the same thing — the dedupe key
+    is keyed on the award, so the notification could not duplicate anyway, but
+    not queueing it twice is the honest version rather than relying on that.
+
+    It is deliberately allowed *after* arrival as well as before. A cleaner who
+    forgot to tap it on the way and taps it on the doorstep has told the truth
+    late, which is better than the product refusing them and the owner
+    learning nothing.
+    """
+    if award.cancelled_at is not None:
+        raise AwardConflict("This booking has been cancelled.")
+    if award.completed_at is not None:
+        raise AwardConflict("This job is already marked complete.")
+
+    if award.en_route_at is not None:
+        return award
+
+    award.en_route_at = datetime.now(timezone.utc)
+    prop = db.execute(
+        select(Property).where(Property.id == turnover.property_id)
+    ).scalar_one()
+    notifications.cleaner_en_route(db, turnover, prop, award)
+
+    db.commit()
+    notifications.deliver_pending(db)
+    return award
+
+
 def start_job(db: Session, *, turnover: Turnover, award: Award) -> Award:
     """The cleaner is on site. **The turnover row must already be locked.**
 

@@ -203,6 +203,15 @@ class NotificationEvent(str, Enum):
       the only place either side finds out what was decided.
 
     `ACKNOWLEDGED` sends nothing on purpose — see `DisputeStatus`.
+
+    **Sixteen now.** `CLEANER_EN_ROUTE` is the newest, and it opens the list for
+    the same reason `JOB_COMPLETED` did: a fact one side knows and the other
+    cannot find out. `started_at` says somebody turned up, after the fact; it
+    cannot answer the question an owner asks on the morning of a turnover, which
+    is whether anybody is coming. Without the notification the signal exists only
+    on a screen the owner may not be looking at, which is the same as not
+    existing — and the fallback is the phone call this product is meant to
+    replace.
     """
 
     TURNOVER_POSTED = "turnover_posted"
@@ -220,6 +229,7 @@ class NotificationEvent(str, Enum):
     REVIEW_RECEIVED = "review_received"
     DISPUTE_RAISED = "dispute_raised"
     DISPUTE_RESOLVED = "dispute_resolved"
+    CLEANER_EN_ROUTE = "cleaner_en_route"
 
 
 class NotificationChannel(str, Enum):
