@@ -9,6 +9,7 @@ import DisputePanel from '../components/DisputePanel.jsx'
 import ReviewPanel from '../components/ReviewPanel.jsx'
 import StatusBadge from '../components/StatusBadge.jsx'
 import UrgencyBadge from '../components/UrgencyBadge.jsx'
+import { whereAmI } from '../lib/whereAmI.js'
 import { apiFetch } from '../lib/api.js'
 import { useTimeZone } from '../lib/config.jsx'
 import { formatCents, formatDateTime, formatTurnaround } from '../lib/datetime.js'
@@ -145,6 +146,15 @@ function Job({ job, timeZone, onCancel, onStart, onComplete, onSetOut, busy }) {
         </div>
       )}
 
+      {!cancelled && !started && !done && (
+        <p className="mt-6 text-xs text-slate-500" data-testid="arrival-note">
+          Tapping <em>I&rsquo;m on site</em> asks your phone where it is, once,
+          to confirm you&rsquo;re at the property. We store how far away it
+          said you were — never where you are — and you can say no: the job
+          works exactly the same.
+        </p>
+      )}
+
       {!cancelled && !done && (
         <div className="mt-6 flex flex-wrap gap-2 border-t border-slate-200 pt-4">
           {/* The only one of the three that reaches the owner as it happens,
@@ -171,7 +181,7 @@ function Job({ job, timeZone, onCancel, onStart, onComplete, onSetOut, busy }) {
               className="btn-secondary"
               data-testid="start-job"
             >
-              I&rsquo;m on site
+              {busy ? 'Checking…' : 'I\u2019m on site'}
             </button>
           )}
           <button
@@ -268,12 +278,19 @@ export default function CleanerJobs() {
     }
   }, [path])
 
-  async function act(turnoverId, action) {
+  async function act(turnoverId, action, { location = false } = {}) {
     setError(null)
     setBusy(true)
     try {
+      // **Asked once, and never waited on for long.** `whereAmI` resolves to
+      // null on every failure — refused, unavailable, timed out — because all
+      // of them mean the same thing to the server, which answers `unchecked`
+      // rather than holding it against anybody. Marking yourself on site must
+      // never depend on a permission prompt.
+      const at = location ? await whereAmI() : null
       const updated = await apiFetch(`/board/jobs/${turnoverId}/${action}`, {
         method: 'POST',
+        body: at ?? undefined,
       })
       // The action answers with the whole job — the same shape the list was
       // built from — so it can be spliced in rather than re-fetched. An action
@@ -359,7 +376,7 @@ export default function CleanerJobs() {
               timeZone={timeZone}
               onCancel={cancelJob}
               onSetOut={(id) => act(id, 'on-my-way')}
-              onStart={(id) => act(id, 'start')}
+              onStart={(id) => act(id, 'start', { location: true })}
               onComplete={(id) => act(id, 'complete')}
               busy={busy}
             />

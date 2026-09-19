@@ -900,7 +900,37 @@ Continuous location on an independent contractor is a different product, with
 its own consent, retention and disclosure questions — and a coordinate column
 added quietly alongside a timestamp is exactly how that product would arrive
 without any of them being asked. What is stored is a time somebody wrote by
-pressing a button. `set_out` is idempotent on the first press for the same
+pressing a button.
+
+**The arrival check is the one reading taken, and its shape is that decision
+made explicit.** Tapping *on site* asks the browser where it is **once**
+(`lib/whereAmI.js` — `getCurrentPosition`, never `watchPosition`), the server
+turns it into a distance from the property and discards it. What persists is
+`awards.arrival_distance_m` and `arrival_accuracy_m`: a scalar against a point
+the owner already knows, which describes a ring rather than a place and cannot
+be replayed into a trail. There is a test that no column on `Award` is a
+coordinate under any name, and it is the same sentence the landing page makes
+in words.
+
+`awards.arrival_check` is the single author of the verdict, and it has **three
+answers, not two**. `confirmed`, `away`, and `unchecked` — the third being the
+point, exactly as with `launch.py`'s fourth state. Every reading that could not
+be taken (permission refused, no hardware, a timeout, a desktop browser, a
+property with no coordinates) has to land somewhere, and both two-valued
+answers lie: `confirmed` invents evidence, and `away` accuses somebody on the
+strength of a missing browser prompt. **A fix whose own accuracy is worse than
+`ARRIVAL_WITHIN_M` is also `unchecked`** — a position accurate to tens of
+kilometres that happens to land inside the radius is not evidence of anything,
+and reading it as confirmation makes the tick most trustworthy exactly where
+the data is worst. The radius is generous (200m) because accusing an honest
+cleaner is far worse than missing a dishonest one.
+
+**It is a claim, not proof, and nothing in the product acts on it.** The
+coordinate comes from the cleaner's own browser and can be fabricated. It may
+inform a person; it may never gate money, cancel a booking, set `was_no_show`
+or feed a rating. `tests/test_arrival_check.py` asserts the exact set of files
+that read it, so wiring it into one of those fails a test and has to be said
+out loud. `set_out` is idempotent on the first press for the same
 reason a second tap in a driveway is not a correction, and it stays available
 *after* arrival: a cleaner who forgot on the road and taps it on the doorstep
 has told the truth late, which beats the owner hearing nothing.

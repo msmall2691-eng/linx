@@ -101,6 +101,27 @@ class Award(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     en_route_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    #: How far the cleaner's phone said it was from the property when they
+    #: tapped arrived, in metres. **A scalar against a point the owner already
+    #: knows, not a position** — it describes a ring rather than a place and
+    #: cannot be replayed into a trail. The reading itself is used and thrown
+    #: away.
+    #:
+    #: Null means no conclusion was available, which is a real and common
+    #: answer: permission refused, no GPS, a desktop browser, or a property
+    #: with no coordinates. See `awards.arrival_check`, which has three
+    #: outcomes rather than two for exactly that reason.
+    arrival_distance_m: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    #: What the fix claimed about itself, in metres. **This is what makes the
+    #: distance readable rather than merely present**: a browser falling back
+    #: to IP geolocation returns something accurate to tens of kilometres, and
+    #: such a fix landing inside the radius is not evidence of anything.
+    #:
+    #: **None of this is proof.** The coordinate came from the cleaner's own
+    #: browser and can be fabricated by anyone who wants to. It is worth
+    #: writing here because the failure mode is not a bug — it is somebody
+    #: treating a green tick as evidence in a dispute it cannot settle.
+    arrival_accuracy_m: Mapped[int | None] = mapped_column(Integer, nullable=True)
     #: The cleaner says they are on site. Nothing hangs off it but the screen —
     #: it exists so "started" and "finished" are two facts rather than one.
     started_at: Mapped[datetime | None] = mapped_column(
@@ -147,6 +168,22 @@ class Award(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     def cleaner_name(self) -> str:
         """Who is booked, for the owner's screen. An id is not a person."""
         return self.cleaner.full_name
+
+    @property
+    def arrival_check(self) -> str:
+        """`confirmed`, `away` or `unchecked` — **asked, never decided here.**
+
+        A property on the model so the owner's `AwardOut` can read it by
+        attribute, but the answer comes from `awards.arrival_check`, which is
+        its one author. Re-implementing the threshold here would put a second
+        opinion on it in the place most likely to be read and least likely to
+        be changed when the first one moves.
+
+        Imported inside the call because the service imports this module.
+        """
+        from app.services.awards import arrival_check
+
+        return arrival_check(self)
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         state = "live" if self.is_live else "cancelled"

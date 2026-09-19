@@ -47,6 +47,7 @@ from app.schemas.board import (
     BoardTurnoverOut,
     JobCancel,
 )
+from app.schemas.award import ArrivalIn
 from app.services import awards, notifications, vetting
 from app.services.geo import distance_miles_sql, haversine_miles
 from app.services.turnovers import refresh_urgency
@@ -187,6 +188,9 @@ def _serialize_job(award: Award, turnover: Turnover, prop: Property) -> AwardedJ
         awarded_at=award.awarded_at,
         started_at=award.started_at,
         en_route_at=award.en_route_at,
+        # Asked, never re-derived: one author for the threshold.
+        arrival_check=awards.arrival_check(award),
+        arrival_distance_m=award.arrival_distance_m,
         completed_at=award.completed_at,
         cancelled_at=award.cancelled_at,
         cancellation_reason=award.cancellation_reason,
@@ -345,18 +349,43 @@ def i_am_on_my_way(
 @router.post("/jobs/{turnover_id}/start", response_model=AwardedJobOut)
 def start_my_job(
     turnover_id: uuid.UUID,
+    payload: ArrivalIn | None = None,
     db: Session = Depends(get_db),
     user: User = Depends(require_role(UserRole.CLEANER)),
 ) -> AwardedJobOut:
-    """Say you are on site.
+    """Say you are on site, optionally confirming you are there.
 
     Nothing but the owner's screen hangs off this, which is the point: "did
     anybody actually turn up" is a different question from "was it finished",
     and a single flag cannot answer both.
+
+    The body is **optional in the strong sense**. A cleaner who refuses the
+    location permission, has no signal, or is on a desktop still marks
+    themselves on site exactly as before, and the check answers `unchecked`.
+    Making it a requirement would turn a confirmation into a gate on being
+    able to say you had turned up.
+
+    What is sent is used to compute one distance from the property and then
+    discarded. **It is a claim rather than proof** — the coordinate comes from
+    the cleaner's own browser — which is why the answer is three-valued and
+    why nothing in the product acts on it automatically.
     """
     turnover, award = _lock_my_job(db, turnover_id, user)
+    at = None
+    if (
+        payload is not None
+        and payload.lat is not None
+        and payload.lng is not None
+        and payload.accuracy_m is not None
+    ):
+        # All three or none. A position without its accuracy cannot be read,
+        # and filling in an optimistic default would be this endpoint
+        # manufacturing the confidence the column exists to record honestly.
+        at = awards.AtLocation(
+            lat=payload.lat, lng=payload.lng, accuracy_m=payload.accuracy_m
+        )
     try:
-        awards.start_job(db, turnover=turnover, award=award)
+        awards.start_job(db, turnover=turnover, award=award, at=at)
     except awards.AwardConflict as conflict:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail=conflict.detail

@@ -160,6 +160,15 @@ class AwardedJobOut(BaseModel):
     #: the future — and the third is what makes the turnover payable.
     en_route_at: datetime | None
     started_at: datetime | None
+    #: Whether the arrival tap came from the property: `confirmed`, `away`, or
+    #: `unchecked`. **Carried rather than derived from the distance**, because
+    #: `awards.arrival_check` is its one author and a screen applying the
+    #: threshold itself would eventually disagree with the other screen.
+    arrival_check: str
+    #: How far away the phone said it was, in metres. Null when there is no
+    #: conclusion. Shown beside the verdict so "away" is a number somebody can
+    #: judge rather than an accusation with nothing behind it.
+    arrival_distance_m: int | None
     completed_at: datetime | None
     cancelled_at: datetime | None
     cancellation_reason: str | None
