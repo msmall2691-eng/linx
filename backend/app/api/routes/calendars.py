@@ -40,9 +40,22 @@ require_owner = require_role(UserRole.OWNER)
 def _owned_calendar(
     db: Session, property_id: uuid.UUID, calendar_id: uuid.UUID, owner: User
 ) -> PropertyCalendar:
+    """The calendar behind an id, or 404.
+
+    **An archived calendar answers 404 like any other thing that is not
+    there.** The row outlives removal so its jobs keep their identity, but that
+    is bookkeeping the owner never sees: to them it is gone, it is off the
+    panel, and an endpoint that still let it be renamed or re-read would be
+    exposing the bookkeeping as though it were a feature. Reconnecting is
+    pasting the address again, not operating on an id no screen shows.
+    """
     get_owned_property(property_id, db, owner)
     calendar = db.get(PropertyCalendar, calendar_id)
-    if calendar is None or calendar.property_id != property_id:
+    if (
+        calendar is None
+        or calendar.property_id != property_id
+        or calendar.removed_at is not None
+    ):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Calendar not found"
         )
@@ -173,6 +186,14 @@ def add_calendar(
             status_code=status.HTTP_409_CONFLICT, detail=refused.detail
         ) from None
 
+    # **Reconnecting is adding the same address again**, and it lands here
+    # rather than on a button of its own, because that is what an owner does:
+    # they do not think "reactivate calendar 7", they paste the link again.
+    #
+    # The archived row still holds the URL, so the unique constraint is what
+    # finds it — the same constraint that refuses a genuine duplicate. Which of
+    # the two this is depends only on whether the row it collided with is
+    # archived.
     calendar = PropertyCalendar(
         property_id=prop.id, url=payload.url, label=payload.label
     )
@@ -181,10 +202,14 @@ def add_calendar(
         db.commit()
     except IntegrityError:
         db.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="That calendar is already connected to this property.",
-        ) from None
+        calendar = calendars.reconnect(
+            db, property_id=prop.id, url=payload.url, label=payload.label
+        )
+        if calendar is None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="That calendar is already connected to this property.",
+            ) from None
     db.refresh(calendar)
 
     try:
@@ -214,26 +239,35 @@ def add_calendar(
 
 
 def _refresh_if_present(db: Session, calendar: PropertyCalendar) -> bool:
-    """Re-read the row, unless it is gone. Answers whether it is still there.
+    """Re-read the row. Answers whether this feed is still connected.
 
     **Both endpoints call this, which is the point.** `sync` can refuse because
-    another request deleted the feed while this one was out on the network, and
+    another request removed the feed while this one was out on the network, and
     an unguarded `db.refresh` then raises *inside the error handler* and turns a
     deliberate answer into a 500 that says nothing. Round five fixed exactly
     that on the sync endpoint and left the identical line on the add endpoint —
     the same rule on one of two paths, which is the mistake this file has now
     made often enough to stop writing the line twice.
 
-    Asked for forgiveness rather than permission, because the obvious guard does
-    not work: `db.get` answers from the session's identity map and hands back
-    the deleted instance without touching the database, so a `is not None` check
-    passes and the refresh fails anyway.
+    **The question it asks had to change when removal became an archive.** It
+    used to mean "is the row still there", because a concurrent DELETE made it
+    vanish. Rows do not vanish any more — so that check would now pass for a
+    calendar the owner removed a second ago, and the endpoint would answer with
+    a cheerful count of jobs for a feed that is gone from their screen. The
+    race did not go away; it changed shape, and a check written against the old
+    shape silently stops covering it.
+
+    The `try` stays regardless. A row deleted by hand is still possible, the
+    foreign key still says `SET NULL`, and the obvious guard does not work:
+    `db.get` answers from the session's identity map and hands back the deleted
+    instance without touching the database, so a `is not None` check passes and
+    the refresh fails anyway.
     """
     try:
         db.refresh(calendar)
     except SQLAlchemyError:
         return False
-    return True
+    return calendar.removed_at is None
 
 
 def _answer(calendar: PropertyCalendar, result: calendars.SyncResult) -> SyncOut:
@@ -307,13 +341,21 @@ def remove_calendar(
     db: Session = Depends(get_db),
     owner: User = Depends(require_owner),
 ) -> None:
-    """Disconnect the feed. **The jobs it proposed stay.**
+    """Disconnect the feed. **The jobs it proposed stay, and so does the row.**
 
-    The foreign key is `SET NULL`, so turnovers keep existing and simply stop
-    claiming a source. Anything else would mean removing a calendar could
-    cancel a job a cleaner is booked on — a settings change with a consequence
+    The jobs staying was never in question: removing a calendar must not cancel
+    a job a cleaner is booked on, which is a settings change with a consequence
     nobody would expect it to have.
+
+    The *row* staying is the newer half, and it is what makes the jobs keep
+    their identity. A feed has no identity observable from outside — the export
+    URL rotates, the event UIDs are arbitrary feed-local strings — so the only
+    stable thing those jobs were keyed to was this row. Deleting it left them
+    orphaned, and reconnecting proposed every booking a second time.
+
+    So this archives. The row keeps its URL, which is what lets a later add on
+    the same address find it, and the turnovers keep pointing at it the whole
+    time — there is no window in which their source is unknown.
     """
     calendar = _owned_calendar(db, property_id, calendar_id, owner)
-    db.delete(calendar)
-    db.commit()
+    calendars.archive(db, calendar)

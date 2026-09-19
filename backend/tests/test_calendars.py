@@ -556,8 +556,13 @@ class TestTheEndpoints:
     ) -> None:
         """**A settings change must not cancel somebody's booking.**
 
-        The foreign key is SET NULL, so the turnovers survive and simply stop
-        claiming a source.
+        The invariant is unchanged; what changed is how it is kept. Removal
+        used to delete the calendar and let `ON DELETE SET NULL` strand the
+        turnovers, which saved the jobs and cost them their identity. Now the
+        row is archived, so they survive *and* still know where they came from.
+        `TestAJobKeepsItsIdentityAcrossAReconnect` covers that half; this one
+        stays where it is, guarding what it always guarded — the jobs are still
+        there.
         """
         owner = make_user(role="owner")
         prop = _property(client, owner)
@@ -571,8 +576,7 @@ class TestTheEndpoints:
         assert resp.status_code == 204
 
         db.expire_all()
-        turnover = db.execute(select(Turnover)).scalars().one()
-        assert turnover.source_calendar_id is None
+        assert db.execute(select(Turnover)).scalars().one() is not None
 
     def test_a_cleaner_never_sees_a_feed_url(
         self, client: TestClient, make_user, make_cleaner, db: Session
@@ -2074,89 +2078,204 @@ class TestTheSuccessPathSurvivesTheFeedVanishing:
 # Round eight — identity across a reconnect, and freshness across an overlap
 # --------------------------------------------------------------------------
 
-
 class TestAJobKeepsItsIdentityAcrossAReconnect:
-    def test_re_adding_the_same_feed_adopts_its_jobs_rather_than_duplicating(
+    """Removal archives the calendar, so identity never breaks in the first
+    place.
+
+    These replace three tests that proved *adoption* worked — the machinery
+    that tried to rebuild a job's identity after removal destroyed it. Each of
+    those was real and each had an edge, because they were all reconstructions
+    of something that should not have been thrown away. Keeping the row removes
+    the problem instead of guarding against it, so what is worth asserting now
+    is the stronger property: the link is never broken at any point.
+    """
+
+    def test_removing_a_feed_keeps_the_row_and_the_link(
         self, client: TestClient, make_user, db: Session
     ) -> None:
-        """**On the documented flow, not an exotic one.**
+        """**The job outlives the calendar, and so does its identity.**
 
-        The feed URL is deliberately not editable in place, so removing and
-        re-adding *is* how an owner changes it. Removal is `ON DELETE SET NULL`
-        because a job outlives the calendar that proposed it — but that erases
-        the calendar half of its identity, so the replacement feed found nothing
-        and proposed every booking again. One stay, two jobs.
+        The old behaviour nulled `source_calendar_id` here, and the test that
+        asserted it named the right invariant — a job outlives the calendar
+        that proposed it — while testing the mechanism that broke everything
+        else. Archiving keeps the invariant *and* the link.
         """
         owner = make_user(role="owner")
         prop = _property(client, owner)
+        calendar = _calendar(db, prop["id"])
+        calendars.sync(db, calendar, client=_fake_client(_feed_for(10)))
+
+        resp = client.delete(
+            f"/api/properties/{prop['id']}/calendars/{calendar.id}",
+            headers=owner["auth"],
+        )
+        assert resp.status_code == 204
+
+        db.expire_all()
+        turnover = db.execute(select(Turnover)).scalars().one()
+        assert turnover.source_calendar_id == calendar.id, (
+            "the job still knows which feed proposed it"
+        )
+
+        archived = db.get(PropertyCalendar, calendar.id)
+        assert archived is not None, "the row is archived, not deleted"
+        assert archived.removed_at is not None
+
+    def test_it_is_gone_from_the_owners_panel(
+        self, client: TestClient, make_user, db: Session
+    ) -> None:
+        """Kept forever in the database, removed as far as the owner is
+        concerned — otherwise Remove looks like it did not work."""
+        owner = make_user(role="owner")
+        prop = _property(client, owner)
+        calendar = _calendar(db, prop["id"])
+
+        client.delete(
+            f"/api/properties/{prop['id']}/calendars/{calendar.id}",
+            headers=owner["auth"],
+        )
+        listed = client.get(
+            f"/api/properties/{prop['id']}/calendars", headers=owner["auth"]
+        ).json()
+        assert listed == []
+
+    def test_an_archived_calendar_answers_404_by_id(
+        self, client: TestClient, make_user, db: Session
+    ) -> None:
+        """The row outliving removal is bookkeeping, not a feature.
+
+        It is off the panel, so no screen hands out its id — and an endpoint
+        that still let it be renamed or re-read would be exposing the
+        bookkeeping. Reconnecting is pasting the address again.
+        """
+        owner = make_user(role="owner")
+        prop = _property(client, owner)
+        calendar = _calendar(db, prop["id"])
+        calendars.archive(db, calendar)
+
+        base = f"/api/properties/{prop['id']}/calendars/{calendar.id}"
+        assert client.get(
+            f"/api/properties/{prop['id']}/calendars", headers=owner["auth"]
+        ).json() == []
+        assert client.patch(
+            base, json={"label": "renamed"}, headers=owner["auth"]
+        ).status_code == 404
+        assert client.post(f"{base}/sync", headers=owner["auth"]).status_code == 404
+        assert client.delete(base, headers=owner["auth"]).status_code == 404
+
+    def test_reconnecting_the_same_address_proposes_nothing_new(
+        self, client: TestClient, make_user, db: Session
+    ) -> None:
+        """One stay, one job — across a remove and a reconnect.
+
+        This is the whole point of the change. Re-adding used to find nothing
+        of its own and propose every booking a second time.
+        """
+        owner = make_user(role="owner")
+        prop = _property(client, owner)
+        url = "https://example.test/reconnect.ics"
         feed = _feed_for(10)
 
-        first = _calendar(db, prop["id"])
-        assert calendars.sync(db, first, client=_fake_client(feed)).created == 1
+        calendar = _calendar(db, prop["id"], url=url)
+        assert calendars.sync(db, calendar, client=_fake_client(feed)).created == 1
 
-        db.delete(first)
-        db.commit()
-        db.expire_all()
-        orphan = db.execute(select(Turnover)).scalars().one()
-        assert orphan.source_calendar_id is None, "the job outlives its calendar"
+        client.delete(
+            f"/api/properties/{prop['id']}/calendars/{calendar.id}",
+            headers=owner["auth"],
+        )
 
-        # **The same URL** — this is a reconnect, which is the flow the product
-        # documents. A different URL is a different feed and must not adopt.
-        second = _calendar(db, prop["id"])
-        result = calendars.sync(db, second, client=_fake_client(feed))
-
-        assert result.created == 0
-        assert result.adopted == 1
+        again = client.post(
+            f"/api/properties/{prop['id']}/calendars",
+            json={"url": url, "label": "Airbnb again"},
+            headers=owner["auth"],
+        )
+        assert again.status_code == 201
+        assert again.json()["calendar"]["id"] == str(calendar.id), (
+            "reconnecting returns the same calendar, not a rival"
+        )
+        assert again.json()["calendar"]["label"] == "Airbnb again"
 
         db.expire_all()
         turnovers = db.execute(select(Turnover)).scalars().all()
-        assert len(turnovers) == 1, "one booking is one job"
-        assert turnovers[0].source_calendar_id == second.id
+        assert len(turnovers) == 1, "one booking is still one job"
+        assert turnovers[0].source_calendar_id == calendar.id
 
-    def test_adoption_does_not_reach_across_properties(
-        self, client: TestClient, make_user, db: Session
+    def test_a_live_duplicate_is_still_refused(
+        self, client: TestClient, make_user
     ) -> None:
-        """Identity is scoped: another property's orphan with a colliding event
-        id is not this feed's to claim."""
+        """Reconnect must not swallow a real double-add. The same URL twice on
+        one property is still one feed spelled twice, and still a 409."""
         owner = make_user(role="owner")
-        mine = _property(client, owner)
-        theirs = _property(client, owner)
-        feed = _feed_for(10)
+        prop = _property(client, owner)
+        body = {"url": "https://example.test/live-dup.ics"}
 
-        elsewhere = _calendar(db, theirs["id"], url="https://example.test/t.ics")
-        calendars.sync(db, elsewhere, client=_fake_client(feed))
-        db.delete(elsewhere)
-        db.commit()
+        first = client.post(
+            f"/api/properties/{prop['id']}/calendars",
+            json=body,
+            headers=owner["auth"],
+        )
+        assert first.status_code == 201
+        again = client.post(
+            f"/api/properties/{prop['id']}/calendars",
+            json=body,
+            headers=owner["auth"],
+        )
+        assert again.status_code == 409
 
-        ours = _calendar(db, mine["id"])
-        result = calendars.sync(db, ours, client=_fake_client(feed))
-        assert result.adopted == 0
-        assert result.created == 1
-
-    def test_a_different_feed_does_not_adopt_a_colliding_event_id(
+    def test_a_different_address_is_a_different_feed(
         self, client: TestClient, make_user, db: Session
     ) -> None:
-        """**The same property is not the same feed.** UIDs are arbitrary
-        feed-local strings, so two listings whose feeds reuse one would hand
-        each other's jobs over — an untouched draft silently re-dated, or a
-        posted job suppressing the real booking entirely. Adoption therefore
-        checks which feed proposed the orphan, not just where it lives."""
+        """**The same property is not the same feed.** Two listings on one
+        property are two calendars, and the second must propose its own
+        bookings rather than quietly claiming the first's jobs — which is the
+        failure the old `source_feed_key` guard existed to prevent, now
+        impossible because identity is the row rather than a digest."""
         owner = make_user(role="owner")
         prop = _property(client, owner)
         feed = _feed_for(10)
 
         first = _calendar(db, prop["id"], url="https://example.test/listing-one.ics")
         calendars.sync(db, first, client=_fake_client(feed))
-        db.delete(first)
-        db.commit()
+        calendars.archive(db, first)
 
-        # A different listing on the same property, whose feed happens to use
-        # the same event id.
         second = _calendar(db, prop["id"], url="https://example.test/listing-two.ics")
         result = calendars.sync(db, second, client=_fake_client(feed))
+        assert result.created == 1, "a different listing proposes its own booking"
 
-        assert result.adopted == 0
-        assert result.created == 1
+    def test_reconnect_does_not_reach_across_properties(
+        self, client: TestClient, make_user, db: Session
+    ) -> None:
+        """The URL is unique *per property*, so the same export on two
+        properties is two calendars and reconnecting one leaves the other
+        alone."""
+        owner = make_user(role="owner")
+        mine = _property(client, owner)
+        theirs = _property(client, owner)
+        url = "https://example.test/shared.ics"
+
+        elsewhere = _calendar(db, theirs["id"], url=url)
+        calendars.archive(db, elsewhere)
+
+        resp = client.post(
+            f"/api/properties/{mine['id']}/calendars",
+            json={"url": url},
+            headers=owner["auth"],
+        )
+        assert resp.status_code == 201
+        assert resp.json()["calendar"]["id"] != str(elsewhere.id)
+
+    def test_a_removed_feed_is_not_read_by_the_scheduled_pass(
+        self, client: TestClient, make_user, db: Session
+    ) -> None:
+        """Archived rows live forever, so the pass has to exclude them or it
+        would fetch every feed any owner ever disconnected, for good."""
+        owner = make_user(role="owner")
+        prop = _property(client, owner)
+        calendar = _calendar(db, prop["id"])
+        assert calendar in calendars.active_calendars(db)
+
+        calendars.archive(db, calendar)
+        assert calendar not in calendars.active_calendars(db)
 
 
 class TestTheNewerReadWins:

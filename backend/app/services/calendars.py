@@ -55,7 +55,7 @@ import threading
 import uuid
 from dataclasses import dataclass
 from hashlib import sha256
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 from time import monotonic
 from urllib.parse import urlparse
 
@@ -177,15 +177,6 @@ HORIZON = timedelta(days=120)
 #: hashed rather than truncated — see `parse`.
 MAX_EXTERNAL_REF = 500
 
-
-def feed_key(url: str) -> str:
-    """Which feed this is, as a value safe to store beside a job.
-
-    A digest rather than the URL, because the URL is a credential — see
-    `PropertyCalendar.url`. Adoption only ever needs equality.
-    """
-    return sha256(url.encode()).hexdigest()
-
 #: How far *behind* now a departure can be and still be worth proposing.
 #:
 #: Exports keep their history — Airbnb's carries every past stay — and the
@@ -251,9 +242,6 @@ class SyncResult:
     #: because somebody had already acted on them. The number an owner needs to
     #: see: a guest cancelled and a cleaner may still be coming.
     stale_but_kept: int = 0
-    #: Jobs from a previously removed feed that this one has taken back over,
-    #: rather than proposing a second time. See `reconcile`.
-    adopted: int = 0
 
 
 # --------------------------------------------------------------------------
@@ -654,7 +642,6 @@ def reconcile(
     """
     moment = now or datetime.now(tz=region_timezone())
     result = SyncResult(bookings_seen=len(proposed))
-    this_feed = feed_key(calendar.url)
 
     prop = db.get(Property, calendar.property_id)
     if prop is None:
@@ -684,38 +671,6 @@ def reconcile(
         turnover = existing.pop(job.external_ref, None)
 
         if turnover is None:
-            # **A job outlives the calendar that proposed it, and so should its
-            # identity.** Removing a feed is `ON DELETE SET NULL`, deliberately:
-            # the turnovers stay. But that erases the calendar half of their
-            # identity, so re-adding the same feed — which is the *documented*
-            # way to change a feed's URL, since the URL is not editable in
-            # place — found nothing and proposed every booking again. One stay,
-            # two jobs, and the owner deletes the difference by hand.
-            #
-            # Scoped to the same property and the same event id, and only rows
-            # no calendar currently claims.
-            turnover = db.execute(
-                select(Turnover)
-                .where(
-                    Turnover.property_id == prop.id,
-                    Turnover.source_calendar_id.is_(None),
-                    Turnover.external_ref == job.external_ref,
-                    # **And it has to have come from this feed.** A matching
-                    # event id on the same property does not prove that: UIDs
-                    # are arbitrary feed-local strings, so two listings whose
-                    # feeds reuse one would hand each other's jobs over — an
-                    # untouched draft silently re-dated, or a posted job
-                    # suppressing the real booking entirely.
-                    Turnover.source_feed_key == this_feed,
-                )
-                .with_for_update(key_share=True)
-                .execution_options(populate_existing=True)
-            ).scalars().first()
-            if turnover is not None:
-                turnover.source_calendar_id = calendar.id
-                result.adopted += 1
-
-        if turnover is None:
             turnover = Turnover(
                 property_id=prop.id,
                 checkout_at=job.checkout_at,
@@ -727,7 +682,6 @@ def reconcile(
                 status=TurnoverStatus.DRAFT,
                 source_calendar_id=calendar.id,
                 external_ref=job.external_ref,
-                source_feed_key=this_feed,
                 # The database's clock, not ours — see `_touched_by_a_person`.
                 source_synced_at=func.now(),
             )
@@ -813,6 +767,15 @@ def _gate(calendar: PropertyCalendar, prop: Property) -> None:
     the answer can change, it has to be asked at both moments; if it is asked
     at both moments, it has to be the same question.
     """
+    # Two different facts, refused separately because the owner's way out of
+    # each is different: a paused feed is turned back on, a removed one is
+    # reconnected. One message covering both would be wrong for whoever is
+    # reading it.
+    if calendar.removed_at is not None:
+        raise CalendarError(
+            "This calendar was removed. Add the same address again to "
+            "reconnect it — the jobs it already proposed are still yours."
+        )
     if not calendar.is_active:
         raise CalendarError(
             "This calendar is switched off. Turn it back on to read it again."
@@ -1111,6 +1074,7 @@ def active_calendars(db: Session) -> list[PropertyCalendar]:
             .join(Property, Property.id == PropertyCalendar.property_id)
             .where(
                 PropertyCalendar.is_active.is_(True),
+                PropertyCalendar.removed_at.is_(None),
                 # The same rule `_refuse_ineligible` enforces, expressed in SQL
                 # so the pass does not fetch feeds it would then refuse. **That
                 # function is the authority**; this is an optimisation, and if
@@ -1127,12 +1091,80 @@ def active_calendars(db: Session) -> list[PropertyCalendar]:
 
 
 def for_property(db: Session, property_id: uuid.UUID) -> list[PropertyCalendar]:
+    """The feeds on this property's panel.
+
+    Archived ones are kept forever, because the jobs they proposed still point
+    at them, but they are **not** on the panel: to the owner they are removed,
+    and a list that showed them would make "Remove" look like it had not
+    worked.
+    """
     return list(
         db.execute(
             select(PropertyCalendar)
-            .where(PropertyCalendar.property_id == property_id)
+            .where(
+                PropertyCalendar.property_id == property_id,
+                PropertyCalendar.removed_at.is_(None),
+            )
             .order_by(PropertyCalendar.created_at)
         )
         .scalars()
         .all()
     )
+
+
+def archive(db: Session, calendar: PropertyCalendar) -> None:
+    """Remove a feed without destroying what its jobs are keyed to.
+
+    Idempotent on the marker: re-archiving keeps the first timestamp, since
+    "when was this removed" has one true answer and a second DELETE should not
+    rewrite it.
+
+    It is deliberately **not** paused as well. `is_active` is a separate fact
+    the owner set, and a feed reconnected later should come back in the state
+    they left it in rather than silently switched off — which would look like
+    the reconnect had failed.
+    """
+    if calendar.removed_at is None:
+        calendar.removed_at = datetime.now(timezone.utc)
+    db.commit()
+
+
+def reconnect(
+    db: Session, *, property_id: uuid.UUID, url: str, label: str
+) -> PropertyCalendar | None:
+    """Bring an archived feed back, or report that this is a real duplicate.
+
+    Returns `None` when the row that the URL collided with is **live** — that
+    is an owner adding the same feed twice, which is still refused.
+
+    The row is locked before its state is read, because two adds of the same
+    archived URL race otherwise: both see it archived, both reactivate, and the
+    second overwrites the first's label. Guardrail 1's shape applied to a state
+    transition, `populate_existing` included — a locking SELECT still hands
+    back the instance already in the session's identity map with its old
+    values, which is exactly the failure the lock was taken to prevent.
+    """
+    calendar = db.execute(
+        select(PropertyCalendar)
+        .where(
+            PropertyCalendar.property_id == property_id,
+            PropertyCalendar.url == url,
+        )
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    ).scalars().first()
+
+    if calendar is None or calendar.removed_at is None:
+        db.rollback()
+        return None
+
+    calendar.removed_at = None
+    calendar.label = label
+    # A reconnect is a fresh start for the *reading*, not for the jobs: the
+    # last error belonged to a feed nobody was watching, and showing it now
+    # would report a problem that may well be over. The epoch is deliberately
+    # left alone — it is a monotonic counter guarding concurrent reads, and
+    # resetting it would let an in-flight stale snapshot look current.
+    calendar.last_error = None
+    db.commit()
+    return calendar

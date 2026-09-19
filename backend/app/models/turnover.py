@@ -115,6 +115,15 @@ class Turnover(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     #: The calendar feed that proposed this job, if one did. Null on anything
     #: an owner posted themselves — which is most of them, and all of them
     #: before this existed.
+    #:
+    #: **It stays set when the owner removes that feed**, because removal
+    #: archives the calendar rather than deleting it. That is the whole of the
+    #: identity story: the row survives, so this never goes stale, and
+    #: reconnecting the same feed finds its own jobs instead of proposing every
+    #: booking a second time. `ON DELETE SET NULL` remains as a safety net for
+    #: a row deleted by hand, but nothing in the product deletes one — and
+    #: properties are archived rather than deleted, so the cascade that used to
+    #: reach here is unreachable in normal operation.
     source_calendar_id: Mapped[uuid.UUID | None] = mapped_column(
         PGUUID(as_uuid=True),
         ForeignKey("property_calendars.id", ondelete="SET NULL"),
@@ -131,18 +140,6 @@ class Turnover(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     source_synced_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
-    #: A digest of the feed URL that proposed this job. **Kept so identity can
-    #: survive its calendar being deleted**: removing a feed nulls
-    #: `source_calendar_id`, and re-adding the same feed adopts the orphans
-    #: rather than proposing every booking a second time — but "the same feed"
-    #: has to mean something, and a matching event id on the same property does
-    #: not prove it. Two different listings whose feeds reuse a UID string would
-    #: otherwise hand one's jobs to the other.
-    #:
-    #: A digest rather than the URL because the URL is a credential (see
-    #: `PropertyCalendar.url`) and this column sits on a row with
-    #: cleaner-facing shapes near it. Equality is all adoption needs.
-    source_feed_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
     #: When a **person** last changed this job, as opposed to the system
     #: maintaining it. This is the answer to the only question a re-sync asks:
     #: has somebody touched this? If they have, the feed does not get to argue.
