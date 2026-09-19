@@ -502,16 +502,67 @@ class TestTheOutbox:
         assert len(sent) == 1
 
 
+#: How CLAUDE.md spells the size of the list. Only as far as the list could
+#: plausibly grow before somebody notices it is long.
+NUMBER_WORDS = {
+    "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15,
+    "sixteen": 16, "seventeen": 17, "eighteen": 18, "nineteen": 19,
+    "twenty": 20,
+}
+
+
 class TestTheListItself:
+    def test_claude_md_says_how_many_events_there_are_and_is_right(self) -> None:
+        """**The guide's own claim, checked against the enum.**
+
+        This is here because it was got wrong, silently, and by me. A CLAUDE.md
+        edit adding `message_received` sat behind a failed assertion in the
+        script that wrote it, so the file kept saying *All sixteen have a
+        sender* and kept listing in-app messaging as out of scope — while the
+        product shipped both. Nothing failed: the test below transcribes the
+        list rather than reading it, so it passed on the enum alone.
+
+        That matters more here than in most repos. CLAUDE.md is the authority
+        the next person reads before touching this code, and a guide that
+        confidently describes a product two features ago is worse than no
+        guide, because it is trusted. Prose cannot be diffed against an enum —
+        but the *count* can, and the count is the sentence that goes stale
+        first.
+        """
+        import re
+        from pathlib import Path
+
+        guide = (Path(__file__).resolve().parents[2] / "CLAUDE.md").read_text(
+            encoding="utf-8"
+        )
+        match = re.search(r"\*\*All (\w+) have a sender\.\*\*", guide)
+        assert match, "CLAUDE.md no longer says how many notification events there are"
+
+        claimed = NUMBER_WORDS.get(match.group(1))
+        assert claimed is not None, (
+            f"CLAUDE.md says {match.group(1)!r} events, which is not a number "
+            "this test knows — add it to NUMBER_WORDS"
+        )
+        assert claimed == len(NotificationEvent), (
+            f"CLAUDE.md says there are {claimed} notification events and there "
+            f"are {len(NotificationEvent)}. The guide is the thing somebody "
+            "reads before touching this, so it goes stale loudly or not at all."
+        )
+
     def test_every_event_in_claude_md_is_declared(self) -> None:
         """The list is fixed before the feature is built, so it is a closed set.
 
-        Fifteen now, not the original twelve. `job_completed` came in phase 6
+        Seventeen now, not the original twelve. `job_completed` came in phase 6
         with the transition it belongs to; `dispute_raised` and
-        `dispute_resolved` came in phase 8 with the disputes table. Each time
+        `dispute_resolved` came in phase 8 with the disputes table;
+        `cleaner_en_route` and `message_received` came with theirs. Each time
         this test failed the moment the value appeared, which is exactly the
         conversation a new event is supposed to start — the list being closed
         is what makes opening it a decision rather than a habit.
+
+        It transcribes the list rather than reading CLAUDE.md, which is a real
+        limitation: see the test above, written after that gap let the guide
+        drift a whole feature behind the code.
         """
         assert {event.value for event in NotificationEvent} == {
             "turnover_posted",

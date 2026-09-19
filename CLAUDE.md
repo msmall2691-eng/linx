@@ -865,13 +865,14 @@ in `app/models/enums.py` holds exactly these and nothing else:
 - Dispute raised → an admin **and the person who raised it** (added in phase 8)
 - Dispute resolved → both parties, carrying the admin's note
 - Cleaner is on the way → owner
+- Message on a booked job → the other side
 
-**All sixteen have a sender.** Nothing is declared-and-unwired any more;
+**All seventeen have a sender.** Nothing is declared-and-unwired any more;
 the test that guarded that has flipped to guarding the other direction — a new
 enum value with nothing behind it fails, which is the conversation adding one is
 supposed to start.
 
-**The list has grown three times, each time on purpose.** `job_completed` was added in phase 6
+**The list has grown four times, each time on purpose.** `job_completed` was added in phase 6
 alongside the transition it belongs to. Before money hung off completion, "the
 cleaner says it is done" was nobody's business; now an owner who is never told
 is an owner who never pays, and a cleaner who did the work and hears nothing.
@@ -887,6 +888,13 @@ looking at, and the fallback is the phone call this product exists to replace.
 It goes to the owner and nobody else — no admin copy, because an inbox that
 receives every cleaner leaving the house is an inbox nobody reads the
 cancellations in.
+
+`message_received` was the fourth, and it is keyed differently from every
+other event here on purpose: the key is the **message's own id**, because the
+others exist to stop one transition being announced twice and each message
+genuinely is a separate thing to be told about. With no push channel in this
+product the email *is* the delivery mechanism rather than a convenience on top
+of one.
 
 **Three job signals, and only one of them notifies.** `awards.set_out`,
 `start_job` and `complete_job` write `en_route_at`, `started_at` and
@@ -1012,7 +1020,15 @@ Do not build toward these:
 - Rating-weighted search ranking — phase 7 shows a rating on the owner's bid list and on a cleaner's own profile, but nothing orders by it: the bid list stays cheapest-first and the bench board urgency-first, so a cleaner with no reviews is not buried in a marketplace short of supply
 - Multi-region logic — one region is hardcoded
 - Native mobile apps — responsive web only
-- In-app messaging — email/SMS notifications are enough at this size
+
+**In-app messaging came off this list**, and the reasoning it was on it for is
+worth keeping: *email and SMS notifications are enough at this size*. That is
+true of **notifications** — a one-way alert does not need a thread — and it was
+never true of the question a cleaner standing at a locked gate actually has.
+That question had nowhere to go: the product deliberately does not hand out the
+owner's phone number, so it was asked by a route the product does not support,
+or it went unasked and somebody guessed. See `app/services/messages.py`, and
+the privacy boundary above for why a thread widens nothing.
 
 ---
 
