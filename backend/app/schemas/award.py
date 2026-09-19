@@ -68,10 +68,33 @@ class AwardOut(BaseModel):
     #: what makes the turnover payable, so the owner's screen reads it here
     #: rather than inferring it from the status.
     started_at: datetime | None
+    #: `confirmed`, `away` or `unchecked` — see `awards.arrival_check`, which
+    #: is the only thing that decides it.
+    arrival_check: str
+    arrival_distance_m: int | None
     completed_at: datetime | None
     cancelled_at: datetime | None
     cancellation_reason: str | None
     was_no_show: bool
+
+
+class ArrivalIn(BaseModel):
+    """One reading from the cleaner's browser, at the moment they tapped.
+
+    **Every field is optional and the whole body may be omitted.** A refused
+    permission, a phone with no signal and a desktop browser are all ordinary
+    ways to arrive, and a shape that required a position would turn the check
+    into a gate on being able to say you had turned up at all.
+
+    The coordinates are used to compute one distance and are never stored.
+    """
+
+    lat: float | None = Field(default=None, ge=-90, le=90)
+    lng: float | None = Field(default=None, ge=-180, le=180)
+    #: What the fix claims about itself, in metres. Without it no conclusion is
+    #: drawn — see `awards.arrival_check`, where a coarse fix that happens to
+    #: land close by is `unchecked` rather than `confirmed`.
+    accuracy_m: float | None = Field(default=None, ge=0)
 
 
 class AwardCancel(BaseModel):

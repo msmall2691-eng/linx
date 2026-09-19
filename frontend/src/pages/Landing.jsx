@@ -200,9 +200,17 @@ export default function Landing() {
                 when they arrive. You&rsquo;re emailed the first one and can see
                 the whole job — set off, on site, finished, and how long it took.
               </p>
-              <p className="mt-3 inline-flex items-center gap-2 text-sm text-slate-400">
-                <Clock className="h-4 w-4" />
-                Times, not tracking — we don&rsquo;t follow anyone around.
+              <p className="mt-2 text-slate-300">
+                When they arrive, their phone confirms they&rsquo;re at the
+                property — once, if they allow it.
+              </p>
+              <p className="mt-3 inline-flex items-start gap-2 text-sm text-slate-400">
+                <Clock className="mt-0.5 h-4 w-4 shrink-0" />
+                <span>
+                  One check, not tracking. We keep how far away they were, never
+                  where they are, and a cleaner can decline without it counting
+                  against them.
+                </span>
               </p>
             </div>
 

@@ -36,6 +36,7 @@ told.
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select, update
@@ -48,7 +49,7 @@ from app.models.enums import BidStatus, TurnoverStatus
 from app.models.property import Property
 from app.models.turnover import Turnover
 from app.models.user import User
-from app.services import notifications, vetting
+from app.services import geo, notifications, vetting
 from app.services.turnovers import apply_derived_fields
 
 #: A cancellation inside this window of checkout is *late*: too close for the
@@ -257,12 +258,111 @@ def set_out(db: Session, *, turnover: Turnover, award: Award) -> Award:
     return award
 
 
-def start_job(db: Session, *, turnover: Turnover, award: Award) -> Award:
+#: How close counts as "at the property", in metres. Generous on purpose: a
+#: phone fix is routinely tens of metres out, worse beside a building or under
+#: trees, and the property's own coordinates are geocoded from an address
+#: rather than surveyed. **Accusing an honest cleaner is far worse than missing
+#: a dishonest one**, so the radius is sized for the first error, not the
+#: second.
+ARRIVAL_WITHIN_M = 200
+
+
+@dataclass(frozen=True)
+class AtLocation:
+    """What a browser said about where it was, once, at the arrival tap."""
+
+    lat: float
+    lng: float
+    #: The fix's own claimed accuracy in metres. Required rather than optional:
+    #: a distance without it cannot be read, and defaulting it to something
+    #: optimistic would be this module inventing evidence.
+    accuracy_m: float
+
+
+#: The three answers to "was the cleaner at the property when they said so".
+#:
+#: **Three rather than two, and the third is the point.** The obvious version
+#: has `confirmed` and `away`, which forces every reading it could not take —
+#: permission refused, no GPS, a desktop browser, a property with no
+#: coordinates, a fix too coarse to mean anything — into one of those two. Both
+#: are lies: `confirmed` invents evidence and `away` accuses somebody on the
+#: strength of a missing browser permission. It is the same shape as
+#: `launch.py`'s fourth state, for the same reason.
+ARRIVAL_CONFIRMED = "confirmed"
+ARRIVAL_AWAY = "away"
+ARRIVAL_UNCHECKED = "unchecked"
+
+
+def arrival_check(award: Award) -> str:
+    """Whether the arrival tap came from the property. **The only author.**
+
+    Reads the two columns and nothing else, so no screen re-derives the
+    threshold and the owner's view cannot disagree with the cleaner's about
+    what the same number means.
+
+    `unchecked` whenever a conclusion is not available, including the case that
+    is easy to miss: **a fix whose own claimed accuracy is worse than the
+    radius**. A reading accurate to ±30km that happens to land within 200m is
+    not evidence that anybody was anywhere, and treating it as confirmation
+    would make the tick most trustworthy exactly where the data is worst.
+    """
+    if award.arrival_distance_m is None:
+        return ARRIVAL_UNCHECKED
+    if (
+        award.arrival_accuracy_m is not None
+        and award.arrival_accuracy_m > ARRIVAL_WITHIN_M
+    ):
+        return ARRIVAL_UNCHECKED
+    return (
+        ARRIVAL_CONFIRMED
+        if award.arrival_distance_m <= ARRIVAL_WITHIN_M
+        else ARRIVAL_AWAY
+    )
+
+
+def _measure_arrival(db: Session, turnover: Turnover, at: AtLocation | None) -> tuple[
+    int | None, int | None
+]:
+    """Turn one reading into a distance, and forget the reading.
+
+    Returns `(None, None)` when no conclusion is possible, which includes a
+    property with no coordinates of its own — plenty of them, since geocoding
+    is best-effort and an owner can save an address it could not place.
+    """
+    if at is None:
+        return None, None
+    prop = db.execute(
+        select(Property).where(Property.id == turnover.property_id)
+    ).scalar_one_or_none()
+    if prop is None or prop.lat is None or prop.lng is None:
+        return None, None
+
+    miles = geo.haversine_miles(at.lat, at.lng, prop.lat, prop.lng)
+    # Rounded to whole metres. Nothing downstream wants more precision, and
+    # less precision is the direction to err in for a number about a person.
+    return round(miles * 1609.344), round(at.accuracy_m)
+
+
+def start_job(
+    db: Session,
+    *,
+    turnover: Turnover,
+    award: Award,
+    at: AtLocation | None = None,
+) -> Award:
     """The cleaner is on site. **The turnover row must already be locked.**
 
     Nothing but the screen hangs off this one — it exists so "started" and
     "finished" are two separate facts rather than one, which is what an owner
     asking "did anyone actually turn up" needs.
+
+    `at` is one reading from the cleaner's browser, taken at the tap and never
+    again. It is turned into a distance from the property and discarded; the
+    coordinates are not stored, which is what keeps this a confirmation rather
+    than a tracking feature. **It is optional in the strong sense**: a refused
+    permission, a phone with no signal or a desktop browser all produce a
+    perfectly ordinary arrival, and `arrival_check` answers `unchecked` rather
+    than holding it against anybody.
     """
     if award.cancelled_at is not None:
         raise AwardConflict("This booking has been cancelled.")
@@ -271,6 +371,14 @@ def start_job(db: Session, *, turnover: Turnover, award: Award) -> Award:
 
     if award.started_at is None:
         award.started_at = datetime.now(timezone.utc)
+        # Measured on the **first** arrival only, matching the timestamp beside
+        # it. A second tap is not a second arrival, and letting it overwrite
+        # would let somebody who arrived late re-record themselves as on time
+        # from the doorstep.
+        distance, accuracy = _measure_arrival(db, turnover, at)
+        if distance is not None:
+            award.arrival_distance_m = distance
+            award.arrival_accuracy_m = accuracy
     turnover.status = TurnoverStatus.IN_PROGRESS
     db.commit()
     return award
